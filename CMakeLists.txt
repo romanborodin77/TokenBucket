@@ -6,8 +6,12 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Test)
 find_package(unofficial-sodium CONFIG REQUIRED)
 qt_standard_project_setup()
 
+add_library(tokenbucket_core STATIC src/vault/Crypto.cpp)
+target_include_directories(tokenbucket_core PUBLIC src)
+target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets unofficial-sodium::sodium)
+
 qt_add_executable(TokenBucket WIN32 src/main.cpp)
-target_link_libraries(TokenBucket PRIVATE Qt6::Widgets unofficial-sodium::sodium)
+target_link_libraries(TokenBucket PRIVATE tokenbucket_core)
 
 if(WIN32)
   target_link_libraries(TokenBucket PRIVATE crypt32 user32 wtsapi32 windowsapp)
