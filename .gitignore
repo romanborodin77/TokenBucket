@@ -1,0 +1,6 @@
+/build/
+/out/
+/dist/
+tools/vcpkg/
+.superpowers/
+*.user
