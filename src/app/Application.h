@@ -32,6 +32,7 @@ public:
     bool createPasswordVault(const QByteArray& pw, QString* err);
     bool unlock(const QByteArray& pw, QString* err);
     bool save(QString* err);
+    bool checkPassword(const QByteArray& pw, QString* err);
     void lock();
     model::VaultModel* model() { return &model_; }
     quint64 generation() const { return generation_.load(); }
@@ -39,6 +40,7 @@ public:
 #ifdef Q_OS_WIN
     bool createHelloVault(QString* err, void* hwnd = nullptr);
     bool unlockHello(QString* err, void* hwnd = nullptr);
+    bool verifyHello(void* hwnd, QString* err);
 #endif
 signals:
     void stateChanged();

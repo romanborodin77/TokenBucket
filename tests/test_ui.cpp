@@ -22,6 +22,7 @@
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/EntryEditDialog.h"
+#include "../src/ui/EntryCard.h"
 using namespace tb;
 class TestUi : public QObject {
     Q_OBJECT
@@ -218,6 +219,37 @@ private slots:
             dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
             QVERIFY(!dialog.entry()); QVERIFY(!dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().isEmpty());
         }
+    }
+    void cardRequiresExplicitRevealAndHides() {
+        Application app(dir_.path() + "/card"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group; entry.title = "Токен"; entry.token = "test-secret";
+        QVERIFY(app.model()->setEntry(entry).isEmpty()); QVERIFY(app.save(&error));
+        ui::EntryCard card(app); card.showEntry(entry.id); QVERIFY(!card.secretText().contains("test-secret"));
+        card.revealButton()->click(); QVERIFY(card.secretText().contains("test-secret"));
+        auto* timer = card.findChild<QTimer*>(QStringLiteral("secretHideTimer")); QVERIFY(timer); QCOMPARE(timer->interval(),15000);
+        timer->setInterval(1); QTRY_VERIFY(!card.secretText().contains("test-secret"));
+        card.revealButton()->click(); QVERIFY(card.secretText().contains("test-secret"));
+        app.lock(); QVERIFY(!card.secretText().contains("test-secret")); QVERIFY(!card.revealButton()->isEnabled());
+    }
+    void cardReverificationIsBoundToSelectionAndGeneration() {
+        Application app(dir_.path() + "/card-verify"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry first; first.id = QUuid::createUuid(); first.groupId = group; first.title = "Первый"; first.token = "first-secret"; first.reverify = true;
+        auto second = first; second.id = QUuid::createUuid(); second.token = "second-secret"; second.reverify = false;
+        QVERIFY(app.model()->setEntry(first).isEmpty()); QVERIFY(app.model()->setEntry(second).isEmpty()); QVERIFY(app.save(&error));
+        ui::EntryCard card(app); card.showEntry(first.id);
+        QTimer::singleShot(0, &card, [] { if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) dialog->reject(); });
+        card.revealButton()->click(); QVERIFY(!card.secretText().contains("first-secret"));
+        QTimer::singleShot(0, &card, [] { if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) { dialog->setTextValue(QStringLiteral("valid-password")); dialog->accept(); } });
+        card.revealButton()->click(); QVERIFY(card.secretText().contains("first-secret")); QVERIFY(app.save(&error));
+        card.hideNowForTest();
+        QSignalSpy copies(&card, &ui::EntryCard::copyRequested);
+        QTimer::singleShot(0, &card, [&] { if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) { card.showEntry(second.id); dialog->setTextValue(QStringLiteral("valid-password")); dialog->accept(); } });
+        card.findChild<QPushButton*>(QStringLiteral("copySecretButton"))->click(); QCOMPARE(copies.size(), 0);
+        card.showEntry(first.id);
+        QTimer::singleShot(0, &card, [&] { app.lock(); }); card.revealButton()->click();
+        QVERIFY(!card.secretText().contains("first-secret")); QVERIFY(!card.secretText().contains("second-secret"));
     }
 };
 QTEST_MAIN(TestUi)

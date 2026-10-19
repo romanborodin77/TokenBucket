@@ -1,9 +1,11 @@
 #pragma once
 #include <QMainWindow>
 #include "../app/Application.h"
+#include "../platform/ClipboardGuard.h"
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget;
-class QPlainTextEdit; class QLabel; class QAction;
+class QScrollArea; class QLabel; class QAction;
 namespace tb::ui {
+class EntryCard;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -12,6 +14,7 @@ public:
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
     QLineEdit* search() const { return search_; }
+    EntryCard* card() const { return card_; }
 signals:
     void closing();
 public slots:
@@ -33,6 +36,7 @@ private:
     void updateEnabled();
     void refillList(model::Id entry = {});
     void showMetadata();
+    void openCardDialog();
     void selectNode(model::Id id);
     model::Id selectedNode() const;
     model::Id selectedEntry() const;
@@ -41,9 +45,11 @@ private:
     QListWidget* list_{};
     QLineEdit* search_{};
     QStackedWidget* right_{};
-    QPlainTextEdit* details_{};
+    EntryCard* card_{};
+    QScrollArea* cardScroll_{};
+    ClipboardGuard clipboard_;
     QLabel* error_{};
     QList<QAction*> mutations_;
-    bool editing_ = false, narrow_ = false;
+    bool editing_ = false, narrow_ = false, cardOpen_ = false;
 };
 }

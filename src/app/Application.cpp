@@ -74,18 +74,19 @@ bool Application::execute(std::function<std::shared_ptr<Outcome>(quint64)> job, 
     })); }
     catch (...) { result = std::make_shared<Outcome>(); result->error = QStringLiteral("Не удалось выполнить операцию хранилища."); }
     bool ok = result->ok;
+    const bool changed = ok && !result->file.isEmpty();
     if (ok && !result->file.isEmpty()) { hasVault_ = true; hint_ = mode; }
     if (generation != generation_) {
         ok = false; result->error = QStringLiteral("Операция отменена блокировкой хранилища.");
         gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
     } else if (ok) {
-        file_ = std::move(result->file);
+        if (!result->file.isEmpty()) file_ = std::move(result->file);
         if (adopt) { model_ = std::move(result->model); dataKey_ = std::move(result->key); mode_ = mode; gate_ = Gate::Ready; }
     }
     if (err) *err = ok ? QString() : result->error;
     result.reset();
     busy_ = false; emit busyChanged(false);
-    if (ok || generation != generation_) emit stateChanged();
+    if (changed || generation != generation_) emit stateChanged();
     return ok;
 }
 bool Application::createPasswordVault(const QByteArray& pw, QString* err) {
@@ -138,7 +139,29 @@ void Application::lock() {
     gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
     emit stateChanged();
 }
+bool Application::checkPassword(const QByteArray& pw, QString* err) {
+    if (!canStart(Gate::Ready, err)) return false;
+    if (mode_ != Mode::Password || !validPassword(pw)) return fail(err, "Неверный мастер-пароль.");
+    auto secret = std::make_shared<SecureBytes>(pw); const auto file = file_;
+    auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
+    return execute([this, secret, file, key](quint64) {
+        auto result = std::make_shared<Outcome>(); QByteArray current;
+        if (store_.loadBytes(store_.mainPath(), &current) == store::VaultStore::Load::Ok && current == file) {
+            auto opened = container::openPassword(current, secret->bytes()); SecureBytes plain(std::move(opened.cbor));
+            result->ok = opened.status == container::Status::Ok && opened.dataKey == *key;
+        }
+        secret->clear(); if (!result->ok) result->error = QStringLiteral("Неверный пароль или файл изменился. Откройте хранилище заново."); return result;
+    }, Mode::Password, false, err);
+}
 #ifdef Q_OS_WIN
+bool Application::verifyHello(void* hwnd, QString* err) {
+    if (!canStart(Gate::Ready, err)) return false;
+    if (mode_ != Mode::Hello) return fail(err, "Хранилище не использует Windows Hello.");
+    return execute([this, hwnd](quint64) {
+        auto result = std::make_shared<Outcome>(); result->ok = hello_(hwnd, QStringLiteral("Подтвердите доступ к секрету")) == platform::hello::Result::Verified;
+        if (!result->ok) result->error = QStringLiteral("Проверка Windows Hello не выполнена."); return result;
+    }, Mode::Hello, false, err);
+}
 bool Application::createHelloVault(QString* err, void* hwnd) {
     if (!canStart(Gate::NeedSetup, err)) return false;
     return execute([this, hwnd](quint64 expected) {

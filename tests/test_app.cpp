@@ -160,6 +160,14 @@ private slots:
         QVERIFY(!app.createHelloVault(&err)); QVERIFY(!err.isEmpty());
         QVERIFY(!QFile::exists(app.storePathForTest()));
     }
+    void verificationDoesNotReplaceOpenState() {
+        Application app(dir_.path() + "/verify-password"); QString error;
+        QVERIFY(app.createPasswordVault("valid-password", &error));
+        QVERIFY(!app.checkPassword("wrong-password", &error)); QVERIFY(app.checkPassword("valid-password", &error));
+        QVERIFY(app.save(&error));
+        Application hello(dir_.path() + "/verify-hello", nullptr, [](void*, const QString&) { return platform::hello::Result::Verified; });
+        QVERIFY(hello.createHelloVault(&error)); QVERIFY(hello.verifyHello(nullptr, &error)); QVERIFY(hello.save(&error));
+    }
 #endif
 };
 QTEST_MAIN(TestApp)

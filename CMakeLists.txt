@@ -16,6 +16,9 @@ add_library(tokenbucket_core STATIC
   src/ui/UnlockDialog.cpp
   src/ui/EntryEditDialog.cpp
   src/ui/MainWindow.cpp
+  src/platform/ClipboardGuard.cpp
+  src/ui/EntryCard.cpp
+  src/ui/VerifyDialog.cpp
 )
 target_include_directories(tokenbucket_core PUBLIC src)
 target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent unofficial-sodium::sodium)
@@ -26,7 +29,7 @@ target_link_libraries(TokenBucket PRIVATE tokenbucket_core)
 if(WIN32)
   target_sources(tokenbucket_core PRIVATE src/platform/fileops_win.cpp)
   target_sources(tokenbucket_core PRIVATE src/platform/hello_win.cpp)
-  target_link_libraries(tokenbucket_core PUBLIC windowsapp)
+  target_link_libraries(tokenbucket_core PUBLIC windowsapp user32)
   target_link_libraries(tokenbucket_core PUBLIC advapi32)
   target_link_libraries(tokenbucket_core PUBLIC crypt32)
   target_link_libraries(TokenBucket PRIVATE crypt32 user32 wtsapi32 windowsapp)

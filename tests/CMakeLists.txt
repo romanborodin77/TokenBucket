@@ -19,3 +19,4 @@ tb_add_test(test_store)
 tb_add_test(test_app)
 
 tb_add_test(test_ui)
+tb_add_test(test_clipboard)

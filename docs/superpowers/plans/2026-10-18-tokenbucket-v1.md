@@ -2433,7 +2433,7 @@ git commit -m "Интерфейс: дерево/список/карточка, C
 
 Правило: показ секрета выполняется только после `VerifyDialog::verify`, если `entry->reverify == true`; каждое копирование защищённой записи — новая проверка.
 
-- [ ] **Step 1: Failing-тест (добавить в `tests/test_ui.cpp`)**
+- [x] **Step 1: Failing-тест (добавить в `tests/test_ui.cpp`)**
 
 ```cpp
     void cardHidesSecretsUntilReveal() {
@@ -2460,7 +2460,7 @@ git commit -m "Интерфейс: дерево/список/карточка, C
 
 Открыть в `MainWindow`: `EntryCard* card() const;`. В `EntryCard`: `QString secretText() const; QPushButton* revealButton() const; void hideNowForTest();`.
 
-- [ ] **Step 2: Реализовать `VerifyDialog` и `Application::checkPassword`**
+- [x] **Step 2: Реализовать `VerifyDialog` и `Application::checkPassword`**
 
 `src/ui/VerifyDialog.h/.cpp`:
 
@@ -2516,7 +2516,7 @@ bool Application::checkPassword(const QByteArray& pw, QString* err) {
 }
 ```
 
-- [ ] **Step 3: Реализовать `src/ui/EntryCard.h/.cpp`**
+- [x] **Step 3: Реализовать `src/ui/EntryCard.h/.cpp`**
 
 ```cpp
 #pragma once
@@ -2610,12 +2610,12 @@ void EntryCard::hideNowForTest() { hideTimer_->stop(); hideField(value_); hideFi
 
 В `MainWindow`: заменить placeholder правой панели на `EntryCard`, добавить `card()` и `#include "EntryCard.h"`; при выборе записи в списке вызывать `card_->showEntry(id)`; подписать `connect(card_, &EntryCard::copyRequested, ...)` на временный прямой `QClipboard setText` (Задача 9 заменит на `ClipboardGuard`). Также скрытие при потере фокуса: `focusOutEvent` окна вызывает `card_->hideNowForTest()` — подключить через `installEventFilter` в `MainWindow` на себя: при `QEvent::WindowDeactivate` вызвать `card_->hideNowForTest()`.
 
-- [ ] **Step 4: Собрать и прогнать (test_ui с новым кейсом)**
+- [x] **Step 4: Собрать и прогнать (test_ui с новым кейсом)**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS. Тест не требует ручного подтверждения: `reverify=false`, проверка не вызывается.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/ui/EntryCard.h src/ui/EntryCard.cpp src/ui/VerifyDialog.h src/ui/VerifyDialog.cpp src/app/Application.h src/app/Application.cpp src/ui/MainWindow.h src/ui/MainWindow.cpp tests/test_ui.cpp CMakeLists.txt tests/CMakeLists.txt
@@ -2634,7 +2634,7 @@ git commit -m "Карточка: скрытие по умолчанию, пок�
 - Consumes: QApplication (QClipboard / WinAPI).
 - Produces: `tb::ClipboardGuard : QObject { explicit ClipboardGuard(QObject* parent = nullptr); bool copySecret(const QString& text, QString* err); void clearIfOurs(); signals: void cleared(); }`. Поведение: очистка через 20 с после копирования; очистка только если буфер всё ещё наш (Windows: `GetClipboardSequenceNumber()` не изменился; иначе: `QClipboard::ownsClipboard()`); при занятом буфере Windows (OpenClipboard fail) — три попытки с паузой 50 мс, затем ошибка; Linux — только `QClipboard::Clipboard`, никогда `QClipboard::Selection`.
 
-- [ ] **Step 1: Failing-тест `tests/test_clipboard.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_clipboard.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -2680,7 +2680,7 @@ QTEST_MAIN(TestClipboard)
 
 Тесты используют `triggerClearNowForTest()` — публичный метод, выполняющий логику очистки немедленно (тот же код, что и по таймеру).
 
-- [ ] **Step 2: Реализовать `src/platform/ClipboardGuard.h/.cpp`**
+- [x] **Step 2: Реализовать `src/platform/ClipboardGuard.h/.cpp`**
 
 `src/platform/ClipboardGuard.h`:
 
@@ -2784,16 +2784,16 @@ void ClipboardGuard::clearIfOurs() {
 
 Включить `#include <QWindow>` при необходимости. На Windows тест `foreignContentNotCleared` работает, т.к. `QClipboard::setText` тоже меняет sequence number.
 
-- [ ] **Step 3: Подключить в MainWindow**
+- [x] **Step 3: Подключить в MainWindow**
 
 `MainWindow` создаёт `ClipboardGuard guard_;` (член), `copyRequested` → `guard_.copySecret(text, &err)` с `QMessageBox` при отказе. Удалить временный прямой `setText` из Задачи 8.
 
-- [ ] **Step 4: Собрать и прогнать**
+- [x] **Step 4: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS (5 тестов буфера; на Windows реально работают sequence numbers).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/platform/ClipboardGuard.h src/platform/ClipboardGuard.cpp src/ui/MainWindow.h src/ui/MainWindow.cpp tests/test_clipboard.cpp CMakeLists.txt tests/CMakeLists.txt

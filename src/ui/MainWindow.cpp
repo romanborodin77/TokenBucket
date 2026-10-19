@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "EntryEditDialog.h"
+#include "EntryCard.h"
 #include <QAction>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -24,6 +25,7 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QScreen>
+#include <QScrollArea>
 #include <QVBoxLayout>
 #include <algorithm>
 namespace tb::ui {
@@ -58,17 +60,26 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     right_ = new QStackedWidget(splitter); right_->setObjectName(QStringLiteral("entryPanel"));
     auto* hint = new QLabel(QStringLiteral("Создайте проект и добавьте запись или выберите существующую запись."), right_);
     hint->setWordWrap(true); hint->setTextFormat(Qt::PlainText); right_->addWidget(hint);
-    details_ = new QPlainTextEdit(right_); details_->setReadOnly(true); details_->setObjectName(QStringLiteral("entryDetails")); details_->setAccessibleName(QStringLiteral("Сведения о записи без секретных значений")); right_->addWidget(details_);
+    cardScroll_ = new QScrollArea(right_); cardScroll_->setWidgetResizable(true); cardScroll_->setFrameShape(QFrame::NoFrame);
+    card_ = new EntryCard(app_, cardScroll_); cardScroll_->setWidget(card_); right_->addWidget(cardScroll_);
     splitter->addWidget(tree_); splitter->addWidget(list_); splitter->addWidget(right_); splitter->setSizes({250,300,500}); layout->addWidget(splitter, 1);
     error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
     setCentralWidget(central);
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { refillList(); });
     connect(search_, &QLineEdit::textChanged, this, [this] { refillList(); });
     connect(list_, &QListWidget::currentItemChanged, this, &MainWindow::showMetadata);
-    connect(list_, &QListWidget::itemDoubleClicked, this, &MainWindow::editSelected);
-    connect(&app_, &Application::busyChanged, this, [this](bool busy) { updateEnabled(); if (busy) statusBar()->showMessage(QStringLiteral("Сохранение…")); });
+    connect(list_, &QListWidget::itemDoubleClicked, this, [this] { if (!narrow_) editSelected(); });
+    connect(list_, &QListWidget::itemClicked, this, &MainWindow::openCardDialog);
+    connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
+    connect(card_, &EntryCard::copyRequested, this, [this](const QString& text) {
+        if (!ready()) return; QString error;
+        if (!clipboard_.copySecret(text, &error)) { if (app_.gate() == Application::Gate::Ready) report(error); }
+        else statusBar()->showMessage(QStringLiteral("Скопировано. Очистка буфера через 20 секунд."), 5000);
+    });
+    connect(&app_, &Application::busyChanged, this, [this](bool busy) { updateEnabled(); statusBar()->showMessage(busy ? QStringLiteral("Выполняется операция…") : QString()); });
     connect(&app_, &Application::stateChanged, this, [this] {
         if (app_.gate() != Application::Gate::Ready) {
+            clipboard_.clearIfOurs(); card_->clear();
             for (auto* dialog : findChildren<QDialog*>()) {
                 if (auto* editDialog = qobject_cast<EntryEditDialog*>(dialog)) editDialog->clearSecrets();
                 dialog->reject();
@@ -126,18 +137,19 @@ void MainWindow::refillList(model::Id selected) {
     showMetadata();
 }
 void MainWindow::showMetadata() {
-    details_->clear(); const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(selectedEntry()) : nullptr;
-    right_->setCurrentIndex(entry ? 1 : 0); if (!entry) return;
-    const QString type = entry->type == model::EntryType::ApiToken ? QStringLiteral("API-токен") : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("SSH-ключ");
-    QStringList text{entry->title, type};
-    if (!entry->login.isEmpty()) text << QStringLiteral("Логин: ") + entry->login;
-    if (!entry->url.isEmpty()) text << QStringLiteral("Адрес: ") + entry->url;
-    if (!entry->note.isEmpty()) text << QStringLiteral("\n") + entry->note;
-    if (!entry->sshComment.isEmpty()) text << entry->sshComment;
-    if (entry->modified.isValid()) text << QStringLiteral("Изменено: %1").arg(entry->modified.toLocalTime().toString(QStringLiteral("dd.MM.yyyy HH:mm")));
-    text << QStringLiteral("\nСекретные значения скрыты."); details_->setPlainText(text.join('\n'));
+    const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(selectedEntry()) : nullptr;
+    right_->setCurrentIndex(entry ? 1 : 0); if (!entry) { card_->clear(); return; }
+    card_->showEntry(entry->id);
 }
-void MainWindow::report(const QString& error) { error_->setText(error); statusBar()->showMessage(QStringLiteral("Изменение не сохранено.")); }
+void MainWindow::openCardDialog() {
+    if (!narrow_ || !ready() || cardOpen_ || selectedEntry().isNull()) return;
+    QScopedValueRollback guard(cardOpen_, true); QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("TokenBucket — запись"));
+    auto* layout = new QVBoxLayout(&dialog); auto* scroll = new QScrollArea(&dialog); scroll->setWidgetResizable(true);
+    cardScroll_->takeWidget(); scroll->setWidget(card_); layout->addWidget(scroll);
+    auto restore = qScopeGuard([&] { card_->hideNowForTest(); scroll->takeWidget(); cardScroll_->setWidget(card_); });
+    const auto available = screen()->availableGeometry(); dialog.resize(qMin(520, available.width() - 40), qMin(560, available.height() - 80)); dialog.exec();
+}
+void MainWindow::report(const QString& error) { error_->setText(error); statusBar()->showMessage(QStringLiteral("Операция не выполнена.")); }
 bool MainWindow::commit(const std::function<QString(model::VaultModel&)>& mutation) {
     if (!ready()) return false;
     auto before = *app_.model(); const auto generation = app_.generation();
