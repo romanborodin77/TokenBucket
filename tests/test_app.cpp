@@ -87,6 +87,15 @@ private slots:
         QVERIFY(!app.unlock("valid-password", &err));
         QCOMPARE(app.gate(), Application::Gate::NeedUnlock); QVERIFY(app.model()->nodes().isEmpty());
     }
+    void oversizedModelCannotChangeSavedFile() {
+        Application app(dir_.path() + "/oversized-model"); QString err;
+        QVERIFY(app.createPasswordVault("valid-password", &err));
+        const auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "Проект").isEmpty());
+        model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group;
+        entry.note = QString(int(container::MaxPlainBytes), QChar('x')); QVERIFY(app.model()->setEntry(entry).isEmpty());
+        QVERIFY(!app.save(&err)); QVERIFY(err.contains(QStringLiteral("64")));
+        app.lock(); QVERIFY(app.unlock("valid-password", &err)); QVERIFY(app.model()->nodes().isEmpty());
+    }
     void setupValidatesAndClearsSecrets() {
         SetupDialog dialog(false);
         dialog.show(); dialog.adjustSize();

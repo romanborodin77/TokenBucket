@@ -14,6 +14,8 @@ add_library(tokenbucket_core STATIC
   src/app/Application.cpp
   src/ui/SetupDialog.cpp
   src/ui/UnlockDialog.cpp
+  src/ui/EntryEditDialog.cpp
+  src/ui/MainWindow.cpp
 )
 target_include_directories(tokenbucket_core PUBLIC src)
 target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent unofficial-sodium::sodium)

@@ -1,16 +1,14 @@
 #include <QApplication>
-#include <QDialogButtonBox>
+#include <QEventLoop>
 #include <QFutureWatcher>
-#include <QLabel>
 #include <QMessageBox>
 #include <QProgressDialog>
-#include <QPushButton>
 #include <QStandardPaths>
-#include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 #include "app/Application.h"
 #include "ui/SetupDialog.h"
 #include "ui/UnlockDialog.h"
+#include "ui/MainWindow.h"
 namespace {
 bool run(tb::Application& core, const std::function<bool(void*, QString*)>& operation, QString* err) {
     QProgressDialog progress(QStringLiteral("Обработка хранилища…"), QStringLiteral("Отменить"), 0, 0);
@@ -27,7 +25,8 @@ int start() {
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
     if (!instanceLock) { QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), error); return 1; }
     tb::Application core(dir);
-    QObject::connect(qApp, &QCoreApplication::aboutToQuit, &core, &tb::Application::lock);
+    bool quitting = false;
+    QObject::connect(qApp, &QCoreApplication::aboutToQuit, &core, [&] { quitting = true; core.lock(); });
     for (;;) {
         if (core.gate() == tb::Application::Gate::NeedSetup) {
             SetupDialog dialog(false);
@@ -67,17 +66,13 @@ int start() {
             password.clear();
             if (!ok) { QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"), error); continue; }
         } else {
-            QDialog window; window.setWindowTitle(QStringLiteral("TokenBucket"));
-            auto* layout = new QVBoxLayout(&window);
-            layout->addWidget(new QLabel(QStringLiteral("Хранилище разблокировано. Интерфейс записей — следующий этап."), &window));
-            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Close, &window);
-            buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Заблокировать"));
-            buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("Закрыть"));
-            layout->addWidget(buttons);
-            QObject::connect(buttons, &QDialogButtonBox::accepted, &window, &QDialog::accept);
-            QObject::connect(buttons, &QDialogButtonBox::rejected, &window, &QDialog::reject);
-            const int result = window.exec(); core.lock();
-            if (result != QDialog::Accepted) return 0;
+            QEventLoop loop; tb::ui::MainWindow window(core); bool closed = false;
+            QObject::connect(&window, &tb::ui::MainWindow::closing, &loop, [&] { closed = true; loop.quit(); });
+            QObject::connect(&core, &tb::Application::stateChanged, &loop, [&] {
+                if (core.gate() != tb::Application::Gate::Ready) loop.quit();
+            });
+            window.show(); loop.exec();
+            if (closed || quitting) return 0;
         }
     }
 }

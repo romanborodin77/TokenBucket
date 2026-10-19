@@ -119,6 +119,7 @@ bool Application::unlock(const QByteArray& pw, QString* err) {
 bool Application::save(QString* err) {
     if (!canStart(Gate::Ready, err)) return false;
     auto plain = std::make_shared<SecureBytes>(model_.toCbor());
+    if (plain->size() > container::MaxPlainBytes) return fail(err, "Содержимое хранилища превышает 64 МиБ.");
     auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
     const auto file = file_;
     return execute([this, plain, key, file](quint64 expected) {

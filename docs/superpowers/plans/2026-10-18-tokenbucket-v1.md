@@ -2001,6 +2001,15 @@ git commit -m "Приложение: создание/разблокировка
 ---
 
 ### Task 7: MainWindow — дерево, список, карточка, CRUD, поиск
+Актуальные решения реализации (2026-10-19, приоритет над исходными эскизами ниже):
+
+- MainWindow содержит дерево, список и сведения без секретных значений. Полноценный показ/копирование остаётся Задаче 8. Поиск глобальный; выбранные UUID сохраняются при обновлении. Проекты/группы переименовываются и переносятся через отдельные действия; удаление подтверждается, непустые узлы защищает модель.
+- Все мутации проходят общий commit: снимок модели, проверка, save, видимый отказ и откат. При блокировке снимок очищается и не восстанавливается. busy запрещает изменение UI; блокировка закрывает редакторы, очищает поля и скрывает окно. Поддерживается повторный цикл разблокировки в main.
+- EntryEditDialog сохраняет прежний приватный ключ, пока явно не выбран новый файл. Комментарий не используется как путь, публичный ключ без правок сохраняется исходными байтами. Тип существующей записи фиксирован: преобразование между типами не согласовано. Неактивные типовые секретные поля не сохраняются.
+- Импорт SSH уже проверяет ограничение 1 МиБ и границы контейнера OpenSSH/PEM; чтение выполняется в рабочем потоке, байты не перекодируются. Проверка не является криптографической валидацией. В Задаче 12 использовать существующий импорт, не дублировать его.
+- Штатные Qt-формы используют подписи, маскирование, прокрутку и адаптацию к доступному экрану. Секретные поля не обрезаются стандартным пределом QLineEdit в 32767 символов; проверяются лимиты UTF-8 модели. Save явно сообщает превышение 64 МиБ до шифрования.
+- Проверки: Release build exit 0; CTest 7/7; TestUi покрывает диалоги всех типов, сохранение/открытие, перенос/удаление, отказ записи и блокировку. Дополнительно выполнен автоматизированный нативный Qt Windows-прогон при QT_SCALE_FACTOR=1 и 2; рендеры основного окна и редактора просмотрены.
+- Ручной перезапуск отдельного TokenBucket.exe с вводом владельца ещё не выполнен; автоматизированный GUI-прогон использует временное хранилище и повторное открытие Application. Ручная проверка отдельного процесса остаётся в матрице приёмки и не подменяется автотестом.
 
 **Files:**
 - Create: `src/ui/MainWindow.h`, `src/ui/MainWindow.cpp`, `src/ui/EntryEditDialog.h`, `src/ui/EntryEditDialog.cpp`, `tests/test_ui.cpp`
@@ -2010,7 +2019,7 @@ git commit -m "Приложение: создание/разблокировка
 - Consumes: `tb::Application`, `tb::model::*`.
 - Produces: `tb::ui::MainWindow { explicit MainWindow(tb::Application&, QWidget* parent=nullptr); void refreshAll(); }` — слоты CRUD доступны для тестов как public-методы: `void addProject(); void addGroup(); void addEntry(); void editSelected(); void deleteSelected();` и поле поиска `QLineEdit* search() const;`. `EntryEditDialog { EntryEditDialog(const VaultModel&, std::optional<model::Entry> existing, QWidget*); std::optional<model::Entry> entry() const; }`.
 
-- [ ] **Step 1: Failing-тест `tests/test_ui.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_ui.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -2054,9 +2063,9 @@ QTEST_MAIN(TestUi)
 
 В `MainWindow` для тестов открыть `QTreeWidget* tree() const; QListWidget* list() const;` (public).
 
-- [ ] **Step 2: Подключить цель `test_ui` (Qt6::Widgets), запуск — FAIL**
+- [x] **Step 2: Подключить цель `test_ui` (Qt6::Widgets), запуск — FAIL**
 
-- [ ] **Step 3: Реализовать `src/ui/EntryEditDialog.h/.cpp`**
+- [x] **Step 3: Реализовать `src/ui/EntryEditDialog.h/.cpp`**
 
 ```cpp
 #pragma once
@@ -2182,7 +2191,7 @@ void EntryEditDialog::accept() {
 }
 ```
 
-- [ ] **Step 4: Реализовать `src/ui/MainWindow.h/.cpp`**
+- [x] **Step 4: Реализовать `src/ui/MainWindow.h/.cpp`**
 
 `src/ui/MainWindow.h`:
 
@@ -2384,7 +2393,7 @@ void MainWindow::showCard(model::Id id) {
 }
 ```
 
-- [ ] **Step 5: `src/main.cpp` — после разблокировки показывать MainWindow**
+- [x] **Step 5: `src/main.cpp` — после разблокировки показывать MainWindow**
 
 Заменить финальный `QMessageBox::information(...)` на:
 
@@ -2403,7 +2412,7 @@ Expected: PASS.
 
 Ручная проверка (не автотест): запустить `build/TokenBucket.exe`, создать хранилище с паролем, создать проект/группу/записи всех трёх типов, перезапустить приложение и убедиться, что данные читаются. Результат записать в `docs/build/manual-checks.md` одной строкой на проверку.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/ui/MainWindow.h src/ui/MainWindow.cpp src/ui/EntryEditDialog.h src/ui/EntryEditDialog.cpp src/main.cpp tests/test_ui.cpp CMakeLists.txt tests/CMakeLists.txt docs/build/manual-checks.md
