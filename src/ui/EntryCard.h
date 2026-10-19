@@ -13,6 +13,7 @@ public:
     QString secretText() const;
     QPushButton* revealButton() const { return reveal_; }
     void hideNowForTest();
+    static bool isSafeTarget(const QString& path, QString* err);
 signals:
     void copyRequested(const QString& text);
 protected:
@@ -20,13 +21,14 @@ protected:
 private:
     bool authorize();
     void copyField(int field);
+    void saveSshToFile();
     void updateEnabled();
     Application& app_;
     model::Id id_;
     quint64 selection_ = 0;
     QLabel *title_{}, *metadata_{}, *error_{};
     QPlainTextEdit* value_{};
-    QPushButton *reveal_{}, *copySecret_{}, *copyLogin_{}, *copyPhrase_{};
+    QPushButton *reveal_{}, *copySecret_{}, *copyLogin_{}, *copyPhrase_{}, *sshToFile_{};
     QTimer hideTimer_;
 };
 }

@@ -2,10 +2,15 @@
 #include "VerifyDialog.h"
 #include <QApplication>
 #include <QEvent>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include "../platform/FileOps.h"
 namespace tb::ui {
 EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(app) {
     auto* layout = new QVBoxLayout(this);
@@ -19,7 +24,8 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     copySecret_ = new QPushButton(QStringLiteral("Копировать секрет"), this); copySecret_->setObjectName(QStringLiteral("copySecretButton"));
     copyLogin_ = new QPushButton(QStringLiteral("Копировать логин"), this);
     copyPhrase_ = new QPushButton(QStringLiteral("Копировать фразу ключа"), this);
-    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_}) layout->addWidget(button);
+    sshToFile_ = new QPushButton(QStringLiteral("Сохранить ключ в файл…"), this); sshToFile_->setObjectName(QStringLiteral("sshToFileButton"));
+    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) layout->addWidget(button);
     layout->addWidget(error_);
     hideTimer_.setParent(this); hideTimer_.setObjectName(QStringLiteral("secretHideTimer")); hideTimer_.setSingleShot(true); hideTimer_.setInterval(15000);
     connect(&hideTimer_, &QTimer::timeout, this, &EntryCard::hideNowForTest);
@@ -31,13 +37,14 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(copySecret_, &QPushButton::clicked, this, [this] { copyField(0); });
     connect(copyLogin_, &QPushButton::clicked, this, [this] { copyField(1); });
     connect(copyPhrase_, &QPushButton::clicked, this, [this] { copyField(2); });
+    connect(sshToFile_, &QPushButton::clicked, this, &EntryCard::saveSshToFile);
     connect(&app_, &Application::busyChanged, this, &EntryCard::updateEnabled);
     connect(&app_, &Application::stateChanged, this, [this] { if (app_.gate() != Application::Gate::Ready) clear(); else updateEnabled(); });
     qApp->installEventFilter(this); clear();
 }
 void EntryCard::updateEnabled() {
     const bool allowed = app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id_);
-    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_}) button->setEnabled(allowed);
+    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) button->setEnabled(allowed);
 }
 void EntryCard::hideNowForTest() { hideTimer_.stop(); value_->setPlainText(QStringLiteral("••••••••")); }
 void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); metadata_->clear(); error_->clear(); updateEnabled(); }
@@ -48,7 +55,8 @@ void EntryCard::showEntry(model::Id id) {
     title_->setText(entry->title); metadata_->setText(entry->url + QStringLiteral("\n") + entry->note + QStringLiteral("\n") + entry->sshComment);
     const bool ssh = entry->type == model::EntryType::SshKey;
     reveal_->setVisible(!ssh); copySecret_->setText(ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
-    copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty()); updateEnabled();
+    copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty());
+    sshToFile_->setVisible(ssh && !entry->sshPrivate.isEmpty()); updateEnabled();
 }
 QString EntryCard::secretText() const { return value_->toPlainText(); }
 bool EntryCard::authorize() {
@@ -69,6 +77,44 @@ void EntryCard::copyField(int field) {
     } else text = entry->type == model::EntryType::ApiToken ? entry->token : entry->password;
     if (text.isEmpty()) { error_->setText(QStringLiteral("Пустое значение не копируется.")); return; }
     emit copyRequested(text);
+}
+bool EntryCard::isSafeTarget(const QString& path, QString* err) {
+    const QFileInfo info(path);
+    if (info.isSymbolicLink() || info.isShortcut()) {
+        if (err) *err = QStringLiteral("Запись по символической ссылке запрещена.");
+        return false;
+    }
+    return true;
+}
+void EntryCard::saveSshToFile() {
+    if (!authorize()) return;
+    const auto* entry = app_.model()->entry(id_);
+    if (!entry || entry->type != model::EntryType::SshKey || entry->sshPrivate.isEmpty()) return;
+    if (QMessageBox::warning(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Приватный ключ будет сохранён за пределами хранилища в незашифрованном виде. Продолжить?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранение приватного ключа"));
+    if (path.isEmpty()) return;
+    QString error;
+    const QString temporary = path + QStringLiteral(".tb-new");
+    if (!isSafeTarget(path, &error) || !isSafeTarget(temporary, &error)) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
+    }
+    bool written = false;
+    if (QFile::exists(path)) {
+        if (QMessageBox::question(this, QStringLiteral("TokenBucket"), QStringLiteral("Файл существует. Перезаписать?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        if (QFile::exists(temporary) && !store::realFileOps().removeFile(temporary)) {
+            QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось подготовить замену файла.")); return;
+        }
+        if ((written = store::realFileOps().writeAll(temporary, entry->sshPrivate))
+            && !(written = store::realFileOps().renameReplace(temporary, path)))
+            store::realFileOps().removeFile(temporary);
+    } else written = store::realFileOps().writeAll(path, entry->sshPrivate);
+    if (!written) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось записать файл ключа.")); return;
+    }
+    error_->clear();
 }
 bool EntryCard::eventFilter(QObject* object, QEvent* event) {
     if ((event->type() == QEvent::WindowDeactivate && object == window()) || event->type() == QEvent::ApplicationDeactivate || (event->type() == QEvent::Hide && object == this)) hideNowForTest();

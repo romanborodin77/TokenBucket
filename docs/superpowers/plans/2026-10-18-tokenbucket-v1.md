@@ -3146,7 +3146,7 @@ git commit -m "Экспорт/импорт защищённым файлом и 
 - Consumes: `EntryCard`, `FileOps::writeAll`, `VerifyDialog`.
 - Produces: логика выдачи в `EntryCard::saveSshToFile()` (приватный слот): повторная проверка при `reverify`; предупреждение о выдаче ключа за пределы хранилища; отказ по символической ссылке; перезапись только после явного подтверждения; запись через `store::realFileOps().writeAll` (ограниченные права с момента создания); байты `sshPrivate` записываются без изменений.
 
-- [ ] **Step 1: Failing-тест `tests/test_ssh.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_ssh.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -3193,7 +3193,7 @@ QTEST_MAIN(TestSsh)
 #include "test_ssh.moc"
 ```
 
-- [ ] **Step 2: Реализовать в `EntryCard`**
+- [x] **Step 2: Реализовать в `EntryCard`**
 
 Статический метод (добавить в заголовок):
 
@@ -3231,12 +3231,12 @@ void EntryCard::saveSshToFile() {
 
 Подключить кнопку: `connect(sshToFile_, &QPushButton::clicked, this, &EntryCard::saveSshToFile); sshToFile_->setVisible(ssh);` в `showEntry`.
 
-- [ ] **Step 3: Собрать и прогнать**
+- [x] **Step 3: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS. На Windows `QFile::link` создаёт .lnk — `isShortcut()` покрывает оба случая.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/ui/EntryCard.h src/ui/EntryCard.cpp tests/test_ssh.cpp tests/CMakeLists.txt

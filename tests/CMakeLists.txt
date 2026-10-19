@@ -21,6 +21,7 @@ tb_add_test(test_app)
 tb_add_test(test_ui)
 tb_add_test(test_clipboard)
 tb_add_test(test_lock)
+tb_add_test(test_ssh)
 if(WIN32)
   set_tests_properties(test_lock PROPERTIES ENVIRONMENT
     "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
