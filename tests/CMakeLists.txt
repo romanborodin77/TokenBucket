@@ -15,3 +15,5 @@ tb_add_test(test_container)
 tb_add_test(test_model)
 
 tb_add_test(test_store)
+
+tb_add_test(test_app)

@@ -1509,6 +1509,16 @@ git commit -m "Хранилище: атомарная замена, резерв
 
 ### Task 6: Application, создание и разблокировка, единственный экземпляр, Hello-обёртка
 
+Актуальные решения реализации (2026-10-19, приоритет над исходными эскизами ниже):
+
+- Hello использует `IAsyncOperation<UserConsentVerificationResult>` и значение Verified; HSTRING передаётся через get_abi. availability/request выполняются из рабочего потока с MTA и парным uninit_apartment. Не использовать Availability как результат проверки.
+- Публичного `openHelloContainer` без проверки нет. `createHelloVault(err, hwnd)` и `unlockHello(err, hwnd)` сами запрашивают Hello. HWND передаётся от видимого окна прогресса. Подмена запроса через аргумент конструктора используется только тестами; она не подтверждает реальную биометрию.
+- KDF, чтение, запись и Hello выполняются через установленный QtConcurrent. Публичные bool-методы ожидают результат через Qt event loop, сохраняя отзывчивость GUI. `busy()`/`busyChanged(bool)` блокируют повторный запуск. `generation()` атомарен: блокировка отменяет публикацию результата и ещё не начавшуюся запись. Уже выполняющийся системный вызов записи не прерывается, сохраняется его атомарность.
+- После успешных AEAD и разбора CBOR вызывается `store_.acceptVerified(bytes)`, затем в GUI-потоке устанавливаются модель, ключ, mode и Ready; stateChanged публикуется после этого. В задаче 7 запрещать редактирование модели при busy=true.
+- `Application::acquireInstanceLock(dir, err)` используется и main, и тестом второго экземпляра. `unlockMode()` даёт только подсказку выбора диалога; доступ разрешает полная проверка контейнера.
+- SetupDialog/UnlockDialog используют штатные Qt Widgets, маскируют ввод, проверяют длину в байтах без trim, подтверждение и очищают поля. До задачи 7 после открытия показывается временный статус с кнопками блокировки и закрытия.
+- В тесте плана слово «коротко» содержит 14 байт UTF-8 и не является коротким по спецификации; отрицательный пример заменён на `short`.
+
 **Files:**
 - Create: `src/app/Application.h`, `src/app/Application.cpp`, `src/platform/hello_win.h`, `src/platform/hello_win.cpp`, `src/ui/SetupDialog.h`, `src/ui/SetupDialog.cpp`, `src/ui/UnlockDialog.h`, `src/ui/UnlockDialog.cpp`, `tests/test_app.cpp`
 - Modify: `src/main.cpp`, `CMakeLists.txt`, `tests/CMakeLists.txt`
@@ -1535,7 +1545,7 @@ Windows-дополнения: `bool createHelloVault(QString* err); bool unlockH
 
 `tb::platform::hello` (только Windows): `enum class Availability { Available, NotConfigured, Unavailable }; Availability availability(); enum class Result { Verified, Failed, Canceled }; Result request(void* hwnd, const QString& prompt);` — запрос выполняется в отдельном потоке (MTA), окно-владелец передаётся HWND.
 
-- [ ] **Step 1: Failing-тест `tests/test_app.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_app.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -1592,11 +1602,11 @@ QTEST_MAIN(TestApp)
 #include "test_app.moc"
 ```
 
-- [ ] **Step 2: Подключить цель `test_app`, запуск — FAIL**
+- [x] **Step 2: Подключить цель `test_app`, запуск — FAIL**
 
 `tests/CMakeLists.txt` — цель `test_app` (ссылка на Qt6::Widgets, нужны диалоги позже; пока Test). В корневом `CMakeLists.txt` добавить `src/app/Application.cpp`; на Windows `src/platform/hello_win.cpp` и `target_link_libraries(... windowsapp)` (уже добавлено в Задаче 1).
 
-- [ ] **Step 3: Реализовать `src/platform/hello_win.h/.cpp`**
+- [x] **Step 3: Реализовать `src/platform/hello_win.h/.cpp`**
 
 `src/platform/hello_win.h`:
 
@@ -1663,7 +1673,7 @@ Result request(void* hwnd, const QString& prompt) {
 
 Отмену пользователем отличает `hresult_canceled`; на практике Windows Hello возвращает `DeviceNotPresent`/отказ — итоговые коды сверяются в ручной приёмке №6, автотест проверяет только компиляцию и компоновку (шаг 7).
 
-- [ ] **Step 4: Реализовать `src/app/Application.h/.cpp`**
+- [x] **Step 4: Реализовать `src/app/Application.h/.cpp`**
 
 `src/app/Application.h`:
 
@@ -1795,7 +1805,7 @@ bool Application::unlockHello(QString* err) { return openHelloContainer(err); } 
 }
 ```
 
-- [ ] **Step 5: Диалоги `src/ui/SetupDialog` и `src/ui/UnlockDialog`**
+- [x] **Step 5: Диалоги `src/ui/SetupDialog` и `src/ui/UnlockDialog`**
 
 `src/ui/SetupDialog.h`:
 
@@ -1912,7 +1922,7 @@ UnlockDialog::UnlockDialog(Kind kind, QWidget* parent) : QDialog(parent) {
 QByteArray UnlockDialog::password() const { return pw_ ? pw_->text().toUtf8() : QByteArray(); }
 ```
 
-- [ ] **Step 6: Заменить `src/main.cpp`**
+- [x] **Step 6: Заменить `src/main.cpp`**
 
 ```cpp
 #include <QApplication>
@@ -1976,12 +1986,12 @@ int main(int argc, char** argv) {
 
 Упрощение: в `UnlockDialog` добавить метод `bool passwordMode() const { return pw_ != nullptr; }`. Вызов `container::readMode` из main.cpp требует включить `vault/Container.h`; переменную `m` удалить (используется только `mode`).
 
-- [ ] **Step 7: Собрать и прогнать автотесты**
+- [x] **Step 7: Собрать и прогнать автотесты**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS. `helloVaultFlow` создаёт DPAPI-контейнер (не требует устройства Hello). Запускать приложение вручную на этом шаге не нужно.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/app/ src/platform/hello_win.h src/platform/hello_win.cpp src/ui/SetupDialog.h src/ui/SetupDialog.cpp src/ui/UnlockDialog.h src/ui/UnlockDialog.cpp src/main.cpp tests/test_app.cpp CMakeLists.txt tests/CMakeLists.txt
