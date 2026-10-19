@@ -1,14 +1,21 @@
 #pragma once
 #include <QByteArray>
 #include <sodium.h>
+#include <new>
+#include <utility>
 namespace tb {
 class SecureKey {
 public:
     static constexpr size_t Size = 32;
-    SecureKey() : p_(static_cast<unsigned char*>(sodium_malloc(Size))) {}
+    SecureKey() : p_(static_cast<unsigned char*>(sodium_malloc(Size))) { if (!p_) throw std::bad_alloc(); }
     ~SecureKey() { sodium_free(p_); }
     SecureKey(const SecureKey&) = delete;
     SecureKey& operator=(const SecureKey&) = delete;
+    SecureKey(SecureKey&& o) noexcept : p_(std::exchange(o.p_, nullptr)) {}
+    SecureKey& operator=(SecureKey&& o) noexcept {
+        if (this != &o) { sodium_free(p_); p_ = std::exchange(o.p_, nullptr); }
+        return *this;
+    }
     unsigned char* data() { return p_; }
     const unsigned char* data() const { return p_; }
     bool operator==(const SecureKey& o) const { return sodium_memcmp(p_, o.p_, Size) == 0; }

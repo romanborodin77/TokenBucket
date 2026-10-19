@@ -5,6 +5,15 @@ class TestCrypto : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(crypto::init()); }
+    void secureKeyMove() {
+        SecureKey first; randombytes_buf(first.data(), SecureKey::Size);
+        const QByteArray expected(reinterpret_cast<const char*>(first.data()), SecureKey::Size);
+        SecureKey second(std::move(first));
+        QCOMPARE(first.data(), nullptr);
+        SecureKey third; third = std::move(second);
+        QCOMPARE(second.data(), nullptr);
+        QCOMPARE(QByteArray(reinterpret_cast<const char*>(third.data()), SecureKey::Size), expected);
+    }
     void deriveIsDeterministicAndSaltSensitive() {
         QByteArray pw("корректный пароль 123");
         unsigned char s1[16] = {1}, s2[16] = {2};

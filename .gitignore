@@ -4,3 +4,4 @@
 tools/vcpkg/
 .superpowers/
 *.user
+.engram/

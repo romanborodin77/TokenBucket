@@ -7,10 +7,12 @@ bool deriveKey(const QByteArray& pw, const unsigned char* salt, SecureKey& out) 
     return crypto_pwhash(out.data(), SecureKey::Size, pw.constData(), quint64(pw.size()),
                          salt, 3, 64ull * 1024 * 1024, crypto_pwhash_ALG_ARGON2ID13) == 0;
 }
-bool seal(const SecureKey& k, const QByteArray& aad, const QByteArray& plain, Blob& out) {
+bool seal(const SecureKey& k, const QByteArray& aad, const QByteArray& plain, Blob& out,
+          const unsigned char* nonce) {
     out.ct.resize(int(plain.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES));
     unsigned long long clen = 0;
-    randombytes_buf(out.nonce, sizeof(out.nonce));
+    if (nonce) memcpy(out.nonce, nonce, sizeof(out.nonce));
+    else randombytes_buf(out.nonce, sizeof(out.nonce));
     if (crypto_aead_xchacha20poly1305_ietf_encrypt(
             reinterpret_cast<unsigned char*>(out.ct.data()), &clen,
             reinterpret_cast<const unsigned char*>(plain.constData()), quint64(plain.size()),
