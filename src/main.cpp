@@ -6,6 +6,8 @@
 #include <QStandardPaths>
 #include <QtConcurrent/QtConcurrentRun>
 #include "app/Application.h"
+#include "app/IdleTimer.h"
+#include "platform/SessionWatcher.h"
 #include "ui/SetupDialog.h"
 #include "ui/UnlockDialog.h"
 #include "ui/MainWindow.h"
@@ -25,6 +27,12 @@ int start() {
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
     if (!instanceLock) { QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), error); return 1; }
     tb::Application core(dir);
+    tb::IdleTimer idle(5 * 60 * 1000); idle.setActive(false);
+    tb::platform::SessionWatcher session;
+    if (!session.error().isEmpty()) { QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), session.error()); return 1; }
+    QObject::connect(&idle, &tb::IdleTimer::idleTimeout, &core, &tb::Application::lock);
+    QObject::connect(&session, &tb::platform::SessionWatcher::lockNow, &core, &tb::Application::lock);
+    QObject::connect(&core, &tb::Application::stateChanged, &idle, [&] { idle.setActive(core.gate() == tb::Application::Gate::Ready); });
     bool quitting = false;
     QObject::connect(qApp, &QCoreApplication::aboutToQuit, &core, [&] { quitting = true; core.lock(); });
     for (;;) {

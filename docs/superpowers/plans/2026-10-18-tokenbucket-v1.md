@@ -2812,7 +2812,7 @@ git commit -m "Буфер: 20 секунд, владение, занятость
 - Consumes: `Application::lock()`, `ClipboardGuard::clearIfOurs()`.
 - Produces: `tb::IdleTimer : QObject { explicit IdleTimer(int timeoutMs, QObject* parent=nullptr); void poke(); signals: void idleTimeout(); }` — сбрасывается любым событием ввода через eventFilter на `qApp`; `tb::platform::SessionWatcher : QObject { signals: void lockNow(); }` — Windows: `WM_WTSSESSION_CHANGE/WTS_SESSION_LOCK` и `WM_POWERBROADCAST/PBT_APMSUSPEND` через `QAbstractNativeEventFilter` и собственное скрытое окно; Linux: сигналы DBus `org.freedesktop.ScreenSaver.ActiveChanged(true)` (session) и `org.freedesktop.login1.Manager.PrepareSleep(true)` (system).
 
-- [ ] **Step 1: Failing-тест `tests/test_lock.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_lock.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -2854,7 +2854,7 @@ QTEST_MAIN(TestLock)
 #include "test_lock.moc"
 ```
 
-- [ ] **Step 2: Реализовать `IdleTimer` и `SessionWatcher`**
+- [x] **Step 2: Реализовать `IdleTimer` и `SessionWatcher`**
 
 `src/app/IdleTimer.h/.cpp`:
 
@@ -2979,7 +2979,7 @@ SessionWatcher::SessionWatcher(QObject* parent) : QObject(parent) {
 
 Добавить приватные слоты `onActiveChanged(bool)`/`onPrepareSleep(bool)` в объявление `SessionWatcher` (в заголовке, под `#ifndef Q_OS_WIN` не нужно — объявить оба слота безусловно, на Windows они не подключаются).
 
-- [ ] **Step 3: Связать в `src/main.cpp`**
+- [x] **Step 3: Связать в `src/main.cpp`**
 
 ```cpp
     tb::IdleTimer idle(5 * 60 * 1000);
@@ -2990,12 +2990,12 @@ SessionWatcher::SessionWatcher(QObject* parent) : QObject(parent) {
 
 В меню MainWindow добавить действие «Заблокировать» (Ctrl+L) → `app_.lock()`.
 
-- [ ] **Step 4: Собрать и прогнать**
+- [x] **Step 4: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS (на Windows собирается `sessionlock_win.cpp`; linux-файл в сборке не участвует — `if(WIN32)...else()` уже в CMake из Задачи 5, дополнить его файлами sessionlock).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/app/IdleTimer.h src/app/IdleTimer.cpp src/platform/SessionWatcher.h src/platform/sessionlock_win.cpp src/platform/sessionlock_linux.cpp src/main.cpp src/ui/MainWindow.h src/ui/MainWindow.cpp tests/test_lock.cpp CMakeLists.txt tests/CMakeLists.txt
