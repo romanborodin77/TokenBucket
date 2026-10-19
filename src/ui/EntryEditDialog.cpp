@@ -1,4 +1,5 @@
 #include "EntryEditDialog.h"
+#include "../vault/Crypto.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -8,6 +9,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFutureWatcher>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
@@ -19,6 +21,7 @@
 #include <QTextDocument>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
+#include <sodium.h>
 #include <algorithm>
 using namespace tb::model;
 namespace tb::ui {
@@ -86,7 +89,12 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     tokenForm->addRow(QStringLiteral("Т&окен:"), token_); pages->addWidget(tokenPage);
     auto* credentials = new QWidget(pages); auto* credentialsForm = new QFormLayout(credentials);
     login_ = line(credentials, "entryLogin"); password_ = line(credentials, "entryPassword", true);
-    credentialsForm->addRow(QStringLiteral("&Логин:"), login_); credentialsForm->addRow(QStringLiteral("П&ароль:"), password_); pages->addWidget(credentials);
+    auto* passwordRow = new QWidget(credentials); auto* passwordLayout = new QHBoxLayout(passwordRow);
+    passwordLayout->setContentsMargins(0, 0, 0, 0); passwordLayout->addWidget(password_);
+    auto* generate = new QPushButton(QStringLiteral("Сгенерировать"), passwordRow); generate->setObjectName(QStringLiteral("generatePassword"));
+    generate->setToolTip(QStringLiteral("Случайный пароль из 24 символов без похожих знаков (0/O, 1/l/I)"));
+    passwordLayout->addWidget(generate);
+    credentialsForm->addRow(QStringLiteral("&Логин:"), login_); credentialsForm->addRow(QStringLiteral("П&ароль:"), passwordRow); pages->addWidget(credentials);
     auto* ssh = new QWidget(pages); auto* sshForm = new QFormLayout(ssh);
     sshPath_ = line(ssh, "sshPrivatePath"); sshPath_->setPlaceholderText(existing ? QStringLiteral("Пусто — сохранить прежний ключ") : QStringLiteral("Выберите файл приватного ключа"));
     auto* browse = new QPushButton(QStringLiteral("Выбрать файл…"), ssh);
@@ -110,6 +118,14 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     connect(browse, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Приватный ключ SSH"));
         if (!path.isEmpty()) sshPath_->setText(path);
+    });
+    connect(generate, &QPushButton::clicked, this, [this] {
+        tb::crypto::init();
+        // Алфавит без похожих знаков (0/O, 1/l/I); 24 знака ≈ 140 бит энтропии.
+        const QString alphabet = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789#!%+=-");
+        QString password;
+        for (int i = 0; i < 24; ++i) password += alphabet.at(int(randombytes_uniform(uint(alphabet.size()))));
+        password_->setText(password);
     });
     type_->setCurrentIndex(int(original_.type)); pages->setCurrentIndex(type_->currentIndex());
     if (existing) setGroup(original_.groupId);

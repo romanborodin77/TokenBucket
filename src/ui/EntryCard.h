@@ -13,6 +13,7 @@ public:
     QString secretText() const;
     QPushButton* revealButton() const { return reveal_; }
     void hideNowForTest();
+    void copySecret() { copyField(0); }
     static bool isSafeTarget(const QString& path, QString* err);
 signals:
     void copyRequested(const QString& text);

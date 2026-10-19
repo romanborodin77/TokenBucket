@@ -52,7 +52,11 @@ void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(id) : nullptr;
     if (!entry) { clear(); return; }
-    title_->setText(entry->title); metadata_->setText(entry->url + QStringLiteral("\n") + entry->note + QStringLiteral("\n") + entry->sshComment);
+    title_->setText(entry->title); metadata_->setText(QStringLiteral("%1 · изменено: %2\n%3\n%4\n%5").arg(
+        entry->type == model::EntryType::ApiToken ? QStringLiteral("API-токен")
+        : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("SSH-ключ"),
+        entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")),
+        entry->url, entry->note, entry->sshComment));
     const bool ssh = entry->type == model::EntryType::SshKey;
     reveal_->setVisible(!ssh); copySecret_->setText(ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
     copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty());

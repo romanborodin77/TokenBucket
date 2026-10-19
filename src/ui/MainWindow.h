@@ -48,6 +48,9 @@ private:
     void showMetadata();
     void openCardDialog();
     void selectNode(model::Id id);
+    void treeMenu(const QPoint& pos);
+    void listMenu(const QPoint& pos);
+    void toggleFavorite();
     void updateSwitchActionText();
     model::Id selectedNode() const;
     model::Id selectedEntry() const;

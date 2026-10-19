@@ -220,6 +220,19 @@ private slots:
             QVERIFY(!dialog.entry()); QVERIFY(!dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().isEmpty());
         }
     }
+    void passwordGeneratorProducesLongDistinctPasswords() {
+        tb::model::VaultModel model; EntryEditDialog dialog(model, std::nullopt);
+        dialog.findChild<QComboBox*>(QStringLiteral("entryType"))->setCurrentIndex(1);
+        auto* generate = dialog.findChild<QPushButton*>(QStringLiteral("generatePassword"));
+        auto* password = dialog.findChild<QLineEdit*>(QStringLiteral("entryPassword"));
+        QVERIFY(generate); QVERIFY(password);
+        generate->click(); const auto first = password->text();
+        generate->click(); const auto second = password->text();
+        QCOMPARE(first.size(), 24); QCOMPARE(second.size(), 24); QVERIFY(first != second);
+        const QString alphabet = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789#!%+=-");
+        for (const QChar ch : first + second)
+            QVERIFY2(alphabet.contains(ch), qPrintable(QStringLiteral("недопустимый знак: %1").arg(ch)));
+    }
     void cardRequiresExplicitRevealAndHides() {
         Application app(dir_.path() + "/card"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
         auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());

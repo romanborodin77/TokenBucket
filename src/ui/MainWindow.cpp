@@ -31,6 +31,8 @@
 #include <QTreeWidgetItemIterator>
 #include <QScreen>
 #include <QScrollArea>
+#include <QShortcut>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 #include "../platform/FileOps.h"
@@ -84,8 +86,12 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     updateSwitchActionText();
     auto* lock = vault->addAction(QStringLiteral("Заблокировать"), &app_, &Application::lock); lock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
     vault->addAction(QStringLiteral("Закрыть"), this, &QWidget::close, QKeySequence::Quit);
-    auto* toolbar = addToolBar(QStringLiteral("Действия")); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    auto* toolbar = addToolBar(QStringLiteral("Действия")); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     toolbar->addAction(addProjectAction); toolbar->addAction(addEntryAction); toolbar->addAction(edit); toolbar->addSeparator(); toolbar->addAction(lock);
+    addProjectAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
+    addEntryAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
+    edit->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    lock->setIcon(style()->standardIcon(QStyle::SP_VistaShield));
     auto* central = new QWidget(this); auto* layout = new QVBoxLayout(central);
     search_ = new QLineEdit(central); search_->setObjectName(QStringLiteral("vaultSearch")); search_->setAccessibleName(QStringLiteral("Поиск по хранилищу"));
     search_->setPlaceholderText(QStringLiteral("Поиск по названиям, логинам, проектам и заметкам — во всём хранилище")); layout->addWidget(search_);
@@ -98,6 +104,17 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     cardScroll_ = new QScrollArea(right_); cardScroll_->setWidgetResizable(true); cardScroll_->setFrameShape(QFrame::NoFrame);
     card_ = new EntryCard(app_, cardScroll_); cardScroll_->setWidget(card_); right_->addWidget(cardScroll_);
     splitter->addWidget(tree_); splitter->addWidget(list_); splitter->addWidget(right_); splitter->setSizes({250,300,500}); layout->addWidget(splitter, 1);
+    tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tree_, &QTreeWidget::customContextMenuRequested, this, &MainWindow::treeMenu);
+    list_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(list_, &QListWidget::customContextMenuRequested, this, &MainWindow::listMenu);
+    connect(new QShortcut(QKeySequence::Find, this), &QShortcut::activated, this, [this] { search_->setFocus(Qt::ShortcutFocusReason); search_->selectAll(); });
+    auto* clearSearch = new QShortcut(QKeySequence(Qt::Key_Escape), search_); clearSearch->setContext(Qt::WidgetShortcut);
+    connect(clearSearch, &QShortcut::activated, search_, &QLineEdit::clear);
+    auto* deleteEntry = new QShortcut(QKeySequence::Delete, list_); deleteEntry->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(deleteEntry, &QShortcut::activated, this, &MainWindow::deleteSelected);
+    auto* deleteNode = new QShortcut(QKeySequence::Delete, tree_); deleteNode->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(deleteNode, &QShortcut::activated, this, &MainWindow::deleteSelectedNode);
     error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
     setCentralWidget(central);
     vaultInfo_ = new QLabel(statusBar()); vaultInfo_->setTextFormat(Qt::PlainText);
@@ -384,6 +401,47 @@ void MainWindow::changeMasterPassword() {
     password.clear();
     if (!ok) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
     else statusBar()->showMessage(QStringLiteral("Мастер-пароль изменён."), 5000);
+}
+void MainWindow::treeMenu(const QPoint& pos) {
+    const auto item = tree_->itemAt(pos);
+    if (item) tree_->setCurrentItem(item);
+    QMenu menu(this);
+    menu.addAction(QStringLiteral("Новый проект…"), this, &MainWindow::addProject);
+    if (item) {
+        menu.addAction(QStringLiteral("Новая группа…"), this, &MainWindow::addGroup);
+        menu.addAction(QStringLiteral("Переименовать…"), this, &MainWindow::renameSelectedNode);
+        if (!app_.model()->nodes().value(selectedNode()).parent.isNull())
+            menu.addAction(QStringLiteral("Переместить группу…"), this, &MainWindow::moveSelectedNode);
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("Удалить"), this, &MainWindow::deleteSelectedNode);
+    }
+    menu.exec(tree_->viewport()->mapToGlobal(pos));
+}
+void MainWindow::listMenu(const QPoint& pos) {
+    const auto item = list_->itemAt(pos);
+    if (!item || !ready()) return;
+    list_->setCurrentItem(item);
+    const auto id = selectedEntry();
+    QMenu menu(this);
+    menu.addAction(QStringLiteral("Изменить…\tF2"), this, &MainWindow::editSelected);
+    menu.addAction(QStringLiteral("Копировать секрет"), this, [this] { card_->copySecret(); });
+    const auto* entry = app_.model()->entry(id);
+    QAction* favorite = menu.addAction(QStringLiteral("В избранное"));
+    favorite->setCheckable(true); favorite->setChecked(entry && entry->favorite);
+    connect(favorite, &QAction::toggled, this, &MainWindow::toggleFavorite);
+    menu.addSeparator();
+    menu.addAction(QStringLiteral("Удалить\tDel"), this, &MainWindow::deleteSelected);
+    menu.exec(list_->viewport()->mapToGlobal(pos));
+}
+void MainWindow::toggleFavorite() {
+    const auto id = selectedEntry();
+    commit([&](auto& model) {
+        const auto* current = model.entry(id);
+        if (!current) return QString();
+        auto changed = *current;
+        changed.favorite = !changed.favorite;
+        return model.setEntry(changed);
+    });
 }
 void MainWindow::updateSwitchActionText() {
 #ifdef Q_OS_WIN
