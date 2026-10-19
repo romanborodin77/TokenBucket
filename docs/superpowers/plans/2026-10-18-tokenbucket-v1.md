@@ -1184,9 +1184,13 @@ git commit -m "Модель: дерево узлов, лимиты, поиск �
 - Consumes: QtCore.
 - Produces: `tb::store::FileOps` (виртуальные `writeAll(path, bytes)`, `renameReplace(from, to)`, `removeFile(path)`), `tb::store::realFileOps()`, `tb::store::ensurePrivateDir(dir)`; класс `tb::store::VaultStore { VaultStore(const QString& dir, FileOps& ops = realFileOps()); QString mainPath() const /* dir/vault.tb */; QString backupPath() const /* dir/vault.tb.bak */; QString tmpPath() const; bool save(const QByteArray& bytes, QString* err); enum class Load { Ok, Missing, IoError }; Load loadBytes(const QString& path, QByteArray* out) const; }`.
 
-Алгоритм `save`: (1) `writeAll(tmp)`; (2) перечитать tmp и сравнить байты; (3) если main существует — `renameReplace(main, bak)`; (4) `renameReplace(tmp, main)`; при отказе шага 4 и наличии bak — восстановить `renameReplace(bak, main)`; любая ошибка возвращает false, исходный main остаётся читаем.
+Актуальное решение при реализации (2026-10-19, заменяет исходные эскизы ниже): `save` создаёт и проверяет tmp, отдельно записывает и проверяет backup.tmp из подтверждённой исправной версии main, атомарно заменяет bak, затем атомарно заменяет main. Основной файл не переносится в bak, откат не нужен. Перед изменением существующего main обязательны `acceptVerified(bytes)` после проверки AEAD и модели и совпадение файла с подтверждённой версией. После успешного save версия подтверждается автоматически. Повреждённый, изменённый или непроверенный main не затирает резервную копию. `loadBytes` ограничен 80 МиБ и очищает out при отказе.
 
-- [ ] **Step 1: Failing-тест `tests/test_store.cpp`**
+Дополнение интерфейса: `void VaultStore::acceptVerified(const QByteArray& bytes)`. В Задаче 6 вызывать его после успешного `finishOpen` и до публикации состояния Ready для парольного и Hello-открытия. Не подтверждать байты после одного лишь чтения файла. При восстановлении из bak выполнять отдельный сценарий; нельзя подтверждать повреждённый main.
+
+`FileOps::writeAll` создаёт только новый файл (CREATE_NEW / O_EXCL), не перезаписывает существующий и задаёт защищённые права при создании. В Задаче 12 существующий файл выдачи SSH не удалять перед записью; при необходимости подтверждённой замены использовать отдельный защищённый tmp и атомарную замену. На POSIX синхронизируются файл и каталог после переименования. Если fsync каталога отказывает после замены main, предыдущие байты остаются в bak, операция возвращает отказ.
+
+- [x] **Step 1: Failing-тест `tests/test_store.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -1275,7 +1279,7 @@ QTEST_MAIN(TestStore)
 #include "test_store.moc"
 ```
 
-- [ ] **Step 2: Подключить цель `test_store` (и `tests/CMakeLists.txt`, и корневой `CMakeLists.txt` с файлами платформ), запуск — FAIL**
+- [x] **Step 2: Подключить цель `test_store` (и `tests/CMakeLists.txt`, и корневой `CMakeLists.txt` с файлами платформ), запуск — FAIL**
 
 `CMakeLists.txt` — после `qt_add_executable`:
 
@@ -1290,7 +1294,7 @@ else()
 endif()
 ```
 
-- [ ] **Step 3: Реализовать `src/platform/FileOps.h`**
+- [x] **Step 3: Реализовать `src/platform/FileOps.h`**
 
 ```cpp
 #pragma once
@@ -1308,7 +1312,7 @@ bool ensurePrivateDir(const QString& dir); // 0700 POSIX / DACL пользова
 }
 ```
 
-- [ ] **Step 4: Реализовать `src/platform/fileops_win.cpp`**
+- [x] **Step 4: Реализовать `src/platform/fileops_win.cpp`**
 
 ```cpp
 #include "FileOps.h"
@@ -1397,7 +1401,7 @@ FileOps& realFileOps() { static RealOps ops; return ops; }
 
 Включить `#include <vector>` в начало файла. DACL-оболочка одноразовая на вызов — секретность важнее аллокаций.
 
-- [ ] **Step 5: Реализовать `src/platform/fileops_posix.cpp`**
+- [x] **Step 5: Реализовать `src/platform/fileops_posix.cpp`**
 
 ```cpp
 #include "FileOps.h"
@@ -1430,7 +1434,7 @@ FileOps& realFileOps() { static RealOps ops; return ops; }
 }
 ```
 
-- [ ] **Step 6: Реализовать `src/vault/VaultStore.h/.cpp`**
+- [x] **Step 6: Реализовать `src/vault/VaultStore.h/.cpp`**
 
 `src/vault/VaultStore.h`:
 
@@ -1489,12 +1493,12 @@ bool VaultStore::save(const QByteArray& bytes, QString* err) {
 }
 ```
 
-- [ ] **Step 7: Собрать и прогнать**
+- [x] **Step 7: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS (на Windows posix-тест пропущен по `#ifndef Q_OS_WIN`).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/platform/ src/vault/VaultStore.h src/vault/VaultStore.cpp tests/test_store.cpp CMakeLists.txt tests/CMakeLists.txt
