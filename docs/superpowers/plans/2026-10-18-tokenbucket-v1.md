@@ -58,7 +58,7 @@
 - Consumes: ничего (первая задача).
 - Produces: собираемая цель `TokenBucket` (WIN32 GUI) и тестовые цели через CTest; функция `int main(int, char**)` в `src/main.cpp`, которую Задача 6 заменит; пресеты CMake `default` (конфигурация+сборка) и `test`.
 
-- [ ] **Step 1: Установить VS BuildTools (MSVC + Windows SDK)**
+- [x] **Step 1: Установить VS BuildTools (MSVC + Windows SDK)**
 
 Проверить место на диске (нужно ≥ 15 ГБ свободных на C:). Установить:
 
@@ -76,7 +76,7 @@ winget install --id Microsoft.VisualStudio.2026.BuildTools --silent --override "
 
 Expected: непустой путь, например `C:\Program Files\Microsoft Visual Studio\2026\BuildTools`.
 
-- [ ] **Step 2: Клонировать vcpkg и зафиксировать baseline**
+- [x] **Step 2: Клонировать vcpkg и зафиксировать baseline**
 
 ```bash
 git clone https://github.com/microsoft/vcpkg tools/vcpkg
@@ -86,7 +86,7 @@ git -C tools/vcpkg rev-parse HEAD
 
 Expected: 40-символьный SHA. Записать его — он подставляется в `vcpkg.json` на следующем шаге вместо строки `BASELINE_HASH` (полученный хэш — это и есть `BASELINE_HASH`).
 
-- [ ] **Step 3: Создать `vcpkg.json`**
+- [x] **Step 3: Создать `vcpkg.json`**
 
 ```json
 {
@@ -97,7 +97,7 @@ Expected: 40-символьный SHA. Записать его — он подс
 }
 ```
 
-- [ ] **Step 4: Создать `.gitignore`**
+- [x] **Step 4: Создать `.gitignore`**
 
 ```
 build/
@@ -106,7 +106,7 @@ tools/vcpkg/
 *.user
 ```
 
-- [ ] **Step 5: Создать `CMakeLists.txt`**
+- [x] **Step 5: Создать `CMakeLists.txt`**
 
 ```cmake
 cmake_minimum_required(VERSION 3.30)
@@ -128,7 +128,7 @@ enable_testing()
 add_subdirectory(tests)
 ```
 
-- [ ] **Step 6: Создать `CMakePresets.json`**
+- [x] **Step 6: Создать `CMakePresets.json`**
 
 ```json
 {
@@ -146,7 +146,7 @@ add_subdirectory(tests)
 }
 ```
 
-- [ ] **Step 7: Создать `tools/build.cmd` (окружение MSVC + сборка)**
+- [x] **Step 7: Создать `tools/build.cmd` (окружение MSVC + сборка)**
 
 ```bat
 @echo off
@@ -158,7 +158,7 @@ cmake --preset default || exit /b 1
 cmake --build --preset default || exit /b 1
 ```
 
-- [ ] **Step 8: Создать `tools/test.cmd`**
+- [x] **Step 8: Создать `tools/test.cmd`**
 
 ```bat
 @echo off
@@ -168,7 +168,7 @@ call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
 ctest --preset default || exit /b 1
 ```
 
-- [ ] **Step 9: Создать `src/main.cpp` (временный каркас)**
+- [x] **Step 9: Создать `src/main.cpp` (временный каркас)**
 
 ```cpp
 #include <QApplication>
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-- [ ] **Step 10: Создать `tests/CMakeLists.txt` и smoke-тест**
+- [x] **Step 10: Создать `tests/CMakeLists.txt` и smoke-тест**
 
 `tests/CMakeLists.txt`:
 
@@ -210,7 +210,7 @@ QTEST_MAIN(TestSmoke)
 #include "test_smoke.moc"
 ```
 
-- [ ] **Step 11: Собрать и прогнать тест**
+- [x] **Step 11: Собрать и прогнать тест**
 
 ```bash
 cmd //c tools\\build.cmd
@@ -224,7 +224,7 @@ cmd //c tools\\test.cmd
 
 Expected: `100% tests passed, 1 tests`.
 
-- [ ] **Step 12: Записать версии инструментов в `docs/build/windows-toolchain.md`**
+- [x] **Step 12: Записать версии инструментов в `docs/build/windows-toolchain.md`**
 
 Содержимое (подставить фактические значения из вывода команд; раздел — строки таблицы):
 
@@ -241,7 +241,7 @@ Expected: `100% tests passed, 1 tests`.
 | CMake/Ninja | <вывод `cmake --version`, `ninja --version` из vcvars64> | поставка VS |
 ```
 
-- [ ] **Step 13: Commit**
+- [x] **Step 13: Commit**
 
 ```bash
 git add vcpkg.json CMakeLists.txt CMakePresets.json .gitignore tools/build.cmd tools/test.cmd src/main.cpp tests/ docs/build/windows-toolchain.md
@@ -260,7 +260,7 @@ git commit -m "Сборка: инструментарий MSVC/vcpkg и скел
 - Consumes: libsodium.
 - Produces: `tb::SecureKey` (32 байта, `sodium_malloc`/`sodium_free`, `data()`, `Size`), `tb::SecureBytes` (перемещаемый очищаемый `QByteArray`), `tb::crypto::init()`, `tb::crypto::deriveKey(const QByteArray& passwordUtf8, const unsigned char* salt16, SecureKey& out)`, `tb::crypto::Blob { unsigned char nonce[24]; QByteArray ct; }`, `tb::crypto::seal/open(const SecureKey&, const QByteArray& aad, ...)`.
 
-- [ ] **Step 1: Написать failing-тест `tests/test_crypto.cpp`**
+- [x] **Step 1: Написать failing-тест `tests/test_crypto.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -321,7 +321,7 @@ QTEST_MAIN(TestCrypto)
 #include "test_crypto.moc"
 ```
 
-- [ ] **Step 2: Подключить тест и цель, запустить, убедиться в ошибке компиляции**
+- [x] **Step 2: Подключить тест и цель, запустить, убедиться в ошибке компиляции**
 
 `tests/CMakeLists.txt` — добавить:
 
@@ -336,7 +336,7 @@ add_test(NAME crypto COMMAND test_crypto)
 Run: `cmd //c tools\\build.cmd`
 Expected: FAIL — `crypto.h: No such file or directory` (файла ещё нет).
 
-- [ ] **Step 3: Реализовать `src/vault/SecureBytes.h`**
+- [x] **Step 3: Реализовать `src/vault/SecureBytes.h`**
 
 ```cpp
 #pragma once
@@ -376,7 +376,7 @@ private:
 } // namespace tb
 ```
 
-- [ ] **Step 4: Реализовать `src/vault/Crypto.h` и `Crypto.cpp`**
+- [x] **Step 4: Реализовать `src/vault/Crypto.h` и `Crypto.cpp`**
 
 `src/vault/Crypto.h`:
 
@@ -436,12 +436,12 @@ bool open(const SecureKey& k, const QByteArray& aad, const Blob& blob, QByteArra
 } // namespace tb::crypto
 ```
 
-- [ ] **Step 5: Собрать и прогнать**
+- [x] **Step 5: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: все тесты PASS (smoke, crypto — 6 тестов).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/vault/ tests/test_crypto.cpp CMakeLists.txt tests/CMakeLists.txt
@@ -482,7 +482,7 @@ git commit -m "Крипто: Argon2id и XChaCha20-Poly1305 поверх libsodi
 
 `reseal` сохраняет байты `0..(61+W)` без изменений (включая оболочку ключа и salt) и заменяет `ctNonce/ctLen/ct` новой печатью модели тем же dataKey.
 
-- [ ] **Step 1: Failing-тест `tests/test_container.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_container.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -578,13 +578,13 @@ QTEST_MAIN(TestContainer)
 #include "test_container.moc"
 ```
 
-- [ ] **Step 2: Подключить тест, запустить, убедиться в FAIL**
+- [x] **Step 2: Подключить тест, запустить, убедиться в FAIL**
 
 `tests/CMakeLists.txt` — добавить то же, что для crypto (цель `test_container`). `CMakeLists.txt` — добавить `src/vault/Container.cpp` в цель TokenBucket.
 Run: `cmd //c tools\\build.cmd`
 Expected: FAIL — `Container.h: No such file or directory`.
 
-- [ ] **Step 3: Реализовать `src/vault/Container.h`**
+- [x] **Step 3: Реализовать `src/vault/Container.h`**
 
 ```cpp
 #pragma once
@@ -611,7 +611,7 @@ Opened openHello(const QByteArray& fileBytes);
 }
 ```
 
-- [ ] **Step 4: Реализовать `src/vault/Container.cpp`**
+- [x] **Step 4: Реализовать `src/vault/Container.cpp`**
 
 ```cpp
 #include "Container.h"
@@ -779,12 +779,12 @@ Opened openHello(const QByteArray& f) {
 
 Примечание к тесту `helloRoundtripViaDpapi`: `openPassword` hello-файла возвращает `Unsupported` — это закреплено тестом; на Linux файл режима 2 так же не открывается (функции `openHello` нет).
 
-- [ ] **Step 5: Собрать и прогнать**
+- [x] **Step 5: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS — все контейнерные тесты, включая `helloRoundtripViaDpapi` на Windows.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/vault/Container.h src/vault/Container.cpp tests/test_container.cpp CMakeLists.txt tests/CMakeLists.txt
@@ -825,7 +825,7 @@ void clear();
 
 Все мутаторы возвращают `QString()` при успехе и русский текст ошибки при отказе.
 
-- [ ] **Step 1: Failing-тест `tests/test_model.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_model.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -919,9 +919,9 @@ QTEST_MAIN(TestModel)
 #include "test_model.moc"
 ```
 
-- [ ] **Step 2: Подключить цель `test_model`, запустить — FAIL (нет VaultModel.h)**
+- [x] **Step 2: Подключить цель `test_model`, запустить — FAIL (нет VaultModel.h)**
 
-- [ ] **Step 3: Реализовать `src/model/Types.h`**
+- [x] **Step 3: Реализовать `src/model/Types.h`**
 
 ```cpp
 #pragma once
@@ -943,7 +943,7 @@ struct Entry {
 }
 ```
 
-- [ ] **Step 4: Реализовать `src/model/VaultModel.h/.cpp`**
+- [x] **Step 4: Реализовать `src/model/VaultModel.h/.cpp`**
 
 `src/model/VaultModel.h`:
 
@@ -1160,12 +1160,12 @@ void VaultModel::clear() { nodes_.clear(); entries_.clear(); }
 
 Примечание: `moveNode` использует `std::function` — включить `#include <functional>` в .cpp.
 
-- [ ] **Step 5: Собрать и прогнать**
+- [x] **Step 5: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS. Тест `maxEntriesTenThousand` выполняет Argon2-независимую работу и завершается быстро; если CTest превышает 60 с — проверить, что в тесте не вызывается криптография.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/model/ tests/test_model.cpp CMakeLists.txt tests/CMakeLists.txt

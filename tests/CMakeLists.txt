@@ -11,3 +11,5 @@ endfunction()
 tb_add_test(test_smoke)
 tb_add_test(test_crypto)
 tb_add_test(test_container)
+
+tb_add_test(test_model)

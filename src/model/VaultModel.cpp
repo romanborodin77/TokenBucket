@@ -1,0 +1,203 @@
+#include "VaultModel.h"
+#include <QCborArray>
+#include <QCborMap>
+#include <QCborValue>
+#include <QCborStreamReader>
+#include <functional>
+#include <algorithm>
+using namespace Qt::StringLiterals;
+namespace tb::model {
+namespace {
+QString iso(const QDateTime& t) { return t.toUTC().toString(Qt::ISODateWithMs); }
+QDateTime fromIso(const QCborValue& v) { return QDateTime::fromString(v.toString(), Qt::ISODateWithMs); }
+Id idFrom(const QCborValue& v) { return QUuid::fromString(v.toString()); }
+QString idStr(const Id& id) { return id.toString(QUuid::WithoutBraces); }
+}
+QString VaultModel::addNode(Id id, Id parent, const QString& name) {
+    if (id.isNull()) return "Пустой идентификатор.";
+    if (name.isEmpty()) return "Имя не может быть пустым.";
+    if (nodes_.contains(id) || entries_.contains(id)) return "Такой идентификатор уже есть.";
+    if (!parent.isNull()) {
+        if (!nodes_.contains(parent)) return "Родитель не найден.";
+        if (depth(parent) >= MaxDepth) return "Превышена вложенность 8 уровней.";
+    }
+    nodes_.insert(id, {id, parent, name});
+    return {};
+}
+QString VaultModel::renameNode(Id id, const QString& name) {
+    auto it = nodes_.find(id);
+    if (it == nodes_.end()) return "Узел не найден.";
+    if (name.isEmpty()) return "Имя не может быть пустым.";
+    it->name = name;
+    return {};
+}
+int VaultModel::depth(Id node) const {
+    if (!nodes_.contains(node)) return 0;
+    int d = 1;
+    Id p = nodes_.value(node).parent;
+    while (!p.isNull()) { ++d; p = nodes_.value(p).parent; }
+    return d;
+}
+bool VaultModel::wouldCycle(Id node, Id newParent) const {
+    Id p = newParent;
+    while (!p.isNull()) { if (p == node) return true; p = nodes_.value(p).parent; }
+    return false;
+}
+QString VaultModel::moveNode(Id id, Id newParent) {
+    auto it = nodes_.find(id);
+    if (it == nodes_.end()) return "Узел не найден.";
+    if (it->parent.isNull()) return "Проект нельзя переместить.";
+    if (!nodes_.contains(newParent)) return "Новый родитель не найден.";
+    if (wouldCycle(id, newParent)) return "Перенос создал бы цикл.";
+    if (id == newParent) return "Нельзя переместить в себя.";
+    int subtree = 1;
+    std::function<int(Id)> h = [&](Id root) { int m = 0; for (auto&n : nodes_) if (n.parent == root) m = std::max(m, 1 + h(n.id)); return m; };
+    subtree = 1 + h(id);
+    if (depth(newParent) + subtree > MaxDepth) return "Превышена вложенность 8 уровней.";
+    it->parent = newParent;
+    return {};
+}
+QString VaultModel::removeNode(Id id) {
+    if (!nodes_.contains(id)) return "Узел не найден.";
+    for (auto& n : nodes_) if (n.parent == id) return "Сначала удалите вложенные группы.";
+    if (!entriesInGroup(id).isEmpty()) return "Сначала удалите записи из группы.";
+    nodes_.remove(id);
+    return {};
+}
+QList<Id> VaultModel::childNodes(Id parent) const {
+    QList<Id> r;
+    for (auto& n : nodes_) if (n.parent == parent) r << n.id;
+    std::sort(r.begin(), r.end(), [&](Id a, Id b){ return nodes_[a].name < nodes_[b].name; });
+    return r;
+}
+bool VaultModel::secretTooBig(const Entry& e) {
+    return e.token.toUtf8().size() > MaxSecretBytes || e.password.toUtf8().size() > MaxSecretBytes
+        || e.sshPrivate.size() > MaxSecretBytes || e.sshPublic.size() > MaxSecretBytes
+        || e.sshPassphrase.toUtf8().size() > MaxSecretBytes;
+}
+QString VaultModel::setEntry(const Entry& e) {
+    if (e.id.isNull() || nodes_.contains(e.id)) return "Недопустимый идентификатор записи.";
+    if (int(e.type) < 0 || int(e.type) > 2) return "Неизвестный тип записи.";
+    if (!nodes_.contains(e.groupId)) return "Проект или группа не найдены.";
+    if (!entries_.contains(e.id) && entries_.size() >= MaxEntries) return "Достигнут предел 10 000 записей.";
+    if (secretTooBig(e)) return "Секрет превышает 1 МиБ.";
+    entries_.insert(e.id, e);
+    return {};
+}
+QString VaultModel::removeEntry(Id id) { return entries_.remove(id) ? QString() : "Запись не найдена."; }
+const Entry* VaultModel::entry(Id id) const {
+    auto it = entries_.constFind(id);
+    return it == entries_.cend() ? nullptr : &it.value();
+}
+QList<Id> VaultModel::entriesInGroup(Id groupId) const {
+    QList<Id> r;
+    for (auto& e : entries_) if (e.groupId == groupId) r << e.id;
+    return r;
+}
+QList<Id> VaultModel::entriesInSubtree(Id groupId) const {
+    QList<Id> r = entriesInGroup(groupId);
+    for (auto& n : nodes_) if (n.parent == groupId) r << entriesInSubtree(n.id);
+    return r;
+}
+QList<Id> VaultModel::search(const QString& needle) const {
+    QList<Id> r;
+    if (needle.isEmpty()) return r;
+    for (auto& e : entries_)
+        if (e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
+            || e.note.contains(needle, Qt::CaseInsensitive))
+            r << e.id;
+    for (auto& n : nodes_)
+        if (n.name.contains(needle, Qt::CaseInsensitive))
+            for (auto id : entriesInSubtree(n.id))
+                if (!r.contains(id)) r << id;
+    return r;
+}
+QByteArray VaultModel::toCbor() const {
+    QCborMap root;
+    root[u"v"_s] = 1;
+    QCborArray ns;
+    for (auto& n : nodes_) { QCborMap m; m[u"id"_s] = idStr(n.id); m[u"p"_s] = n.parent.isNull() ? QString() : idStr(n.parent); m[u"n"_s] = n.name; ns << m; }
+    root[u"nodes"_s] = ns;
+    QCborArray es;
+    for (auto& e : entries_) {
+        QCborMap m;
+        m[u"id"_s] = idStr(e.id); m[u"g"_s] = idStr(e.groupId);
+        m[u"type"_s] = int(e.type);
+        m[u"title"_s] = e.title; m[u"note"_s] = e.note; m[u"url"_s] = e.url;
+        m[u"cr"_s] = iso(e.created); m[u"mod"_s] = iso(e.modified);
+        m[u"fav"_s] = e.favorite; m[u"rv"_s] = e.reverify;
+        m[u"tok"_s] = e.token.toUtf8(); m[u"login"_s] = e.login; m[u"pw"_s] = e.password.toUtf8();
+        m[u"sshpriv"_s] = e.sshPrivate; m[u"sshpub"_s] = e.sshPublic;
+        m[u"sshph"_s] = e.sshPassphrase; m[u"sshc"_s] = e.sshComment;
+        es << m;
+    }
+    root[u"entries"_s] = es;
+    return QCborValue(root).toCbor();
+}
+VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* err) {
+    if (err) err->clear();
+    const auto bad = [&] { if (err) *err = "Хранилище повреждено."; return ParseStatus::Bad; };
+    if (cbor.size() > MaxPlainBytesCBOR) { if (err) *err = "Содержимое хранилища превышает 64 МиБ."; return ParseStatus::TooLarge; }
+    QCborStreamReader reader(cbor);
+    QCborValue v = QCborValue::fromCbor(reader);
+    if (!v.isMap() || reader.lastError() != QCborError::NoError || reader.currentOffset() != cbor.size()) return bad();
+    QCborMap root = v.toMap();
+    if (root.size() != 3 || !root.value(u"v"_s).isInteger() || root.value(u"v"_s).toInteger() != 1
+        || !root.value(u"nodes"_s).isArray() || !root.value(u"entries"_s).isArray()) return bad();
+    VaultModel fresh;
+    for (const auto& nv : root.value(u"nodes"_s).toArray()) {
+        if (!nv.isMap()) return bad();
+        QCborMap m = nv.toMap();
+        if (m.size() != 3 || !m.value(u"id"_s).isString() || !m.value(u"p"_s).isString()
+            || !m.value(u"n"_s).isString() || m.value(u"n"_s).toString().isEmpty()) return bad();
+        Id id = idFrom(m.value(u"id"_s)), parent = idFrom(m.value(u"p"_s));
+        if (id.isNull() || fresh.nodes_.contains(id)
+            || (parent.isNull() && !m.value(u"p"_s).toString().isEmpty())) return bad();
+        fresh.nodes_.insert(id, {id, parent, m.value(u"n"_s).toString()});
+    }
+    // QHash сериализует узлы в произвольном порядке: сначала читаем, затем проверяем связи.
+    for (const auto& n : std::as_const(fresh.nodes_)) {
+        Id current = n.id;
+        for (int depth = 0; !current.isNull(); ++depth) {
+            const auto it = fresh.nodes_.constFind(current);
+            if (depth >= MaxDepth || it == fresh.nodes_.cend()) return bad();
+            current = it->parent;
+        }
+    }
+    int count = 0;
+    for (const auto& ev : root.value(u"entries"_s).toArray()) {
+        if (++count > MaxEntries) { if (err) *err = "Превышен предел 10 000 записей."; return ParseStatus::TooLarge; }
+        QCborMap m = ev.toMap();
+        if (!ev.isMap() || m.size() != 17) return bad();
+        for (const auto key : {u"id"_s, u"g"_s, u"title"_s, u"note"_s, u"url"_s, u"cr"_s,
+                              u"mod"_s, u"login"_s, u"sshph"_s, u"sshc"_s})
+            if (!m.value(key).isString()) return bad();
+        for (const auto key : {u"tok"_s, u"pw"_s, u"sshpriv"_s, u"sshpub"_s})
+            if (!m.value(key).isByteArray()) return bad();
+        if (!m.value(u"fav"_s).isBool() || !m.value(u"rv"_s).isBool()
+            || !m.value(u"type"_s).isInteger() || m.value(u"type"_s).toInteger() < 0
+            || m.value(u"type"_s).toInteger() > 2
+            || !m.value(u"tok"_s).toByteArray().isValidUtf8()
+            || !m.value(u"pw"_s).toByteArray().isValidUtf8()) return bad();
+        Entry e;
+        e.id = idFrom(m.value(u"id"_s)); e.groupId = idFrom(m.value(u"g"_s));
+        e.type = EntryType(m.value(u"type"_s).toInteger());
+        if (e.id.isNull() || fresh.entries_.contains(e.id) || fresh.nodes_.contains(e.id)
+            || !fresh.nodes_.contains(e.groupId)) return bad();
+        e.title = m.value(u"title"_s).toString(); e.note = m.value(u"note"_s).toString(); e.url = m.value(u"url"_s).toString();
+        e.created = fromIso(m.value(u"cr"_s)); e.modified = fromIso(m.value(u"mod"_s));
+        if ((!e.created.isValid() && !m.value(u"cr"_s).toString().isEmpty())
+            || (!e.modified.isValid() && !m.value(u"mod"_s).toString().isEmpty())) return bad();
+        e.favorite = m.value(u"fav"_s).toBool(); e.reverify = m.value(u"rv"_s).toBool();
+        e.token = QString::fromUtf8(m.value(u"tok"_s).toByteArray()); e.login = m.value(u"login"_s).toString();
+        e.password = QString::fromUtf8(m.value(u"pw"_s).toByteArray());
+        e.sshPrivate = m.value(u"sshpriv"_s).toByteArray(); e.sshPublic = m.value(u"sshpub"_s).toByteArray();
+        e.sshPassphrase = m.value(u"sshph"_s).toString(); e.sshComment = m.value(u"sshc"_s).toString();
+        if (secretTooBig(e)) { if (err) *err = "Секрет превышает 1 МиБ."; return ParseStatus::TooLarge; }
+        fresh.entries_.insert(e.id, e);
+    }
+    *this = std::move(fresh);
+    return ParseStatus::Ok;
+}
+void VaultModel::clear() { nodes_.clear(); entries_.clear(); }
+}

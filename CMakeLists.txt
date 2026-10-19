@@ -9,6 +9,7 @@ qt_standard_project_setup()
 add_library(tokenbucket_core STATIC
   src/vault/Crypto.cpp
   src/vault/Container.cpp
+  src/model/VaultModel.cpp
 )
 target_include_directories(tokenbucket_core PUBLIC src)
 target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets unofficial-sodium::sodium)
