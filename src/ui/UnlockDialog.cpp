@@ -1,12 +1,18 @@
 #include "UnlockDialog.h"
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
 UnlockDialog::UnlockDialog(Kind kind, QWidget* parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("Разблокировка TokenBucket"));
     auto* layout = new QVBoxLayout(this);
+    auto* note = new QLabel(kind == Kind::Password
+        ? QStringLiteral("Введите мастер-пароль этого хранилища. Если пароль забыт, восстановить его невозможно — используйте заранее сделанный защищённый экспорт.")
+        : QStringLiteral("Подтвердите вход через Windows Hello. Ключ хранилища защищён этой учётной записью Windows и не переносится на другие компьютеры."), this);
+    note->setWordWrap(true); note->setTextFormat(Qt::PlainText);
+    layout->addWidget(note);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
     if (kind == Kind::Password) {

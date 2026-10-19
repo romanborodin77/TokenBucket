@@ -6,7 +6,8 @@ namespace tb::ui {
 class ExportDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit ExportDialog(QWidget* parent = nullptr, const QString& prompt = {});
+    explicit ExportDialog(QWidget* parent = nullptr, const QString& title = {},
+                          const QString& note = {}, const QString& prompt = {});
     ~ExportDialog() override;
     QByteArray password() const;
     void clearSecrets();

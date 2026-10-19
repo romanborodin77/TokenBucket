@@ -100,6 +100,8 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     splitter->addWidget(tree_); splitter->addWidget(list_); splitter->addWidget(right_); splitter->setSizes({250,300,500}); layout->addWidget(splitter, 1);
     error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
     setCentralWidget(central);
+    vaultInfo_ = new QLabel(statusBar()); vaultInfo_->setTextFormat(Qt::PlainText);
+    statusBar()->addPermanentWidget(vaultInfo_);
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { refillList(); });
     connect(search_, &QLineEdit::textChanged, this, [this] { refillList(); });
     connect(list_, &QListWidget::currentItemChanged, this, &MainWindow::showMetadata);
@@ -165,6 +167,11 @@ void MainWindow::refreshAll() {
         else if (tree_->topLevelItemCount()) tree_->setCurrentItem(tree_->topLevelItem(0));
     }
     refillList(entry); updateEnabled(); updateSwitchActionText();
+    if (app_.gate() == Application::Gate::Ready) {
+        const auto mode = app_.mode() == Application::Mode::Hello ? QStringLiteral("Windows Hello") : QStringLiteral("мастер-пароль");
+        vaultInfo_->setText(QStringLiteral("Записей: %1 · Проектов и групп: %2 · Разблокировка: %3")
+            .arg(app_.model()->entries().size()).arg(app_.model()->nodes().size()).arg(mode));
+    } else vaultInfo_->clear();
 }
 void MainWindow::refillList(model::Id selected) {
     QSignalBlocker block(list_); list_->clear();
@@ -273,8 +280,11 @@ void MainWindow::deleteSelectedNode() {
 void MainWindow::exportVault() {
     if (!ready() || editing_) return;
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
-    if (!VerifyDialog::verify(app_, this) || !ready() || app_.generation() != generation) return;
-    ExportDialog dialog(this, QStringLiteral("&Пароль защищённого экспорта (12–1024 байта UTF-8):"));
+    if (!VerifyDialog::verify(app_, this, QStringLiteral("защищённый экспорт")) || !ready() || app_.generation() != generation) return;
+    ExportDialog dialog(this, QStringLiteral("Защищённый экспорт хранилища"),
+        QStringLiteral("Экспорт шифруется отдельным паролем, который не связан с мастер-паролем. "
+                       "Полученный файл можно переносить на другие компьютеры; для восстановления понадобятся только файл и этот пароль."),
+        QStringLiteral("&Пароль защищённого экспорта (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
     const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Защищённый экспорт"), {}, QStringLiteral("TokenBucket (*.tb)"));
@@ -309,7 +319,10 @@ void MainWindow::importVault() {
     fileDialog.setOkButtonText(QStringLiteral("Далее")); fileDialog.setCancelButtonText(QStringLiteral("Отмена"));
     if (fileDialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
     SecureBytes filePassword(fileDialog.textValue().toUtf8()); fileDialog.setTextValue({});
-    ExportDialog localDialog(this, QStringLiteral("&Новый мастер-пароль локального хранилища (12–1024 байта UTF-8):"));
+    ExportDialog localDialog(this, QStringLiteral("Пароль нового локального хранилища"),
+        QStringLiteral("Импортируемые данные будут пересохранены в этом приложении с новым мастер-паролем. "
+                       "Пароль файла импорта используется один раз — только чтобы прочитать файл."),
+        QStringLiteral("&Новый мастер-пароль локального хранилища (12–1024 байта UTF-8):"));
     if (localDialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) { filePassword.clear(); return; }
     SecureBytes localPassword(localDialog.password()); localDialog.clearSecrets();
     QString error;
@@ -322,7 +335,7 @@ void MainWindow::importVault() {
 void MainWindow::switchUnlockMode() {
     if (!ready() || editing_) return;
     QScopedValueRollback guard(editing_, true);
-    if (!VerifyDialog::verify(app_, this) || !ready()) return;
+    if (!VerifyDialog::verify(app_, this, QStringLiteral("смена способа разблокировки")) || !ready()) return;
     QString error;
 #ifdef Q_OS_WIN
     if (app_.mode() == Application::Mode::Password) {
@@ -330,13 +343,22 @@ void MainWindow::switchUnlockMode() {
             QMessageBox::information(this, QStringLiteral("TokenBucket"), QStringLiteral("Windows Hello недоступен или не настроен."));
             return;
         }
+        QMessageBox::information(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Хранилище будет зашифровано для вашей учётной записи Windows, и разблокировка станет выполняться по Windows Hello. "
+                           "Мастер-пароль использоваться больше не будет. Ключ не переносится на другие компьютеры; "
+                           "для переноса заранее сделайте защищённый экспорт."));
         if (app_.switchToHello(&error)) statusBar()->showMessage(QStringLiteral("Разблокировка Windows Hello включена."), 5000);
         else QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
         refreshAll();
         return;
     }
 #endif
-    ExportDialog dialog(this, QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
+    QMessageBox::information(this, QStringLiteral("TokenBucket"),
+        QStringLiteral("Хранилище будет зашифровано новым мастер-паролем; Windows Hello больше не будет использоваться для разблокировки. "
+                       "Запомните новый пароль: восстановить забытый невозможно."));
+    ExportDialog dialog(this, QStringLiteral("Переход на мастер-пароль"),
+        QStringLiteral("Введите новый мастер-пароль дважды. После сохранения хранилище открывается только этим паролем."),
+        QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready()) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
     const bool ok = app_.switchToPassword(password.bytes(), &error);
@@ -349,8 +371,12 @@ void MainWindow::changeMasterPassword() {
     if (!ready() || editing_) return;
     QScopedValueRollback guard(editing_, true);
     if (app_.mode() != Application::Mode::Password) return;
-    if (!VerifyDialog::verify(app_, this) || !ready()) return;
-    ExportDialog dialog(this, QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
+    if (!VerifyDialog::verify(app_, this, QStringLiteral("смена мастер-пароля")) || !ready()) return;
+    ExportDialog dialog(this, QStringLiteral("Смена мастер-пароля"),
+        QStringLiteral("Текущий пароль уже подтверждён. Введите новый пароль дважды. "
+                       "После сохранения хранилище открывается только новым паролем, старый перестаёт действовать. "
+                       "Забытый пароль восстановить невозможно — заранее делайте защищённый экспорт как резервную копию."),
+        QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready()) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
     QString error;

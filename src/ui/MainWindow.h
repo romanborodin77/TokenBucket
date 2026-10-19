@@ -60,6 +60,7 @@ private:
     QScrollArea* cardScroll_{};
     ClipboardGuard clipboard_;
     QLabel* error_{};
+    QLabel* vaultInfo_{};
     QList<QAction*> mutations_;
     QAction* switchAction_{};
     QAction* changePwAction_{};

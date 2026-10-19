@@ -4,7 +4,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 namespace tb::ui {
-bool VerifyDialog::verify(Application& app, QWidget* parent) {
+bool VerifyDialog::verify(Application& app, QWidget* parent, const QString& action) {
     if (app.gate() != Application::Gate::Ready || app.busy()) return false;
     const auto generation = app.generation(); QString error; bool verified = false;
     if (app.mode() == Application::Mode::Hello) {
@@ -12,8 +12,9 @@ bool VerifyDialog::verify(Application& app, QWidget* parent) {
         verified = app.verifyHello(parent ? reinterpret_cast<void*>(parent->window()->winId()) : nullptr, &error);
 #endif
     } else {
-        QInputDialog dialog(parent); dialog.setWindowTitle(QStringLiteral("Повторная проверка"));
-        dialog.setLabelText(QStringLiteral("Мастер-пароль:")); dialog.setTextEchoMode(QLineEdit::Password);
+        QInputDialog dialog(parent);
+        dialog.setWindowTitle(action.isEmpty() ? QStringLiteral("Повторная проверка") : QStringLiteral("Повторная проверка — %1").arg(action));
+        dialog.setLabelText(QStringLiteral("Текущий мастер-пароль:")); dialog.setTextEchoMode(QLineEdit::Password);
         dialog.setOkButtonText(QStringLiteral("Подтвердить")); dialog.setCancelButtonText(QStringLiteral("Отмена"));
         QObject::connect(&app, &Application::stateChanged, &dialog, [&] { if (app.generation() != generation || app.gate() != Application::Gate::Ready) dialog.reject(); });
         const bool accepted = dialog.exec() == QDialog::Accepted;

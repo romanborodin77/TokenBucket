@@ -8,9 +8,15 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 namespace tb::ui {
-ExportDialog::ExportDialog(QWidget* parent, const QString& prompt) : QDialog(parent) {
-    setWindowTitle(QStringLiteral("TokenBucket — пароль"));
+ExportDialog::ExportDialog(QWidget* parent, const QString& title, const QString& note, const QString& prompt)
+    : QDialog(parent) {
+    setWindowTitle(title.isEmpty() ? QStringLiteral("TokenBucket — пароль") : title);
     auto* layout = new QVBoxLayout(this);
+    if (!note.isEmpty()) {
+        auto* explanation = new QLabel(note, this);
+        explanation->setWordWrap(true); explanation->setTextFormat(Qt::PlainText);
+        layout->addWidget(explanation);
+    }
     auto* form = new QFormLayout;
     pw1_ = new QLineEdit(this); pw2_ = new QLineEdit(this);
     pw1_->setObjectName(QStringLiteral("exportPassword")); pw2_->setObjectName(QStringLiteral("confirmExportPassword"));
