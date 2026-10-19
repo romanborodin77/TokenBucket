@@ -238,11 +238,15 @@ bool Application::checkPassword(const QByteArray& pw, QString* err) {
     auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
     return execute([this, secret, file, key](quint64) {
         auto result = std::make_shared<Outcome>(); QByteArray current;
-        if (store_.loadBytes(store_.mainPath(), &current) == store::VaultStore::Load::Ok && current == file) {
+        const auto loaded = store_.loadBytes(store_.mainPath(), &current);
+        if (loaded == store::VaultStore::Load::Ok && current != file)
+            result->error = QStringLiteral("Файл хранилища изменился вне приложения. Закройте приложение и откройте хранилище заново.");
+        else if (loaded == store::VaultStore::Load::Ok) {
             auto opened = container::openPassword(current, secret->bytes()); SecureBytes plain(std::move(opened.cbor));
             result->ok = opened.status == container::Status::Ok && opened.dataKey == *key;
-        }
-        secret->clear(); if (!result->ok) result->error = QStringLiteral("Неверный пароль или файл изменился. Откройте хранилище заново."); return result;
+            if (!result->ok) result->error = QStringLiteral("Неверный мастер-пароль.");
+        } else result->error = QStringLiteral("Не удалось прочитать файл хранилища. Откройте хранилище заново.");
+        secret->clear(); return result;
     }, Mode::Password, false, err);
 }
 #ifdef Q_OS_WIN
