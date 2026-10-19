@@ -8,6 +8,8 @@ mkdir dist\TokenBucket 2>nul
 copy build\Release\TokenBucket.exe dist\TokenBucket\ || exit /b 1
 build\vcpkg_installed\x64-windows\tools\Qt6\bin\windeployqt.exe --release --no-translations dist\TokenBucket\TokenBucket.exe || exit /b 1
 copy build\vcpkg_installed\x64-windows\bin\libsodium.dll dist\TokenBucket\ || exit /b 1
+rem windeployqt не переносит не-Qt зависимости vcpkg (pcre2-16, double-conversion, zstd, z, harfbuzz, freetype, libpng, brotli и др.) — копируем весь bin
+for %%f in (build\vcpkg_installed\x64-windows\bin\*.dll) do copy /y "%%f" dist\TokenBucket\ >nul || exit /b 1
 mkdir dist\TokenBucket\licenses 2>nul
 copy docs\licenses\* dist\TokenBucket\licenses\ || exit /b 1
 powershell -NoProfile -Command "Compress-Archive -Force -Path dist\TokenBucket -DestinationPath dist\TokenBucket-windows-x64.zip"
