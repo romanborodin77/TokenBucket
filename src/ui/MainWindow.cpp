@@ -47,6 +47,30 @@
 #endif
 #include <algorithm>
 namespace tb::ui {
+namespace {
+// Перехватывает перетаскивание: базовая обработка двигает элемент в дереве,
+// затем намерение (узел → целевой родитель) проверяется правилами модели.
+class VaultTree : public QTreeWidget {
+public:
+    using QTreeWidget::QTreeWidget;
+    std::function<bool(model::Id, model::Id)> moveRequest;
+protected:
+    void dropEvent(QDropEvent* event) override {
+        const auto* item = itemAt(event->position().toPoint());
+        const model::Id dragged = currentItem() ? currentItem()->data(0, Qt::UserRole).value<model::Id>() : model::Id{};
+        model::Id target;
+        switch (dropIndicatorPosition()) {
+        case OnItem:
+            target = item ? item->data(0, Qt::UserRole).value<model::Id>() : model::Id{}; break;
+        case AboveItem: case BelowItem:
+            target = item && item->parent() ? item->parent()->data(0, Qt::UserRole).value<model::Id>() : model::Id{}; break;
+        default: break;
+        }
+        QTreeWidget::dropEvent(event);
+        if (!dragged.isNull() && moveRequest) moveRequest(dragged, target);
+    }
+};
+}
 MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent), app_(app) {
     setWindowTitle(QStringLiteral("TokenBucket"));    const auto available = screen()->availableGeometry(); resize(qMin(1080, available.width() - 40), qMin(660, available.height() - 80));
     auto* vault = menuBar()->addMenu(QStringLiteral("&Хранилище"));
@@ -93,10 +117,28 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     edit->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
     lock->setIcon(style()->standardIcon(QStyle::SP_VistaShield));
     auto* central = new QWidget(this); auto* layout = new QVBoxLayout(central);
-    search_ = new QLineEdit(central); search_->setObjectName(QStringLiteral("vaultSearch")); search_->setAccessibleName(QStringLiteral("Поиск по хранилищу"));
-    search_->setPlaceholderText(QStringLiteral("Поиск по названиям, логинам, проектам и заметкам — во всём хранилище")); layout->addWidget(search_);
+    auto* controls = new QWidget(central); auto* controlsLayout = new QHBoxLayout(controls);
+    controlsLayout->setContentsMargins(0, 0, 0, 0);
+    search_ = new QLineEdit(controls); search_->setObjectName(QStringLiteral("vaultSearch")); search_->setAccessibleName(QStringLiteral("Поиск по хранилищу"));
+    search_->setPlaceholderText(QStringLiteral("Поиск по названиям, логинам, проектам и заметкам — во всём хранилище"));
+    controlsLayout->addWidget(search_, 1);
+    typeFilter_ = new QComboBox(controls); typeFilter_->setObjectName(QStringLiteral("typeFilter"));
+    typeFilter_->setAccessibleName(QStringLiteral("Фильтр по типу записи"));
+    typeFilter_->addItems({QStringLiteral("Все типы"), QStringLiteral("API-токены"), QStringLiteral("Учётные данные"), QStringLiteral("SSH-ключи")});
+    sortMode_ = new QComboBox(controls); sortMode_->setObjectName(QStringLiteral("sortMode"));
+    sortMode_->setAccessibleName(QStringLiteral("Сортировка записей"));
+    sortMode_->addItems({QStringLiteral("По названию"), QStringLiteral("По дате изменения")});
+    controlsLayout->addWidget(typeFilter_); controlsLayout->addWidget(sortMode_);
+    layout->addWidget(controls);
+    connect(typeFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
+    connect(sortMode_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     auto* splitter = new QSplitter(central);
-    tree_ = new QTreeWidget(splitter); tree_->setHeaderLabel(QStringLiteral("Проекты и группы")); tree_->setAccessibleName(QStringLiteral("Проекты и группы"));
+    auto* vaultTree = new VaultTree(splitter); tree_ = vaultTree;
+    vaultTree->moveRequest = [this](model::Id node, model::Id target) { return moveNodeTo(node, target); };
+    vaultTree->setDragEnabled(true); vaultTree->setAcceptDrops(true);
+    vaultTree->setDragDropMode(QAbstractItemView::InternalMove); vaultTree->setDefaultDropAction(Qt::MoveAction);
+    vaultTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    tree_->setHeaderLabel(QStringLiteral("Проекты и группы")); tree_->setAccessibleName(QStringLiteral("Проекты и группы"));
     list_ = new QListWidget(splitter); list_->setAccessibleName(QStringLiteral("Записи выбранной группы")); list_->setMinimumWidth(160);
     right_ = new QStackedWidget(splitter); right_->setObjectName(QStringLiteral("entryPanel"));
     auto* hint = new QLabel(QStringLiteral("Создайте проект и добавьте запись или выберите существующую запись."), right_);
@@ -194,9 +236,17 @@ void MainWindow::refillList(model::Id selected) {
     QSignalBlocker block(list_); list_->clear();
     if (app_.gate() == Application::Gate::Ready) {
         auto ids = search_->text().isEmpty() ? app_.model()->entriesInGroup(selectedNode()) : app_.model()->search(search_->text());
-        std::sort(ids.begin(), ids.end(), [this](model::Id a, model::Id b) {
+        const int typeFilter = typeFilter_->currentIndex() - 1; // -1 — все типы
+        if (typeFilter >= 0)
+            ids.erase(std::remove_if(ids.begin(), ids.end(), [this, typeFilter](model::Id id) {
+                const auto* entry = app_.model()->entry(id);
+                return !entry || int(entry->type) != typeFilter;
+            }), ids.end());
+        const bool byDate = sortMode_->currentIndex() == 1;
+        std::sort(ids.begin(), ids.end(), [this, byDate](model::Id a, model::Id b) {
             const auto *first = app_.model()->entry(a), *second = app_.model()->entry(b);
-            return first->favorite != second->favorite ? first->favorite : first->title < second->title;
+            if (first->favorite != second->favorite) return first->favorite;
+            return byDate ? first->modified > second->modified : first->title < second->title;
         });
         for (auto id : ids) {
             const auto* entry = app_.model()->entry(id);
@@ -401,6 +451,10 @@ void MainWindow::changeMasterPassword() {
     password.clear();
     if (!ok) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
     else statusBar()->showMessage(QStringLiteral("Мастер-пароль изменён."), 5000);
+}
+bool MainWindow::moveNodeTo(model::Id node, model::Id newParent) {
+    if (!ready() || node == newParent || newParent.isNull()) { refreshAll(); return false; }
+    return commit([&](auto& model) { return model.moveNode(node, newParent); });
 }
 void MainWindow::treeMenu(const QPoint& pos) {
     const auto item = tree_->itemAt(pos);

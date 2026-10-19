@@ -233,6 +233,46 @@ private slots:
         for (const QChar ch : first + second)
             QVERIFY2(alphabet.contains(ch), qPrintable(QStringLiteral("недопустимый знак: %1").arg(ch)));
     }
+    void typeFilterAndSortModes() {
+        Application app(dir_.path() + "/filter"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry older; older.id = QUuid::createUuid(); older.groupId = group;
+        older.type = model::EntryType::Credentials; older.title = "Альфа"; older.login = "a"; older.password = "pw1";
+        older.created = older.modified = QDateTime::currentDateTimeUtc().addSecs(-100);
+        model::Entry newer; newer.id = QUuid::createUuid(); newer.groupId = group;
+        newer.type = model::EntryType::ApiToken; newer.title = "Бета"; newer.token = "tok";
+        newer.created = newer.modified = QDateTime::currentDateTimeUtc();
+        QVERIFY(app.model()->setEntry(older).isEmpty()); QVERIFY(app.model()->setEntry(newer).isEmpty());
+        QVERIFY(app.save(&error));
+        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        auto* filter = w.findChild<QComboBox*>(QStringLiteral("typeFilter"));
+        auto* sort = w.findChild<QComboBox*>(QStringLiteral("sortMode"));
+        QVERIFY(filter); QVERIFY(sort);
+        QCOMPARE(w.list()->count(), 2);
+        QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));          // по названию
+        sort->setCurrentIndex(1);                                              // по дате: свежий первым
+        QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Бета"));
+        filter->setCurrentIndex(2);                                            // только учётные данные
+        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        filter->setCurrentIndex(0); sort->setCurrentIndex(0);
+        QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+    }
+    void moveNodeToValidatesModelRules() {
+        Application app(dir_.path() + "/dnd"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto project = QUuid::createUuid(), first = QUuid::createUuid(), second = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(project, {}, "P").isEmpty());
+        QVERIFY(app.model()->addNode(first, project, "G1").isEmpty());
+        QVERIFY(app.model()->addNode(second, first, "G2").isEmpty());
+        ui::MainWindow w(app); w.show();
+        QVERIFY(w.moveNodeTo(first, project));                       // вверх — допустимо
+        QCOMPARE(app.model()->nodes().value(first).parent, project);
+        QVERIFY(!w.moveNodeTo(project, first));                      // проект нельзя
+        QVERIFY(!w.moveNodeTo(first, second));                       // цикл: G2 внутри G1
+        QCOMPARE(app.model()->nodes().value(first).parent, project);
+        QVERIFY(!w.moveNodeTo(first, {}));                           // пустая цель — тихий откат
+        QVERIFY(w.moveNodeTo(second, project));                      // перенос между ветками
+        QCOMPARE(app.model()->nodes().value(second).parent, project);
+    }
     void cardRequiresExplicitRevealAndHides() {
         Application app(dir_.path() + "/card"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
         auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());

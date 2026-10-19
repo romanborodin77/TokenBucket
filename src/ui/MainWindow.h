@@ -4,7 +4,7 @@
 #include "../platform/ClipboardGuard.h"
 #include <memory>
 namespace tb::platform { class QuickPaste; }
-class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget;
+class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox;
 class QScrollArea; class QLabel; class QAction;
 namespace tb::ui {
 class EntryCard;
@@ -14,6 +14,7 @@ public:
     explicit MainWindow(Application& app, QWidget* parent = nullptr);
     ~MainWindow() override;
     void refreshAll();
+    bool moveNodeTo(model::Id node, model::Id newParent);
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
     QLineEdit* search() const { return search_; }
@@ -58,6 +59,8 @@ private:
     QTreeWidget* tree_{};
     QListWidget* list_{};
     QLineEdit* search_{};
+    QComboBox* typeFilter_{};
+    QComboBox* sortMode_{};
     QStackedWidget* right_{};
     EntryCard* card_{};
     QScrollArea* cardScroll_{};
