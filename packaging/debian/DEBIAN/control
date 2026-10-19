@@ -1,0 +1,9 @@
+Package: tokenbucket
+Version: 0.1.0-1
+Section: utils
+Priority: optional
+Architecture: amd64
+Depends: libc6, libqt6widgets6, libqt6dbus6, libsodium23
+Maintainer: imtonyromeo <246167+imtonyromeo@users.no-reply.gitverse.ru>
+Description: Локальное хранилище API-токенов, учётных данных и SSH-ключей
+ Зашифрованное локальное хранилище секретов (XChaCha20-Poly1305, Argon2id).

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=TokenBucket
+Comment=Локальное хранилище секретов
+Exec=tokenbucket
+Icon=tokenbucket
+Categories=Utility;Security;

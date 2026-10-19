@@ -3640,7 +3640,7 @@ git commit -m "Linux: IPC панели, сессия/сон через DBus, с�
 - Consumes: собранные Release-сборки обеих платформ, `docs/superpowers/specs/...` раздел 8.
 - Produces: `dist/TokenBucket-windows-x64.zip` (EXE + Qt/libsodium DLL + тексты лицензий Qt LGPL и libsodium ISC), `dist/tokenbucket_0.1.0-1_amd64.deb`; заполненные протоколы приёмки по пунктам 1–10 спеки для обеих платформ (или пометка «непроверено» для недоступного).
 
-- [ ] **Step 1: Windows-пакет**
+- [x] **Step 1: Windows-пакет**
 
 `tools/package-windows.cmd`:
 
