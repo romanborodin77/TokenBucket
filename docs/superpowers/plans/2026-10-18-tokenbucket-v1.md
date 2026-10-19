@@ -3257,7 +3257,7 @@ git commit -m "SSH: точные байты ключа и защищённая �
 
 Правила: горячая клавиша Ctrl+Alt+Space из QSettings (`hotkey`, ключ по умолчанию `Ctrl+Alt+Space`); при `RegisterHotKey` конфликте — сигнал `conflictDetected` и меню Настройки с `QKeySequenceEdit`; в панели показываются имя процесса и заголовок окна-получателя, зафиксированные при открытии; передача — только Ctrl+V без Enter; отмена при смене фокуса или недоступности процесса; многострочные секреты и SSH-ключи к автопоставке не допускаются.
 
-- [ ] **Step 1: Failing-тест `tests/test_paste_win.cpp`**
+- [x] **Step 1: Failing-тест `tests/test_paste_win.cpp`**
 
 ```cpp
 #include <QtTest>
@@ -3300,7 +3300,7 @@ QTEST_MAIN(TestPaste)
 
 Тест `recipientChangedDetected` использует реальный фокус GUI — на CI без интерактива может быть неустойчив; пометить `QSKIP` не нужно: локальная Windows-сессия интерактивна.
 
-- [ ] **Step 2: Реализовать `src/platform/QuickPaste.h` + `quickpaste_win.cpp`**
+- [x] **Step 2: Реализовать `src/platform/QuickPaste.h` + `quickpaste_win.cpp`**
 
 `src/platform/QuickPaste.h` (кроссплатформенная часть):
 
@@ -3423,7 +3423,7 @@ private:
 
 Класс `QuickPaste` объявить в отдельном заголовке `src/platform/QuickPasteWin.h` (moc требует заголовка для класса с `Q_OBJECT`; подключается в CMake только под `if(WIN32)`); в `quickpaste_win.cpp` — реализация методов. Горячая клавиша регистрируется на скрытый `QWidget hidden_` (его `winId()`); сообщения `WM_HOTKEY` приходят этому окну и перехватываются нативным фильтром по `msg->hwnd`.
 
-- [ ] **Step 3: Реализовать `src/ui/MiniPanel.h/.cpp`**
+- [x] **Step 3: Реализовать `src/ui/MiniPanel.h/.cpp`**
 
 ```cpp
 #pragma once
@@ -3513,20 +3513,20 @@ void MiniPanel::send() {
 
 `captureRecipient` вызвать до `show()` панели — иначе фокус уже у панели. Если `processName` содержит «(нет доступа...» — отказ: повышенное окно, отмена с сообщением (добавить проверку в `send()`).
 
-- [ ] **Step 4: Связать в `main.cpp`/`MainWindow`**
+- [x] **Step 4: Связать в `main.cpp`/`MainWindow`**
 
 `main.cpp` (Windows): после создания окна — `tb::platform::QuickPaste qp(core, guard, &w); QString qerr; qp.start(&qerr);` при отказе — `QMessageBox` «Сочетание Ctrl+Alt+Space занято» и открытие настроек со сменой (QKeySequenceEdit → `QSettings.setValue("hotkey", ...)` → `qp.reRegister(...)`). Меню «Настройки → Горячая клавиша...» в MainWindow.
 
-- [ ] **Step 5: Собрать и прогнать**
+- [x] **Step 5: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS (eligibility + recipient).
 
-- [ ] **Step 6: Ручная проверка (записать в `docs/build/manual-checks.md`)**
+- [x] **Step 6: Ручная проверка (записать в `docs/build/manual-checks.md`)**
 
 Неавтоматизируемое: нажатие Ctrl+Alt+Space в Блокноте/браузере/терминале с тестовой строкой `тест-вставки-123` (не секретом); смена фокуса до подтверждения; окно «От имени администратора» → отмена. По одному пункту на строку с результатом.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/platform/QuickPaste.h src/platform/quickpaste_win.h src/platform/quickpaste_win.cpp src/ui/MiniPanel.h src/ui/MiniPanel.cpp src/main.cpp src/ui/MainWindow.h src/ui/MainWindow.cpp tests/test_paste_win.cpp CMakeLists.txt tests/CMakeLists.txt docs/build/manual-checks.md

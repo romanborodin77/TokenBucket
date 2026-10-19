@@ -16,6 +16,7 @@ add_library(tokenbucket_core STATIC
   src/ui/UnlockDialog.cpp
   src/ui/EntryEditDialog.cpp
   src/ui/MainWindow.cpp
+  src/ui/MiniPanel.cpp
   src/platform/ClipboardGuard.cpp
   src/ui/EntryCard.cpp
   src/ui/ExportDialog.cpp
@@ -33,6 +34,7 @@ if(WIN32)
   target_sources(tokenbucket_core PRIVATE src/platform/fileops_win.cpp)
   target_sources(tokenbucket_core PRIVATE src/platform/hello_win.cpp)
   target_sources(tokenbucket_core PRIVATE src/platform/sessionlock_win.cpp)
+  target_sources(tokenbucket_core PRIVATE src/platform/quickpaste_win.cpp src/platform/QuickPasteWin.h)
   target_link_libraries(tokenbucket_core PUBLIC wtsapi32)
   target_link_libraries(tokenbucket_core PUBLIC windowsapp user32)
   target_link_libraries(tokenbucket_core PUBLIC advapi32)

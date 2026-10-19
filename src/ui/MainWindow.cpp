@@ -38,12 +38,15 @@
 #include "../vault/SecureBytes.h"
 #ifdef Q_OS_WIN
 #include "../platform/hello_win.h"
+#include "../platform/QuickPasteWin.h"
+#include <QKeySequenceEdit>
+#include <QSettings>
+#include <QTimer>
 #endif
 #include <algorithm>
 namespace tb::ui {
 MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent), app_(app) {
-    setWindowTitle(QStringLiteral("TokenBucket"));
-    const auto available = screen()->availableGeometry(); resize(qMin(1080, available.width() - 40), qMin(660, available.height() - 80));
+    setWindowTitle(QStringLiteral("TokenBucket"));    const auto available = screen()->availableGeometry(); resize(qMin(1080, available.width() - 40), qMin(660, available.height() - 80));
     auto* vault = menuBar()->addMenu(QStringLiteral("&Хранилище"));
     auto* projects = menuBar()->addMenu(QStringLiteral("&Проекты и группы"));
     auto* entries = menuBar()->addMenu(QStringLiteral("&Записи"));
@@ -75,6 +78,9 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     }
 #endif
     changePwAction_ = action(settings, QStringLiteral("Сменить мастер-пароль…"), &MainWindow::changeMasterPassword);
+#ifdef Q_OS_WIN
+    settings->addAction(QStringLiteral("Горячая клавиша быстрой вставки…"), this, &MainWindow::changeHotkey);
+#endif
     updateSwitchActionText();
     auto* lock = vault->addAction(QStringLiteral("Заблокировать"), &app_, &Application::lock); lock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
     vault->addAction(QStringLiteral("Закрыть"), this, &QWidget::close, QKeySequence::Quit);
@@ -117,8 +123,20 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
         }
         refreshAll();
     });
+#ifdef Q_OS_WIN
+    hotkey_ = std::make_unique<platform::QuickPaste>(app_, clipboard_, this);
+    connect(hotkey_.get(), &platform::QuickPaste::conflictDetected, this, [this](const QString& combo) {
+        QTimer::singleShot(0, this, [this, combo] {
+            QMessageBox::warning(this, QStringLiteral("TokenBucket"),
+                QStringLiteral("Горячая клавиша %1 занята другим приложением. Выберите другое сочетание.").arg(combo));
+            changeHotkey();
+        });
+    });
+    hotkey_->start(nullptr);
+#endif
     refreshAll();
 }
+MainWindow::~MainWindow() = default;
 bool MainWindow::ready() const { return app_.gate() == Application::Gate::Ready && !app_.busy(); }
 void MainWindow::updateEnabled() {
     centralWidget()->setEnabled(ready()); for (auto* action : mutations_) action->setEnabled(ready());
@@ -351,5 +369,28 @@ void MainWindow::updateSwitchActionText() {
 #endif
     if (changePwAction_) changePwAction_->setVisible(app_.mode() != Application::Mode::Hello);
 }
+#ifdef Q_OS_WIN
+void MainWindow::changeHotkey() {
+    if (!hotkey_) return;
+    QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("Горячая клавиша быстрой вставки"));
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* label = new QLabel(QStringLiteral("Сочетание для вызова панели быстрой вставки:"), &dialog); label->setWordWrap(true);
+    auto* edit = new QKeySequenceEdit(&dialog); edit->setObjectName(QStringLiteral("hotkeyEdit"));
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    edit->setKeySequence(QKeySequence(settings.value(QStringLiteral("hotkey"), QStringLiteral("Ctrl+Alt+Space")).toString()));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Сохранить"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
+    layout->addWidget(label); layout->addWidget(edit); layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const QKeySequence chosen = edit->keySequence();
+    if (chosen.isEmpty()) { QMessageBox::warning(this, QStringLiteral("TokenBucket"), QStringLiteral("Сочетание не задано.")); return; }
+    settings.setValue(QStringLiteral("hotkey"), chosen.toString());
+    QString error;
+    if (!hotkey_->reRegister(&error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+}
+#endif
 void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }void MainWindow::closeEvent(QCloseEvent* event) { app_.lock(); QMainWindow::closeEvent(event); emit closing(); }
 }

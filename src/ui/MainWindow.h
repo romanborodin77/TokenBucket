@@ -2,6 +2,8 @@
 #include <QMainWindow>
 #include "../app/Application.h"
 #include "../platform/ClipboardGuard.h"
+#include <memory>
+namespace tb::platform { class QuickPaste; }
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget;
 class QScrollArea; class QLabel; class QAction;
 namespace tb::ui {
@@ -10,6 +12,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(Application& app, QWidget* parent = nullptr);
+    ~MainWindow() override;
     void refreshAll();
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
@@ -30,6 +33,9 @@ public slots:
     void importVault();
     void switchUnlockMode();
     void changeMasterPassword();
+#ifdef Q_OS_WIN
+    void changeHotkey();
+#endif
 protected:
     void resizeEvent(QResizeEvent*) override;
     void closeEvent(QCloseEvent*) override;
@@ -58,6 +64,9 @@ private:
     QAction* switchAction_{};
     QAction* changePwAction_{};
     bool helloAvailable_ = false;
+#ifdef Q_OS_WIN
+    std::unique_ptr<platform::QuickPaste> hotkey_;
+#endif
     bool editing_ = false, narrow_ = false, cardOpen_ = false;
 };
 }
