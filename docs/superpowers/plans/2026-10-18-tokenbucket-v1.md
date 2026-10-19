@@ -3014,7 +3014,7 @@ git commit -m "Автоблокировка: простой 5 минут, сеа
 - Consumes: контейнер, store, VerifyDialog.
 - Produces: `Application::switchToPassword(const QByteArray& newPw, QString* err)`, `Application::switchToHello(QString* err)` (Windows): сначала `packX` новой моделью во временный контейнер, затем `store_.save` (атомарная замена), успех → смена mode/dataKey; любая ошибка — старое состояние без изменений. `ExportDialog { ExportDialog(QWidget*); QByteArray password() const; }` (ввод пароля экспорта дважды, те же правила 12–1024).
 
-- [ ] **Step 1: Failing-тесты (добавить в `tests/test_app.cpp`)**
+- [x] **Step 1: Failing-тесты (добавить в `tests/test_app.cpp`)**
 
 ```cpp
     void exportImportRoundtrip() {
@@ -3051,7 +3051,7 @@ git commit -m "Автоблокировка: простой 5 минут, сеа
 #endif
 ```
 
-- [ ] **Step 2: Реализовать в `Application`**
+- [x] **Step 2: Реализовать в `Application`**
 
 ```cpp
 QByteArray Application::exportContainer(const QByteArray& exportPw, QString* err) {
@@ -3103,7 +3103,7 @@ bool Application::switchToHello(QString* err) {
 
 До вызова switch-методов UI обязан выполнить `VerifyDialog::verify` (текущая проверка из спеки §3); в тестах методы вызываются напрямую из разблокированного состояния.
 
-- [ ] **Step 3: UI в MainWindow**
+- [x] **Step 3: UI в MainWindow**
 
 Меню «Хранилище» дополнить:
 
@@ -3122,12 +3122,12 @@ bool Application::switchToHello(QString* err) {
 
 `ExportDialog` — форма двух `QLineEdit::Password` + валидация `Application::validPassword` в `accept()` (как в `SetupDialog`).
 
-- [ ] **Step 4: Собрать и прогнать**
+- [x] **Step 4: Собрать и прогнать**
 
 Run: `cmd //c tools\\build.cmd && cmd //c tools\\test.cmd`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/app/Application.h src/app/Application.cpp src/ui/ExportDialog.h src/ui/ExportDialog.cpp src/ui/MainWindow.h src/ui/MainWindow.cpp tests/test_app.cpp

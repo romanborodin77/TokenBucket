@@ -139,6 +139,98 @@ void Application::lock() {
     gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
     emit stateChanged();
 }
+QByteArray Application::exportContainer(const QByteArray& exportPw, QString* err) {
+    if (!canStart(Gate::Ready, err)) return {};
+    if (!validPassword(exportPw)) { fail(err, "Пароль экспорта: минимум 12 и максимум 1024 байта UTF-8."); return {}; }
+    auto plain = std::make_shared<SecureBytes>(model_.toCbor());
+    if (plain->size() > container::MaxPlainBytes) { fail(err, "Содержимое хранилища превышает 64 МиБ."); return {}; }
+    const quint64 expected = generation_;
+    auto secret = std::make_shared<SecureBytes>(exportPw);
+    busy_ = true; emit busyChanged(true);
+    QString error; QByteArray exported;
+    try {
+        exported = waitFor(QtConcurrent::run([this, expected, plain, secret]() -> QByteArray {
+            if (expected != generation_) return {};
+            const QByteArray bytes = container::packPassword(secret->bytes(), plain->bytes(), nullptr);
+            return expected == generation_ ? bytes : QByteArray();
+        }));
+        if (expected != generation_) { exported.clear(); error = QStringLiteral("Операция отменена блокировкой хранилища."); }
+        else if (exported.isEmpty()) error = QStringLiteral("Не удалось создать файл экспорта.");
+    }
+    catch (...) { exported.clear(); error = QStringLiteral("Не удалось создать файл экспорта."); }
+    plain->clear(); secret->clear();
+    if (err) *err = error;
+    const bool canceled = expected != generation_;
+    busy_ = false; emit busyChanged(false);
+    if (canceled) emit stateChanged();
+    return exported;
+}
+bool Application::importContainer(const QByteArray& bytes, const QByteArray& importPw, const QByteArray& newLocalPw, QString* err) {
+    if (err) err->clear();
+    if (busy_) return fail(err, "Дождитесь завершения текущей операции.");
+    if (gate_ == Gate::NeedUnlock) return fail(err, "Сначала разблокируйте или закройте хранилище.");
+    if (!validPassword(importPw)) return fail(err, "Пароль файла импорта: минимум 12 и максимум 1024 байта UTF-8.");
+    if (!validPassword(newLocalPw)) return fail(err, "Новый мастер-пароль: минимум 12 и максимум 1024 байта UTF-8.");
+    if (bytes.isEmpty() || bytes.size() > int(container::MaxFileBytes)) return fail(err, "Файл импорта отсутствует, повреждён или слишком велик.");
+    auto source = std::make_shared<SecureBytes>(bytes);
+    auto fileSecret = std::make_shared<SecureBytes>(importPw);
+    auto localSecret = std::make_shared<SecureBytes>(newLocalPw);
+    return execute([this, source, fileSecret, localSecret](quint64 expected) {
+        auto result = std::make_shared<Outcome>();
+        auto opened = container::openPassword(source->bytes(), fileSecret->bytes());
+        SecureBytes plain(std::move(opened.cbor));
+        if (opened.status != container::Status::Ok) { result->error = QStringLiteral("Неверный пароль файла импорта или файл повреждён."); return result; }
+        if (result->model.fromCbor(plain.bytes(), &result->error) != model::VaultModel::ParseStatus::Ok) return result;
+        plain.clear();
+        if (generation() != expected) return result;
+        result->key = std::make_unique<SecureKey>();
+        SecureBytes cbor(result->model.toCbor());
+        result->file = cbor.size() > container::MaxPlainBytes ? QByteArray() : container::packPassword(localSecret->bytes(), cbor.bytes(), result->key.get());
+        cbor.clear();
+        if (generation() != expected) return result;
+        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
+        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось импортировать хранилище.");
+        return result;
+    }, Mode::Password, true, err);
+}
+bool Application::switchToPassword(const QByteArray& newPw, QString* err) {
+    if (!canStart(Gate::Ready, err)) return false;
+    if (!validPassword(newPw)) return fail(err, "Новый мастер-пароль: минимум 12 и максимум 1024 байта UTF-8.");
+    auto snapshot = std::make_shared<model::VaultModel>(model_);
+    auto secret = std::make_shared<SecureBytes>(newPw);
+    return execute([this, snapshot, secret](quint64 expected) {
+        auto result = std::make_shared<Outcome>();
+        result->model = *snapshot;
+        result->key = std::make_unique<SecureKey>();
+        SecureBytes cbor(result->model.toCbor());
+        if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
+        result->file = container::packPassword(secret->bytes(), cbor.bytes(), result->key.get());
+        cbor.clear();
+        if (generation() != expected) return result;
+        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
+        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сменить режим разблокировки.");
+        return result;
+    }, Mode::Password, true, err);
+}
+#ifdef Q_OS_WIN
+bool Application::switchToHello(QString* err) {
+    if (!canStart(Gate::Ready, err)) return false;
+    auto snapshot = std::make_shared<model::VaultModel>(model_);
+    return execute([this, snapshot](quint64 expected) {
+        auto result = std::make_shared<Outcome>();
+        result->model = *snapshot;
+        result->key = std::make_unique<SecureKey>();
+        SecureBytes cbor(result->model.toCbor());
+        if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
+        result->file = container::packHello(cbor.bytes(), result->key.get());
+        cbor.clear();
+        if (generation() != expected) return result;
+        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
+        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сменить режим разблокировки.");
+        return result;
+    }, Mode::Hello, true, err);
+}
+#endif
 bool Application::checkPassword(const QByteArray& pw, QString* err) {
     if (!canStart(Gate::Ready, err)) return false;
     if (mode_ != Mode::Password || !validPassword(pw)) return fail(err, "Неверный мастер-пароль.");

@@ -18,6 +18,7 @@ add_library(tokenbucket_core STATIC
   src/ui/MainWindow.cpp
   src/platform/ClipboardGuard.cpp
   src/ui/EntryCard.cpp
+  src/ui/ExportDialog.cpp
   src/ui/VerifyDialog.cpp
   src/app/IdleTimer.cpp
   src/platform/SessionWatcher.h

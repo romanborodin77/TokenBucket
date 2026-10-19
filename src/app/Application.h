@@ -34,6 +34,12 @@ public:
     bool save(QString* err);
     bool checkPassword(const QByteArray& pw, QString* err);
     void lock();
+    QByteArray exportContainer(const QByteArray& exportPw, QString* err);
+    bool importContainer(const QByteArray& bytes, const QByteArray& importPw, const QByteArray& newLocalPw, QString* err);
+    bool switchToPassword(const QByteArray& newPw, QString* err);
+#ifdef Q_OS_WIN
+    bool switchToHello(QString* err);
+#endif
     model::VaultModel* model() { return &model_; }
     quint64 generation() const { return generation_.load(); }
     QString storePathForTest() const { return store_.mainPath(); }

@@ -1,10 +1,15 @@
 #include "MainWindow.h"
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
+#include "ExportDialog.h"
+#include "VerifyDialog.h"
 #include <QAction>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QFile>
+#include <QFileDialog>
+#include <QFutureWatcher>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -27,6 +32,13 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QVBoxLayout>
+#include <QtConcurrent/QtConcurrentRun>
+#include "../platform/FileOps.h"
+#include "../vault/Container.h"
+#include "../vault/SecureBytes.h"
+#ifdef Q_OS_WIN
+#include "../platform/hello_win.h"
+#endif
 #include <algorithm>
 namespace tb::ui {
 MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent), app_(app) {
@@ -47,6 +59,23 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     addEntryAction->setShortcut(QKeySequence::New);
     auto* edit = action(entries, QStringLiteral("Изменить запись…"), &MainWindow::editSelected); edit->setShortcut(QKeySequence(Qt::Key_F2));
     action(entries, QStringLiteral("Удалить запись…"), &MainWindow::deleteSelected);
+    action(vault, QStringLiteral("Защищённый экспорт…"), &MainWindow::exportVault);
+    action(vault, QStringLiteral("Импорт из файла…"), &MainWindow::importVault);
+    vault->addSeparator();
+    auto* settings = menuBar()->addMenu(QStringLiteral("&Настройки"));
+#ifdef Q_OS_WIN
+    switchAction_ = action(settings, QString(), &MainWindow::switchUnlockMode);
+    {
+        auto* watcher = new QFutureWatcher<platform::hello::Availability>(this);
+        connect(watcher, &QFutureWatcher<platform::hello::Availability>::finished, this, [this, watcher] {
+            helloAvailable_ = watcher->result() == platform::hello::Availability::Available;
+            watcher->deleteLater(); updateSwitchActionText();
+        });
+        watcher->setFuture(QtConcurrent::run(platform::hello::availability));
+    }
+#endif
+    changePwAction_ = action(settings, QStringLiteral("Сменить мастер-пароль…"), &MainWindow::changeMasterPassword);
+    updateSwitchActionText();
     auto* lock = vault->addAction(QStringLiteral("Заблокировать"), &app_, &Application::lock); lock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
     vault->addAction(QStringLiteral("Закрыть"), this, &QWidget::close, QKeySequence::Quit);
     auto* toolbar = addToolBar(QStringLiteral("Действия")); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
@@ -117,7 +146,7 @@ void MainWindow::refreshAll() {
         if (selection) tree_->setCurrentItem(selection);
         else if (tree_->topLevelItemCount()) tree_->setCurrentItem(tree_->topLevelItem(0));
     }
-    refillList(entry); updateEnabled();
+    refillList(entry); updateEnabled(); updateSwitchActionText();
 }
 void MainWindow::refillList(model::Id selected) {
     QSignalBlocker block(list_); list_->clear();
@@ -223,6 +252,104 @@ void MainWindow::deleteSelectedNode() {
     if (QMessageBox::question(this, QStringLiteral("Удаление проекта/группы"), QStringLiteral("Удалить выбранный проект или группу?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes
         && ready() && app_.generation() == generation) commit([&](auto& model) { return model.removeNode(id); });
 }
-void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }
-void MainWindow::closeEvent(QCloseEvent* event) { app_.lock(); QMainWindow::closeEvent(event); emit closing(); }
+void MainWindow::exportVault() {
+    if (!ready() || editing_) return;
+    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    if (!VerifyDialog::verify(app_, this) || !ready() || app_.generation() != generation) return;
+    ExportDialog dialog(this, QStringLiteral("&Пароль защищённого экспорта (12–1024 байта UTF-8):"));
+    if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
+    SecureBytes password(dialog.password()); dialog.clearSecrets();
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Защищённый экспорт"), {}, QStringLiteral("TokenBucket (*.tb)"));
+    if (path.isEmpty() || !ready() || app_.generation() != generation) { password.clear(); return; }
+    QString error;
+    const QByteArray bytes = app_.exportContainer(password.bytes(), &error);
+    password.clear();
+    if (bytes.isEmpty()) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
+    if (!store::realFileOps().writeAll(path, bytes)) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось записать файл экспорта. Если файл существует, выберите другое имя."));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("Экспорт выполнен."), 5000);
+}
+void MainWindow::importVault() {
+    if (!ready() || editing_) return;
+    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    if (QMessageBox::question(this, QStringLiteral("Импорт хранилища"),
+            QStringLiteral("Импорт заменит текущее хранилище новым без слияния. Продолжить?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Импорт из файла"), {}, QStringLiteral("TokenBucket (*.tb);;Все файлы (*)"));
+    if (path.isEmpty() || !ready() || app_.generation() != generation) return;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > container::MaxFileBytes) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось открыть файл импорта или он больше 80 МиБ.")); return;
+    }
+    const QByteArray bytes = file.read(container::MaxFileBytes + 1);
+    file.close();
+    QInputDialog fileDialog(this);
+    fileDialog.setWindowTitle(QStringLiteral("Импорт хранилища"));
+    fileDialog.setLabelText(QStringLiteral("Пароль файла импорта:")); fileDialog.setTextEchoMode(QLineEdit::Password);
+    fileDialog.setOkButtonText(QStringLiteral("Далее")); fileDialog.setCancelButtonText(QStringLiteral("Отмена"));
+    if (fileDialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
+    SecureBytes filePassword(fileDialog.textValue().toUtf8()); fileDialog.setTextValue({});
+    ExportDialog localDialog(this, QStringLiteral("&Новый мастер-пароль локального хранилища (12–1024 байта UTF-8):"));
+    if (localDialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) { filePassword.clear(); return; }
+    SecureBytes localPassword(localDialog.password()); localDialog.clearSecrets();
+    QString error;
+    const bool ok = app_.importContainer(bytes, filePassword.bytes(), localPassword.bytes(), &error);
+    filePassword.clear(); localPassword.clear();
+    if (!ok) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
+    refreshAll();
+    statusBar()->showMessage(QStringLiteral("Импорт выполнен."), 5000);
+}
+void MainWindow::switchUnlockMode() {
+    if (!ready() || editing_) return;
+    QScopedValueRollback guard(editing_, true);
+    if (!VerifyDialog::verify(app_, this) || !ready()) return;
+    QString error;
+#ifdef Q_OS_WIN
+    if (app_.mode() == Application::Mode::Password) {
+        if (!helloAvailable_) {
+            QMessageBox::information(this, QStringLiteral("TokenBucket"), QStringLiteral("Windows Hello недоступен или не настроен."));
+            return;
+        }
+        if (app_.switchToHello(&error)) statusBar()->showMessage(QStringLiteral("Разблокировка Windows Hello включена."), 5000);
+        else QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+        refreshAll();
+        return;
+    }
+#endif
+    ExportDialog dialog(this, QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
+    if (dialog.exec() != QDialog::Accepted || !ready()) return;
+    SecureBytes password(dialog.password()); dialog.clearSecrets();
+    const bool ok = app_.switchToPassword(password.bytes(), &error);
+    password.clear();
+    if (!ok) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+    else statusBar()->showMessage(QStringLiteral("Разблокировка по мастер-паролю включена."), 5000);
+    refreshAll();
+}
+void MainWindow::changeMasterPassword() {
+    if (!ready() || editing_) return;
+    QScopedValueRollback guard(editing_, true);
+    if (app_.mode() != Application::Mode::Password) return;
+    if (!VerifyDialog::verify(app_, this) || !ready()) return;
+    ExportDialog dialog(this, QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
+    if (dialog.exec() != QDialog::Accepted || !ready()) return;
+    SecureBytes password(dialog.password()); dialog.clearSecrets();
+    QString error;
+    const bool ok = app_.switchToPassword(password.bytes(), &error);
+    password.clear();
+    if (!ok) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+    else statusBar()->showMessage(QStringLiteral("Мастер-пароль изменён."), 5000);
+}
+void MainWindow::updateSwitchActionText() {
+#ifdef Q_OS_WIN
+    if (switchAction_) {
+        switchAction_->setVisible(app_.mode() == Application::Mode::Hello || helloAvailable_);
+        switchAction_->setText(app_.mode() == Application::Mode::Hello
+            ? QStringLiteral("Перейти на мастер-пароль…") : QStringLiteral("Перейти на Windows Hello…"));
+    }
+#endif
+    if (changePwAction_) changePwAction_->setVisible(app_.mode() != Application::Mode::Hello);
+}
+void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }void MainWindow::closeEvent(QCloseEvent* event) { app_.lock(); QMainWindow::closeEvent(event); emit closing(); }
 }

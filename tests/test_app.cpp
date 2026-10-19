@@ -120,6 +120,39 @@ private slots:
         QCOMPARE(unlock.password(), QByteArray("  пароль-длинный  "));
         unlock.clearSecrets(); QVERIFY(unlock.password().isEmpty());
     }
+    void exportImportRoundtrip() {
+        Application src(dir_.path() + "/export-src"); QString err;
+        QVERIFY(src.createPasswordVault("пароль-источника", &err));
+        QVERIFY(src.model()->addNode(QUuid::createUuid(), {}, "Проект A").isEmpty());
+        const QByteArray exported = src.exportContainer("пароль-экспорта-1", &err);
+        QVERIFY(!exported.isEmpty()); QVERIFY(err.isEmpty());
+        QCOMPARE(container::readMode(exported), container::ModePassword);
+        QFile f(dir_.filePath("export.tb")); f.open(QIODevice::WriteOnly); QCOMPARE(f.write(exported), qint64(exported.size())); f.close();
+        Application dst(dir_.filePath("dst"));
+        QVERIFY(dst.importContainer(exported, "пароль-экспорта-1", "новый-пароль-123", &err));
+        QCOMPARE(dst.mode(), Application::Mode::Password);
+        QCOMPARE(dst.model()->nodes().size(), 1);
+        dst.lock(); QVERIFY(dst.unlock("новый-пароль-123", &err));
+        QCOMPARE(dst.model()->nodes().size(), 1);
+    }
+    void wrongExportPasswordFails() {
+        Application src(dir_.path() + "/export-src-2"); QString err;
+        QVERIFY(src.createPasswordVault("пароль-источника", &err));
+        const QByteArray exported = src.exportContainer("пароль-экспорта-1", &err);
+        QVERIFY(!exported.isEmpty());
+        Application dst(dir_.filePath("dst2"));
+        QVERIFY(!dst.importContainer(exported, "неверный-пароль!!", "новый-пароль-123", &err));
+        QVERIFY(!err.isEmpty());
+        QCOMPARE(dst.gate(), Application::Gate::NeedSetup);
+        QVERIFY(!QFile::exists(dst.storePathForTest()));
+    }
+    void exportRequiresReadyAndValidPassword() {
+        Application app(dir_.path() + "/export-gates"); QString err;
+        QVERIFY(app.createPasswordVault("valid-password", &err));
+        QVERIFY(app.exportContainer("short", &err).isEmpty()); QVERIFY(!err.isEmpty());
+        app.lock();
+        QVERIFY(app.exportContainer("valid-password", &err).isEmpty()); QVERIFY(!err.isEmpty());
+    }
 #ifdef Q_OS_WIN
     void helloVaultFlow() {
         std::atomic<platform::hello::Result> result{platform::hello::Result::Verified};
@@ -167,6 +200,33 @@ private slots:
         QVERIFY(app.save(&error));
         Application hello(dir_.path() + "/verify-hello", nullptr, [](void*, const QString&) { return platform::hello::Result::Verified; });
         QVERIFY(hello.createHelloVault(&error)); QVERIFY(hello.verifyHello(nullptr, &error)); QVERIFY(hello.save(&error));
+    }
+    void switchPasswordToHelloAndBack() {
+        Application app(dir_.path() + "/switch-modes", nullptr, [](void*, const QString&) { return platform::hello::Result::Verified; }); QString err;
+        QVERIFY(app.createPasswordVault("пароль-переключения", &err));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(), {}, "P").isEmpty());
+        QVERIFY(app.switchToHello(&err));
+        QCOMPARE(app.mode(), Application::Mode::Hello);
+        QCOMPARE(app.model()->nodes().size(), 1);
+        QByteArray onDisk;
+        store::VaultStore disk(dir_.path() + "/switch-modes");
+        QCOMPARE(disk.loadBytes(disk.mainPath(), &onDisk), store::VaultStore::Load::Ok);
+        QCOMPARE(container::readMode(onDisk), container::ModeHello);
+        app.lock();
+        QVERIFY(app.unlockHello(&err));
+        QCOMPARE(app.model()->nodes().size(), 1);
+        QVERIFY(app.switchToPassword("новый-пароль-123", &err));
+        QCOMPARE(app.mode(), Application::Mode::Password);
+        QCOMPARE(disk.loadBytes(disk.mainPath(), &onDisk), store::VaultStore::Load::Ok);
+        QCOMPARE(container::readMode(onDisk), container::ModePassword);
+        app.lock(); QVERIFY(app.unlock("новый-пароль-123", &err));
+        QCOMPARE(app.model()->nodes().size(), 1);
+    }
+    void switchRequiresReady() {
+        Application app(dir_.path() + "/switch-gates"); QString err;
+        QVERIFY(app.createPasswordVault("valid-password", &err));
+        app.lock();
+        QVERIFY(!app.switchToPassword("другой-пароль-123", &err)); QVERIFY(!err.isEmpty());
     }
 #endif
 };

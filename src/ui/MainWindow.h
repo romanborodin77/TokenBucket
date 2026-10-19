@@ -26,6 +26,10 @@ public slots:
     void renameSelectedNode();
     void moveSelectedNode();
     void deleteSelectedNode();
+    void exportVault();
+    void importVault();
+    void switchUnlockMode();
+    void changeMasterPassword();
 protected:
     void resizeEvent(QResizeEvent*) override;
     void closeEvent(QCloseEvent*) override;
@@ -38,6 +42,7 @@ private:
     void showMetadata();
     void openCardDialog();
     void selectNode(model::Id id);
+    void updateSwitchActionText();
     model::Id selectedNode() const;
     model::Id selectedEntry() const;
     Application& app_;
@@ -50,6 +55,9 @@ private:
     ClipboardGuard clipboard_;
     QLabel* error_{};
     QList<QAction*> mutations_;
+    QAction* switchAction_{};
+    QAction* changePwAction_{};
+    bool helloAvailable_ = false;
     bool editing_ = false, narrow_ = false, cardOpen_ = false;
 };
 }
