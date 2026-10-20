@@ -78,6 +78,7 @@ bool QuickPaste::nativeEventFilter(const QByteArray& type, void* message, qintpt
     if (msg->message == WM_HOTKEY && msg->hwnd == hotkeyHwnd_ && msg->wParam == 1) panel_->popup();
     return false;
 }
+void QuickPaste::popupPanel() { panel_->popup(); }
 std::pair<UINT, UINT> QuickPaste::splitSequence(const QKeySequence& ks) {
     UINT mods = 0, vk = 0;
     if (!ks.count()) return {0, 0};

@@ -2,8 +2,10 @@
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
 #include "ExportDialog.h"
+#include "Theme.h"
 #include "VerifyDialog.h"
 #include <QAction>
+#include <QActionGroup>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCursor>
@@ -24,7 +26,9 @@
 #include <QResizeEvent>
 #include <QScopedValueRollback>
 #include <QScopeGuard>
+#include <QSettings>
 #include <QSignalBlocker>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -45,7 +49,6 @@
 #include "../platform/hello_win.h"
 #include "../platform/QuickPasteWin.h"
 #include <QKeySequenceEdit>
-#include <QSettings>
 #include <QTimer>
 #endif
 #include <algorithm>
@@ -107,6 +110,27 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     }
 #endif
     changePwAction_ = action(settings, QStringLiteral("Сменить мастер-пароль…"), &MainWindow::changeMasterPassword);
+    settings->addAction(QStringLiteral("Автоблокировка…"), this, &MainWindow::configureIdleTimeout);
+    {   // Тема: Fusion + палитры, применение сразу ко всему приложению; отметка пункта — группой.
+        auto* themeMenu = settings->addMenu(QStringLiteral("Тема"));
+        auto* group = new QActionGroup(this);
+        const QList<QPair<theme::Mode, QString>> modes = {
+            {theme::Mode::System, QStringLiteral("Как в системе")},
+            {theme::Mode::Light, QStringLiteral("Светлая")},
+            {theme::Mode::Dark, QStringLiteral("Тёмная")}};
+        const auto active = theme::load();
+        for (const auto& [mode, text] : modes) {
+            auto* item = themeMenu->addAction(text, this, [mode] {
+                QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+                settings.setValue(QStringLiteral("theme"),
+                    mode == theme::Mode::Dark ? QStringLiteral("dark")
+                    : mode == theme::Mode::Light ? QStringLiteral("light") : QStringLiteral("system"));
+                theme::apply(mode);
+            });
+            item->setCheckable(true); item->setChecked(mode == active);
+            group->addAction(item);
+        }
+    }
 #ifdef Q_OS_WIN
     settings->addAction(QStringLiteral("Горячая клавиша быстрой вставки…"), this, &MainWindow::changeHotkey);
 #endif
@@ -611,5 +635,44 @@ void MainWindow::changeHotkey() {
     if (!hotkey_->reRegister(&error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
 }
 #endif
-void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }void MainWindow::closeEvent(QCloseEvent* event) { app_.lock(); QMainWindow::closeEvent(event); emit closing(); }
+void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }
+void MainWindow::requestExit() { exiting_ = true; close(); }
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (!exiting_) {
+        // Крестик лишь сворачивает окно в трей: событие игнорируем, окно прячем.
+        // Хранилище НЕ блокируем — автоблокировка (IdleTimer) продолжает тикать,
+        // и оставленное без присмотра скрытое окно блокируется по интервалу как открытое.
+        hide(); event->ignore(); return;
+    }
+    app_.lock(); QMainWindow::closeEvent(event); emit closing();
+}
+void MainWindow::popupQuickPanel() {
+#ifdef Q_OS_WIN
+    if (hotkey_) hotkey_->popupPanel();
+#endif
+}
+void MainWindow::applyIdleTimeout(int minutes) {
+    // Кламп 1–60 минут: границы те же, что у спинбокса диалога; защита от
+    // испорченных значений настроек и от прямых вызовов вне диапазона.
+    minutes = qBound(1, minutes, 60);
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    settings.setValue(QStringLiteral("idleTimeoutMinutes"), minutes);
+    emit idleTimeoutChanged(minutes);
+}
+void MainWindow::configureIdleTimeout() {
+    QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("Автоблокировка"));
+    auto* layout = new QVBoxLayout(&dialog);
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    auto* label = new QLabel(QStringLiteral("Блокировать хранилище после N минут бездействия."), &dialog); label->setWordWrap(true);
+    auto* spin = new QSpinBox(&dialog); spin->setRange(1, 60);
+    spin->setValue(qBound(1, settings.value(QStringLiteral("idleTimeoutMinutes"), 5).toInt(), 60));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Сохранить"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
+    layout->addWidget(label); layout->addWidget(spin); layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    applyIdleTimeout(spin->value());
+}
 }

@@ -15,12 +15,16 @@ public:
     ~MainWindow() override;
     void refreshAll();
     bool moveNodeTo(model::Id node, model::Id newParent);
+    void requestExit();
+    void applyIdleTimeout(int minutes);
+    void popupQuickPanel();
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
     QLineEdit* search() const { return search_; }
     EntryCard* card() const { return card_; }
 signals:
     void closing();
+    void idleTimeoutChanged(int minutes);
 public slots:
     void addProject();
     void addGroup();
@@ -34,6 +38,7 @@ public slots:
     void importVault();
     void switchUnlockMode();
     void changeMasterPassword();
+    void configureIdleTimeout();
 #ifdef Q_OS_WIN
     void changeHotkey();
 #endif
@@ -80,5 +85,6 @@ private:
     std::unique_ptr<platform::QuickPaste> hotkey_;
 #endif
     bool editing_ = false, narrow_ = false, cardOpen_ = false;
+    bool exiting_ = false;
 };
 }

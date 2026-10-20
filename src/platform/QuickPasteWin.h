@@ -16,6 +16,7 @@ public:
     ~QuickPaste() override;
     bool start(QString* err);
     bool reRegister(QString* err);
+    void popupPanel();
     bool nativeEventFilter(const QByteArray& type, void* message, qintptr* result) override;
 signals:
     void conflictDetected(const QString& combo);

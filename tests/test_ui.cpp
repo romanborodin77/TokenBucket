@@ -20,10 +20,13 @@
 #include <QScreen>
 #include <QCheckBox>
 #include <QAccessible>
+#include <QSettings>
+#include <QSignalSpy>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/EntryEditDialog.h"
 #include "../src/ui/EntryCard.h"
+#include "../src/ui/Theme.h"
 using namespace tb;
 class TestUi : public QObject {
     Q_OBJECT
@@ -133,13 +136,13 @@ private slots:
         const auto credential = w.list()->currentItem()->data(Qt::UserRole).value<model::Id>();
         editDialog(w, [&](EntryEditDialog& dialog) { dialog.setGroup(other); }); w.editSelected();
         QCOMPARE(app.model()->entry(credential)->groupId, other);
-        w.close();
+        w.requestExit();
         Application reopened(path); QVERIFY(reopened.unlock("пароль-теста-123", &err));
         QCOMPARE(reopened.model()->entries().size(), 3); QCOMPARE(reopened.model()->entry(ssh)->sshPrivate, key);
         QCOMPARE(reopened.model()->entry(credential)->groupId, other);
         ui::MainWindow again(reopened); again.show(); again.search()->setText(QStringLiteral("Запись 0"));
         QCOMPARE(again.list()->count(), 1); confirm(again); again.deleteSelected(); QCOMPARE(reopened.model()->entries().size(), 2);
-        again.close(); QVERIFY(reopened.unlock("пароль-теста-123", &err)); QCOMPARE(reopened.model()->entries().size(), 2);
+        again.requestExit(); QVERIFY(reopened.unlock("пароль-теста-123", &err)); QCOMPARE(reopened.model()->entries().size(), 2);
     }
     void renameMoveAndDeleteNodes() {
         Application app(dir_.path() + "/nodes"); QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
@@ -364,6 +367,47 @@ private slots:
         card.showEntry(first.id);
         QTimer::singleShot(0, &card, [&] { app.lock(); }); card.revealButton()->click();
         QVERIFY(!card.secretText().contains("first-secret")); QVERIFY(!card.secretText().contains("second-secret"));
+    }
+    void closeToTrayAndExit() {
+        Application app(dir_.path() + "/close-tray"); QString err; QVERIFY(app.createPasswordVault("valid-password", &err));
+        ui::MainWindow w(app); w.show();
+        w.close();                                                       // крестик: скрыть в трей, без блокировки
+        QVERIFY(w.isHidden()); QCOMPARE(app.gate(), Application::Gate::Ready);
+        QSignalSpy closing(&w, &ui::MainWindow::closing);
+        w.requestExit();                                                 // настоящий выход: блокирует и закрывает
+        QCOMPARE(closing.size(), 1); QCOMPARE(app.gate(), Application::Gate::NeedUnlock); QVERIFY(!w.isVisible());
+    }
+    void idleTimeoutClampAndPersist() {
+        Application app(dir_.path() + "/idle"); QString err; QVERIFY(app.createPasswordVault("valid-password", &err));
+        ui::MainWindow w(app); w.show();
+        QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+        const auto previous = settings.value(QStringLiteral("idleTimeoutMinutes"));
+        QSignalSpy changed(&w, &ui::MainWindow::idleTimeoutChanged);
+        w.applyIdleTimeout(7);
+        QCOMPARE(changed.size(), 1); QCOMPARE(changed.takeFirst().at(0).toInt(), 7);
+        QCOMPARE(settings.value(QStringLiteral("idleTimeoutMinutes")).toInt(), 7);
+        w.applyIdleTimeout(0);                                           // кламп 1–60
+        QCOMPARE(changed.takeFirst().at(0).toInt(), 1);
+        w.applyIdleTimeout(999);
+        QCOMPARE(changed.takeFirst().at(0).toInt(), 60);
+        if (previous.isValid()) settings.setValue(QStringLiteral("idleTimeoutMinutes"), previous);
+        else settings.remove(QStringLiteral("idleTimeoutMinutes"));
+    }
+    void themeModesApplyAndLoad() {
+        ui::theme::apply(ui::theme::Mode::Dark);
+        QVERIFY(qApp->palette().color(QPalette::Base).lightness() < 64);   // тёмный Base из рецепта
+        ui::theme::apply(ui::theme::Mode::Light);
+        QVERIFY(qApp->palette().color(QPalette::Base).lightness() > 192);  // светлее тёмного
+        QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+        const auto previous = settings.value(QStringLiteral("theme"));
+        settings.setValue(QStringLiteral("theme"), QStringLiteral("dark"));
+        QCOMPARE(ui::theme::load(), ui::theme::Mode::Dark);
+        settings.setValue(QStringLiteral("theme"), QStringLiteral("light"));
+        QCOMPARE(ui::theme::load(), ui::theme::Mode::Light);
+        settings.setValue(QStringLiteral("theme"), QStringLiteral("мусор"));
+        QCOMPARE(ui::theme::load(), ui::theme::Mode::System);
+        if (previous.isValid()) settings.setValue(QStringLiteral("theme"), previous);
+        else settings.remove(QStringLiteral("theme"));
     }
 };
 QTEST_MAIN(TestUi)

@@ -23,6 +23,10 @@ add_library(tokenbucket_core STATIC
   src/ui/VerifyDialog.cpp
   src/app/IdleTimer.cpp
   src/platform/SessionWatcher.h
+  src/ui/TrayController.h
+  src/ui/TrayController.cpp
+  src/ui/Theme.h
+  src/ui/Theme.cpp
 )
 target_include_directories(tokenbucket_core PUBLIC src)
 target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent unofficial-sodium::sodium)

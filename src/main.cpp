@@ -3,6 +3,7 @@
 #include <QFutureWatcher>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QtConcurrent/QtConcurrentRun>
 #include "app/Application.h"
@@ -11,6 +12,8 @@
 #include "ui/SetupDialog.h"
 #include "ui/UnlockDialog.h"
 #include "ui/MainWindow.h"
+#include "ui/Theme.h"
+#include "ui/TrayController.h"
 namespace {
 bool run(tb::Application& core, const std::function<bool(void*, QString*)>& operation, QString* err) {
     QProgressDialog progress(QStringLiteral("Обработка хранилища…"), QStringLiteral("Отменить"), 0, 0);
@@ -26,9 +29,29 @@ int start() {
     QString error;
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
     tb::Application core(dir);
-    tb::IdleTimer idle(5 * 60 * 1000); idle.setActive(false);
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    // Интервал автоблокировки настраивается в окне; кламп 1–60 минут — тот же, что в диалоге,
+    // испорченное значение настроек не должно отключать защиту или блокировать намертво.
+    const int idleMinutes = qBound(1, settings.value(QStringLiteral("idleTimeoutMinutes"), 5).toInt(), 60);
+    tb::IdleTimer idle(idleMinutes * 60 * 1000); idle.setActive(false);
     tb::platform::SessionWatcher session;
     if (!session.error().isEmpty()) { QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), session.error()); return 1; }
+    tb::ui::TrayController tray(core); // после SessionWatcher: живёт всё приложение
+    tb::ui::MainWindow* mainWindow = nullptr; // текущее окно цикла Ready для команд из трея
+    // Показ из трея: поднять живое окно; диалоги модальны и видны сами по себе.
+    QObject::connect(&tray, &tb::ui::TrayController::showRequested, &core, [&] {
+        if (mainWindow) { mainWindow->show(); mainWindow->raise(); mainWindow->activateWindow(); }
+    });
+    tray.setPanelCallback([&] { if (mainWindow) mainWindow->popupQuickPanel(); });
+    QObject::connect(&tray, &tb::ui::TrayController::lockRequested, &core, &tb::Application::lock);
+    // Настоящий выход из трея: модальный диалог завершается reject'ом (exec() != Accepted
+    // в циклах ниже — это return 0), живое окно закрывается через requestExit, а между
+    // циклами (ни окна, ни диалога) остаётся только QCoreApplication::exit — app.exec() не используется.
+    QObject::connect(&tray, &tb::ui::TrayController::quitRequested, &core, [&] {
+        if (auto* modal = qobject_cast<QDialog*>(qApp->activeModalWidget())) modal->reject();
+        else if (mainWindow) mainWindow->requestExit();
+        else QCoreApplication::exit(0);
+    });
     QObject::connect(&idle, &tb::IdleTimer::idleTimeout, &core, &tb::Application::lock);
     QObject::connect(&session, &tb::platform::SessionWatcher::lockNow, &core, &tb::Application::lock);
     QObject::connect(&core, &tb::Application::stateChanged, &idle, [&] { idle.setActive(core.gate() == tb::Application::Gate::Ready); });
@@ -74,11 +97,17 @@ int start() {
             if (!ok) { QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"), error); continue; }
         } else {
             QEventLoop loop; tb::ui::MainWindow window(core); bool closed = false;
+            mainWindow = &window;
             QObject::connect(&window, &tb::ui::MainWindow::closing, &loop, [&] { closed = true; loop.quit(); });
+            // Настройка автоблокировки применяется немедленно: окно в области видимости,
+            // перезапускаем отсчёт IdleTimer новым интервалом.
+            QObject::connect(&window, &tb::ui::MainWindow::idleTimeoutChanged, &idle,
+                [&](int m) { idle.setIntervalMs(m * 60 * 1000); });
             QObject::connect(&core, &tb::Application::stateChanged, &loop, [&] {
                 if (core.gate() != tb::Application::Gate::Ready) loop.quit();
             });
             window.show(); loop.exec();
+            mainWindow = nullptr; // окно разрушается при выходе из области видимости
             if (closed) return 0;
         }
     }
@@ -88,6 +117,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TokenBucket")); app.setOrganizationName(QStringLiteral("TokenBucket"));
     app.setQuitOnLastWindowClosed(false);
+    tb::ui::theme::apply(tb::ui::theme::load()); // до создания окон: палитра наследуется всеми окнами
     try { return start(); }
     catch (...) { QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось запустить приложение.")); return 1; }
 }

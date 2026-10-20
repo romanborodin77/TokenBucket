@@ -8,6 +8,7 @@ public:
     explicit IdleTimer(int timeoutMs, QObject* parent = nullptr);
     void poke();
     void setActive(bool active);
+    void setIntervalMs(int ms);
 signals:
     void idleTimeout();
 protected:

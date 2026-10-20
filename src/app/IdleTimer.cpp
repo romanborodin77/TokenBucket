@@ -12,6 +12,11 @@ void IdleTimer::setActive(bool active) {
     if (active_ == active) return;
     active_ = active; if (active) poke(); else timer_.stop();
 }
+void IdleTimer::setIntervalMs(int ms) {
+    // Смена интервала на лету (настройка автоблокировки): перезапускаем отсчёт,
+    // чтобы новый интервал действовал немедленно, а не после текущего тика.
+    timer_.setInterval(ms); if (active_) poke();
+}
 bool IdleTimer::eventFilter(QObject* object, QEvent* event) {
     switch (event->type()) {
     case QEvent::MouseButtonPress: case QEvent::MouseButtonRelease: case QEvent::MouseMove:
