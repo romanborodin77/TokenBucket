@@ -5,6 +5,7 @@
 #include <QMimeData>
 #include <QScopedValueRollback>
 #include <QScopeGuard>
+#include <QThread>
 #include <QUuid>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -18,7 +19,17 @@ ClipboardGuard::ClipboardGuard(QObject* parent) : QObject(parent) {
 #endif
 }
 ClipboardGuard::~ClipboardGuard() {
-    destroying_ = true; clearIfOurs();
+    destroying_ = true;
+#ifdef Q_OS_WIN
+    // Чужой процесс может держать буфер обмена доли секунды; секрет не должен
+    // переживать выход приложения, поэтому несколько попыток с короткими паузами.
+    for (int attempt = 0; attempt < 5 && sequence_ != 0; ++attempt) {
+        clearIfOurs();
+        if (sequence_ != 0) QThread::msleep(20);
+    }
+#else
+    clearIfOurs();
+#endif
 #ifdef Q_OS_WIN
     if (owner_) DestroyWindow(static_cast<HWND>(owner_));
 #endif
@@ -36,7 +47,9 @@ bool ClipboardGuard::open(quint64 epoch) {
     for (int attempt = 0; attempt < 3; ++attempt) {
         if (epoch != epoch_ || !owner_) return false;
         if (OpenClipboard(static_cast<HWND>(owner_))) return true;
-        if (destroying_) return false;
+        // В деструкторе вложенный цикл событий опасен — только короткий сон;
+        // повтор всей очистки делает сам деструктор.
+        if (destroying_) { QThread::msleep(20); continue; }
         if (attempt < 2) { QEventLoop loop; QTimer::singleShot(50, &loop, &QEventLoop::quit); loop.exec(); }
     }
     return false;

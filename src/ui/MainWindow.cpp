@@ -294,7 +294,10 @@ void MainWindow::refillTagBar() {
     // иначе он был бы удалён вместе с чипами и чипы перестали бы прижиматься к левому краю.
     QLayoutItem* stretch = nullptr;
     while (auto* item = tagBar_->layout()->takeAt(0)) {
-        if (item->widget()) item->widget()->deleteLater(); else stretch = item;
+        if (item->widget()) {
+            item->widget()->deleteLater();
+            delete item; // после takeAt обёртка QLayoutItem принадлежит нам — удаляем, чтобы не утекала
+        } else stretch = item;
     }
     auto* layout = static_cast<QHBoxLayout*>(tagBar_->layout());
     for (const QString& tag : tags) {

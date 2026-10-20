@@ -222,8 +222,21 @@ private slots:
         const auto saved = dialog.entry(); QVERIFY(saved);
         QCOMPARE(saved->tags, (QStringList{QStringLiteral("прод"), QStringLiteral("Web")}));
         EntryEditDialog reopen(model, *saved);
-        QCOMPARE(static_cast<QLineEdit*>(reopen.findChild<QLineEdit*>(QStringLiteral("entryTags")))->text(),
-                 QStringLiteral("прод, Web"));
+        auto* reopenedTags = reopen.findChild<QLineEdit*>(QStringLiteral("entryTags"));
+        QVERIFY(reopenedTags);
+        QCOMPARE(reopenedTags->text(), QStringLiteral("прод, Web"));
+    }
+    void entryTagsLimitShowsErrorInEditor() {
+        tb::model::VaultModel model;
+        auto group = QUuid::createUuid(); QVERIFY(model.addNode(group, {}, "P").isEmpty());
+        EntryEditDialog dialog(model, std::nullopt);
+        QStringList tagList;
+        for (int i = 0; i < 17; ++i) tagList << QStringLiteral("тег%1").arg(i);
+        dialog.findChild<QLineEdit*>(QStringLiteral("entryTags"))->setText(tagList.join(QLatin1Char(',')));
+        field(dialog, "entryTitle")->setText(QStringLiteral("Слишком много тегов"));
+        dialog.accept();
+        QVERIFY(!dialog.entry());
+        QVERIFY(dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().contains(QStringLiteral("Тегов больше 16.")));
     }
     void sshRejectsUnsupportedOrOversizedFiles() {
         model::VaultModel model; const auto group = QUuid::createUuid(); QVERIFY(model.addNode(group, {}, "Проект").isEmpty());
@@ -279,23 +292,31 @@ private slots:
         model::Entry alpha; alpha.id = QUuid::createUuid(); alpha.groupId = group;
         alpha.type = model::EntryType::ApiToken; alpha.title = "Альфа"; alpha.token = "t1"; alpha.tags = {QStringLiteral("Прод")};
         model::Entry beta = alpha; beta.id = QUuid::createUuid(); beta.title = "Бета"; beta.tags = {QStringLiteral("web")};
+        model::Entry gamma = alpha; gamma.id = QUuid::createUuid(); gamma.title = "Гамма"; gamma.tags = {QStringLiteral("Прод"), QStringLiteral("web")};
         QVERIFY(app.model()->setEntry(alpha).isEmpty()); QVERIFY(app.model()->setEntry(beta).isEmpty());
+        QVERIFY(app.model()->setEntry(gamma).isEmpty());
         QVERIFY(app.save(&error));
         ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
         auto* tagBar = w.findChild<QWidget*>(QStringLiteral("tagBar")); QVERIFY(tagBar);
-        const auto chips = tagBar->findChildren<QToolButton*>();
-        QCOMPARE(chips.size(), 2);
-        QToolButton* prod = nullptr;
-        for (auto* chip : chips) if (chip->text() == QStringLiteral("Прод")) prod = chip;
-        QVERIFY(prod);
-        prod->click();                                   // регистр чипа совпадает с хранением
-        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        QCOMPARE(w.list()->count(), 3);
+        QToolButton *prod = nullptr, *web = nullptr;
+        for (auto* chip : tagBar->findChildren<QToolButton*>()) {
+            if (chip->text() == QStringLiteral("Прод")) prod = chip;
+            if (chip->text() == QStringLiteral("web")) web = chip;
+        }
+        QVERIFY(prod); QVERIFY(web);
+        prod->click();                                   // один чип: записи с тегом «Прод» (по названию)
+        QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        web->click();                                    // второй чип: И — только запись с обоими тегами
+        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Гамма"));
         auto* filter = w.findChild<QComboBox*>(QStringLiteral("typeFilter"));
-        filter->setCurrentIndex(2);                      // «Учётные данные»: Альфа (API-токен) отсекается — фильтры работают вместе
+        filter->setCurrentIndex(2);                      // «Учётные данные»: все три — API-токены, отсекаются — фильтры работают вместе
         QCOMPARE(w.list()->count(), 0);
         filter->setCurrentIndex(0);
-        prod->click();                                   // снятие чипа
+        web->click();                                    // снятие одного чипа из И
         QCOMPARE(w.list()->count(), 2);
+        prod->click();                                   // снятие последнего чипа
+        QCOMPARE(w.list()->count(), 3);
     }
     void moveNodeToValidatesModelRules() {
         Application app(dir_.path() + "/dnd"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));

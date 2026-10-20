@@ -11,6 +11,6 @@ inline bool eligibleForAutoPaste(const model::Entry& e) {
 struct Recipient { void* hwnd = nullptr; QString processName, windowTitle; };
 Recipient captureRecipient();
 bool recipientStillValid(const Recipient& r);
-void sendCtrlV();
+bool sendCtrlV();
 #endif
 }

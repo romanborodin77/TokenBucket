@@ -31,13 +31,15 @@ Recipient captureRecipient() {
 bool recipientStillValid(const Recipient& r) {
     return r.hwnd && GetForegroundWindow() == r.hwnd && IsWindow(static_cast<HWND>(r.hwnd));
 }
-void sendCtrlV() {
+bool sendCtrlV() {
     INPUT in[4] = {};
     in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_CONTROL;
     in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = 'V';
     in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = 'V'; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
     in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_CONTROL; in[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(4, in, sizeof(INPUT));
+    // SendInput атомарен не полностью: отказ мог прийти после части событий —
+    // сообщаем неудачу, секрет остаётся защищён 20-секундным таймером буфера.
+    return SendInput(4, in, sizeof(INPUT)) == 4;
 }
 }
 namespace platform {

@@ -85,7 +85,11 @@ void MiniPanel::send() {
     }
     hide();
     if (recipient_.hwnd) SetForegroundWindow(static_cast<HWND>(recipient_.hwnd));
-    paste::sendCtrlV(); // только Ctrl+V, без Enter
+    // Только Ctrl+V, без Enter. Секрет уже защищён 20-секундным таймером буфера —
+    // при отказе отправки сообщаем об этом, не выбрасывая молчание.
+    if (!paste::sendCtrlV())
+        QMessageBox::information(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Не удалось отправить нажатия в окно получателя. Секрет скопирован в буфер и будет очищён через 20 секунд."));
 #else
     hide();
     QMessageBox::information(this, QStringLiteral("TokenBucket"), QStringLiteral("Секрет скопирован в буфер. Вставьте его вручную (Ctrl+V)."));
