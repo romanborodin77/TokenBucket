@@ -16,6 +16,7 @@ endif()
 
 add_library(tokenbucket_core STATIC
   src/vault/Crypto.cpp
+  src/vault/CborWriter.cpp
   src/vault/Container.cpp
   src/model/VaultModel.cpp
   src/vault/VaultStore.cpp
@@ -58,6 +59,7 @@ if(WIN32)
   target_sources(tokenbucket_core PRIVATE src/platform/sessionlock_win.cpp)
   target_sources(tokenbucket_core PRIVATE src/platform/quickpaste_win.cpp src/platform/QuickPasteWin.h)
   target_sources(tokenbucket_core PRIVATE src/platform/envops_win.cpp src/platform/EnvOps.h)
+  target_sources(tokenbucket_core PRIVATE src/platform/crashpolicy_win.cpp src/platform/CrashPolicy.h)
   target_sources(tokenbucket_core PRIVATE src/ui/EnvExportDialog.cpp src/ui/EnvExportDialog.h)
   target_link_libraries(tokenbucket_core PUBLIC wtsapi32)
   target_link_libraries(tokenbucket_core PUBLIC windowsapp user32)

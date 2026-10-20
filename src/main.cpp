@@ -11,6 +11,7 @@
 #include "platform/SessionWatcher.h"
 #ifdef Q_OS_WIN
 #include "platform/EnvOps.h"
+#include "platform/CrashPolicy.h"
 #endif
 #include "ui/SetupDialog.h"
 #include "ui/UnlockDialog.h"
@@ -133,6 +134,11 @@ int runApp() {
 }
 }
 int main(int argc, char** argv) {
+#ifdef Q_OS_WIN
+    // Раньше всего: запретить аварийные дампы и системные диалоги ошибок до того,
+    // как в памяти появятся секреты (снимок дампа содержит всю кучу процесса).
+    tb::platform::crash::disableDumps();
+#endif
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TokenBucket")); app.setOrganizationName(QStringLiteral("TokenBucket"));
     // Счётчик версий из CMake; иконка всех окон — логотип «Щит-жетон».
