@@ -22,6 +22,8 @@ public:
     void notify(const QString& text);
     static bool notificationsEnabled();
     static void setNotificationsEnabled(bool on);
+    // Подсказка текущего состояния — для тестов и диагностики (без секретов).
+    QString toolTip() const { return tray_.toolTip(); }
 signals:
     void showRequested();
     void lockRequested();

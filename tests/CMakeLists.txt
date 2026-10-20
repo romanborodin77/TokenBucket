@@ -24,11 +24,14 @@ tb_add_test(test_lock)
 tb_add_test(test_ssh)
 tb_add_test(test_paste_win)
 tb_add_test(test_pwchange)
+tb_add_test(test_e2e)
 if(WIN32)
   tb_add_test(test_env_win)
   set_tests_properties(test_lock PROPERTIES ENVIRONMENT
     "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
   set_tests_properties(test_paste_win PROPERTIES ENVIRONMENT
+    "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
+  set_tests_properties(test_e2e PROPERTIES ENVIRONMENT
     "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
   set_tests_properties(test_env_win PROPERTIES ENVIRONMENT
     "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
