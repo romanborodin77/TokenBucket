@@ -47,6 +47,7 @@
 #include "../platform/FileOps.h"
 #include "../vault/Container.h"
 #include "../vault/SecureBytes.h"
+#include <sodium.h>
 #ifdef Q_OS_WIN
 #include "../platform/hello_win.h"
 #include "../platform/QuickPasteWin.h"
@@ -463,6 +464,9 @@ void MainWindow::addEntry() {
 void MainWindow::editSelected() {
     if (!ready() || editing_) return; const auto* entry = app_.model()->entry(selectedEntry()); if (!entry) { report(QStringLiteral("Выберите запись.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    // Редактор показывает секреты записи — для записей с повторной проверкой сначала
+    // подтверждаем владельца, как при показе/копировании (audit M-1).
+    if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("изменение записи"))) return;
     EntryEditDialog dialog(*app_.model(), *entry, this);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
         const auto changed = dialog.entry(); if (changed) commit([&](auto& model) { return model.setEntry(*changed); });
@@ -514,8 +518,10 @@ void MainWindow::exportVault() {
     if (bytes.isEmpty()) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
     if (!store::realFileOps().writeAll(path, bytes)) {
         QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось записать файл экспорта. Если файл существует, выберите другое имя."));
+        sodium_memzero(const_cast<char*>(bytes.constData()), size_t(bytes.size())); // копия секрета в куче не переживает шаг
         return;
     }
+    sodium_memzero(const_cast<char*>(bytes.constData()), size_t(bytes.size()));
     statusBar()->showMessage(QStringLiteral("Экспорт выполнен."), 5000);
 }
 void MainWindow::importVault() {

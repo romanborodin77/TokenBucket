@@ -254,6 +254,37 @@ private slots:
             QVERIFY(!dialog.entry()); QVERIFY(!dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().isEmpty());
         }
     }
+    void reverifyAskedBeforeEditorShowsSecrets() {
+        Application app(dir_.path() + "/reverify-edit"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+        e.type = model::EntryType::ApiToken; e.title = "Защищённая"; e.token = "very-secret"; e.reverify = true;
+        QVERIFY(app.model()->setEntry(e).isEmpty());
+        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        QVERIFY(w.list()->count() == 1);
+        // Неверный пароль в повторной проверке — редактор не открывается вовсе.
+        QString lastAnswer(QStringLiteral("wrong-password-xx"));
+        bool editorOpened = false;
+        auto* driver = new QTimer(&w);
+        QObject::connect(driver, &QTimer::timeout, &w, [&] {
+            for (auto* top : QApplication::topLevelWidgets()) {
+                if (auto* box = qobject_cast<QMessageBox*>(top); box && box->isVisible()) { box->accept(); continue; } // предупреждение о неверном пароле
+                if (auto* input = qobject_cast<QInputDialog*>(top); input && input->isVisible())
+                    { input->setTextValue(lastAnswer); input->accept(); continue; }
+                if (auto* editor = qobject_cast<EntryEditDialog*>(top); editor && editor->isVisible())
+                    { editorOpened = true; editor->reject(); } // fact открытия фиксируем и закрываем exec()
+            }
+        });
+        driver->start(30);
+        w.editSelected(); driver->stop();
+        QVERIFY(!editorOpened);
+        // Верный пароль — редактор открыт.
+        lastAnswer = QStringLiteral("valid-password");
+        editorOpened = false;
+        driver->start(30);
+        w.editSelected(); driver->stop();
+        QVERIFY(editorOpened);
+    }
     void quickPanelShowsWhileMainWindowHidden() {
         // Панель быстрой вставки обязана открываться (Ctrl+Alt+Space/трей), даже когда
         // главное окно скрыто в трей — раньше Qt::Tool прятался вместе с родителем.
