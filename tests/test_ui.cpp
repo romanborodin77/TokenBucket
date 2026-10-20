@@ -376,6 +376,35 @@ private slots:
         for (const QChar ch : first + second)
             QVERIFY2(alphabet.contains(ch), qPrintable(QStringLiteral("недопустимый знак: %1").arg(ch)));
     }
+    void entryMutationRollsBackSingleEntry() {
+        Application app(dir_.path() + "/rollback-entry"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry victim; victim.id = QUuid::createUuid(); victim.groupId = group;
+        victim.type = model::EntryType::ApiToken; victim.title = "Жертва"; victim.token = "tok-original";
+        model::Entry bystander; bystander.id = QUuid::createUuid(); bystander.groupId = group;
+        bystander.type = model::EntryType::ApiToken; bystander.title = "Свидетель"; bystander.token = "tok-neighbor";
+        QVERIFY(app.model()->setEntry(victim).isEmpty()); QVERIFY(app.model()->setEntry(bystander).isEmpty());
+        QVERIFY(app.save(&error));
+        ui::MainWindow w(app); w.show();
+        // Ошибка мутации: точечный откат возвращает запись, сосед не тронут.
+        QVERIFY(!w.commitEntry([&](auto& model) {
+            auto broken = *model.entry(victim.id);
+            broken.token = QString(model::VaultModel::MaxSecretBytes + 1, QChar('x')); // секрет > 1 МиБ
+            return model.setEntry(broken);
+        }, victim.id));
+        QCOMPARE(app.model()->entry(victim.id)->token, QStringLiteral("tok-original"));
+        QCOMPARE(app.model()->entry(bystander.id)->token, QStringLiteral("tok-neighbor"));
+        // Успешная мутация одной записи сохраняется и обновляет UI.
+        QVERIFY(w.commitEntry([&](auto& model) {
+            auto changed = *model.entry(victim.id);
+            changed.token = QStringLiteral("tok-updated");
+            return model.setEntry(changed);
+        }, victim.id));
+        QCOMPARE(app.model()->entry(victim.id)->token, QStringLiteral("tok-updated"));
+        app.lock(); QVERIFY(app.unlock("valid-password", &error));
+        QCOMPARE(app.model()->entry(victim.id)->token, QStringLiteral("tok-updated")); // пережила круг
+        QCOMPARE(app.model()->entries().size(), 2);
+    }
     void typeFilterAndSortModes() {
         Application app(dir_.path() + "/filter"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
         auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());

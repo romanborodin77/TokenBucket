@@ -1,5 +1,6 @@
 #pragma once
 #include <QMainWindow>
+#include <optional>
 #include "../app/Application.h"
 #include "../platform/ClipboardGuard.h"
 #include <memory>
@@ -15,6 +16,9 @@ public:
     ~MainWindow() override;
     void refreshAll();
     bool moveNodeTo(model::Id node, model::Id newParent);
+    // Точечный откат ОДНОЙ записи вместо полного снимка модели: секреты не размножаются
+    // по куче при каждом редактировании (audit M-3). Откат невозможен после lock.
+    bool commitEntry(const std::function<QString(model::VaultModel&)>& mutation, model::Id entryId);
     void requestExit();
     void applyIdleTimeout(int minutes);
     void popupQuickPanel();
@@ -54,6 +58,7 @@ protected:
 private:
     bool ready() const;
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
+    void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);
     void report(const QString& error);
     void updateEnabled();
     void refillList(model::Id entry = {});

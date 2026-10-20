@@ -465,6 +465,32 @@ bool MainWindow::commit(const std::function<QString(model::VaultModel&)>& mutati
     }
     error_->clear(); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
 }
+bool MainWindow::commitEntry(const std::function<QString(model::VaultModel&)>& mutation, model::Id entryId) {
+    if (!ready()) return false;
+    std::optional<model::Entry> backup;
+    if (const auto* existing = app_.model()->entry(entryId)) backup = *existing;
+    const auto generation = app_.generation();
+    // lock очищает модель во время мутации/сохранения — откатывать уже нечем и незачем.
+    const auto connection = connect(&app_, &Application::stateChanged, this,
+        [&backup, &app = app_, generation] { if (app.generation() != generation) backup.reset(); });
+    auto cleanup = qScopeGuard([&] { disconnect(connection); });
+    const QString error = mutation(*app_.model());
+    if (!error.isEmpty()) { rollbackEntry(entryId, backup); report(error); refreshAll(); return false; }
+    QString saveError;
+    if (!app_.save(&saveError)) {
+        if (app_.generation() == generation && app_.gate() == Application::Gate::Ready)
+            rollbackEntry(entryId, backup);
+        refreshAll();
+        if (app_.gate() == Application::Gate::Ready) report(saveError);
+        return false;
+    }
+    error_->clear(); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
+}
+void MainWindow::rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup) {
+    // Была запись — вернуть как была; новой записи не было — удалить черновик мутации.
+    if (backup) app_.model()->setEntry(*backup);
+    else app_.model()->removeEntry(entryId);
+}
 void MainWindow::addProject() {
     if (!ready() || editing_) return; QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     bool ok = false; const auto name = QInputDialog::getText(this, QStringLiteral("Новый проект"), QStringLiteral("Имя проекта:"), QLineEdit::Normal, {}, &ok);
@@ -483,7 +509,7 @@ void MainWindow::addEntry() {
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     EntryEditDialog dialog(*app_.model(), std::nullopt, this); dialog.setGroup(parent);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
-        const auto entry = dialog.entry(); if (entry) commit([&](auto& model) { return model.setEntry(*entry); });
+        const auto entry = dialog.entry(); if (entry) commitEntry([&](auto& model) { return model.setEntry(*entry); }, entry->id);
     }
 }
 void MainWindow::editSelected() {
@@ -494,7 +520,7 @@ void MainWindow::editSelected() {
     if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("изменение записи"))) return;
     EntryEditDialog dialog(*app_.model(), *entry, this);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
-        const auto changed = dialog.entry(); if (changed) commit([&](auto& model) { return model.setEntry(*changed); });
+        const auto changed = dialog.entry(); if (changed) commitEntry([&](auto& model) { return model.setEntry(*changed); }, changed->id);
     }
 }
 void MainWindow::renameSelectedNode() {
@@ -517,7 +543,7 @@ void MainWindow::deleteSelected() {
     if (!ready() || editing_) return; const auto id = selectedEntry(); if (id.isNull()) { report(QStringLiteral("Выберите запись для удаления.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     if (QMessageBox::question(this, QStringLiteral("Удаление записи"), QStringLiteral("Удалить выбранную запись?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes
-        && ready() && app_.generation() == generation) commit([&](auto& model) { return model.removeEntry(id); });
+        && ready() && app_.generation() == generation) commitEntry([&](auto& model) { return model.removeEntry(id); }, id);
 }
 void MainWindow::deleteSelectedNode() {
     if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) return;
@@ -740,13 +766,13 @@ void MainWindow::listMenu(const QPoint& pos) {
 }
 void MainWindow::toggleFavorite() {
     const auto id = selectedEntry();
-    commit([&](auto& model) {
+    commitEntry([&](auto& model) {
         const auto* current = model.entry(id);
         if (!current) return QString();
         auto changed = *current;
         changed.favorite = !changed.favorite;
         return model.setEntry(changed);
-    });
+    }, id);
 }
 void MainWindow::updateSwitchActionText() {
 #ifdef Q_OS_WIN
