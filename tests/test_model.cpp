@@ -151,6 +151,7 @@ private slots:
         const auto valid = QCborValue::fromCbor(m.toCbor()).toMap();
         const auto original = valid.value(QStringLiteral("entries")).toArray().first().toMap();
         for (auto it = original.constBegin(); it != original.constEnd(); ++it) {
+            if (it.key() == QStringLiteral("exp")) continue; // Null для срока = бессрочно (легитимно)
             auto brokenEntry = original; brokenEntry[it.key()] = QCborValue(QCborValue::Null);
             auto broken = valid; broken[QStringLiteral("entries")] = QCborArray{brokenEntry};
             QVERIFY(m.fromCbor(QCborValue(broken).toCbor(), nullptr) == VaultModel::ParseStatus::Bad);
@@ -210,8 +211,45 @@ private slots:
         model::VaultModel bad; err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("теги")));
-        root[u"v"_s] = 3; err.clear();
+        root[u"v"_s] = 4; // v4 — будущая, не поддержана
+        err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
+        QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
+    }
+    void expiryCborV3RoundtripAndOlderVersions() {
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = g1; e.title = "Со сроком";
+        e.expiresAt = QDateTime(QDate(2026, 12, 31), QTime(0, 0), Qt::UTC);
+        QVERIFY(m.setEntry(e).isEmpty());
+        model::VaultModel fresh;
+        QVERIFY(fresh.fromCbor(m.toCbor(), nullptr) == model::VaultModel::ParseStatus::Ok);
+        QCOMPARE(fresh.entry(e.id)->expiresAt, e.expiresAt);
+        model::Entry noExpiry = e; noExpiry.id = QUuid::createUuid(); noExpiry.expiresAt = QDateTime();
+        QVERIFY(m.setEntry(noExpiry).isEmpty());
+        model::VaultModel second;
+        QVERIFY(second.fromCbor(m.toCbor(), nullptr) == model::VaultModel::ParseStatus::Ok);
+        QVERIFY(!second.entry(noExpiry.id)->expiresAt.isValid()); // бессрочно переживает круг
+        // v2-файл (без exp) читается, срок пуст; v3 с битым exp — отказ.
+        const auto uid = [](QUuid id) { return id.toString(QUuid::WithoutBraces); };
+        // Берём РЕАЛЬНУЮ запись из m (полная карта v3), понижаем до v2: v→2, exp→удалён.
+        const auto full = QCborValue::fromCbor(m.toCbor()).toMap();
+        QCborMap one = full.value(u"entries"_s).toArray().first().toMap();
+        one.remove(u"exp"_s);
+        QCborMap root; root[u"v"_s] = 2;
+        root[u"nodes"_s] = full.value(u"nodes"_s).toArray(); // узлы как в реальном снимке
+        root[u"entries"_s] = QCborArray{one};
+        model::VaultModel v2reader; QString err;
+        QVERIFY2(v2reader.fromCbor(QCborValue(root).toCbor(), &err) == model::VaultModel::ParseStatus::Ok, qPrintable(err));
+        QVERIFY(!v2reader.entry(e.id)->expiresAt.isValid());
+        root[u"v"_s] = 3; one[u"exp"_s] = 12345; root[u"entries"_s] = QCborArray{one};
+        err.clear();
+        QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
+        QVERIFY(err.contains(QStringLiteral("срок")));
+        one[u"exp"_s] = QStringLiteral("не-дата"); root[u"entries"_s] = QCborArray{one};
+        err.clear();
+        QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
+        QVERIFY(err.contains(QStringLiteral("срок")));
+        root[u"v"_s] = 4;
+        QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
     }
     void tagsRenameAndRemove() {

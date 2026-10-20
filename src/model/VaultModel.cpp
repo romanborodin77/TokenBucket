@@ -145,7 +145,7 @@ QList<Id> VaultModel::search(const QString& needle) const {
 }
 QByteArray VaultModel::toCbor() const {
     QCborMap root;
-    root[u"v"_s] = 2; // v2 = v1 + обязательный массив тегов "tags" у каждой записи
+    root[u"v"_s] = 3; // v3 = v2 + "exp" (срок действия записи); v2 — теги; v1 — исходная
     QCborArray ns;
     for (auto& n : nodes_) { QCborMap m; m[u"id"_s] = idStr(n.id); m[u"p"_s] = n.parent.isNull() ? QString() : idStr(n.parent); m[u"n"_s] = n.name; ns << m; }
     root[u"nodes"_s] = ns;
@@ -160,6 +160,7 @@ QByteArray VaultModel::toCbor() const {
         m[u"tok"_s] = e.token.toUtf8(); m[u"login"_s] = e.login; m[u"pw"_s] = e.password.toUtf8();
         m[u"sshpriv"_s] = e.sshPrivate; m[u"sshpub"_s] = e.sshPublic;
         m[u"sshph"_s] = e.sshPassphrase; m[u"sshc"_s] = e.sshComment;
+        m[u"exp"_s] = e.expiresAt.isValid() ? iso(e.expiresAt) : QString(); // пусто — бессрочно
         QCborArray tags;
         for (const QString& tag : e.tags) tags << tag;
         m[u"tags"_s] = tags;
@@ -180,7 +181,7 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
     // v2 = v1 + теги записей; v1 читается как записи без тегов. Неизвестная версия — отказ,
     // чтобы новая программа не молча потеряла данные, а старая — не отбросила новые поля.
     const qint64 version = root.value(u"v"_s).toInteger(-1);
-    if (version != 1 && version != 2) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
+    if (version < 1 || version > 3) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
     VaultModel fresh;
     for (const auto& nv : root.value(u"nodes"_s).toArray()) {
         if (!nv.isMap()) return bad();
@@ -249,6 +250,19 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
                 || std::any_of(e.tags.cbegin(), e.tags.cend(), [](const QString& tag) { return tag.isEmpty() || tag.size() > MaxTagChars; })) {
                 if (err) *err = "Хранилище повреждено (теги).";
                 return ParseStatus::Bad;
+            }
+        }
+        if (version >= 3) {
+            // Срок действия: отсутствие ключа — бессрочно; строка обязана быть датой ISO.
+            const QCborValue expiry = m.value(u"exp"_s);
+            // Пустая строка и отсутствие ключа — бессрочно (наш писатель пишет "" для записей без срока).
+            if (expiry.isUndefined() || expiry.isNull()
+                || (expiry.isString() && expiry.toString().isEmpty())) e.expiresAt = QDateTime();
+            else if (!expiry.isString()) { if (err) *err = "Хранилище повреждено (срок действия)."; return ParseStatus::Bad; }
+            else {
+                e.expiresAt = QDateTime::fromString(expiry.toString(), Qt::ISODateWithMs);
+                if (!e.expiresAt.isValid()) { if (err) *err = "Хранилище повреждено (срок действия)."; return ParseStatus::Bad; }
+                e.expiresAt = e.expiresAt.toUTC();
             }
         }
         if (secretTooBig(e)) { if (err) *err = "Секрет превышает 1 МиБ."; return ParseStatus::TooLarge; }

@@ -2,7 +2,7 @@
 #include <QDialog>
 #include <optional>
 #include "../model/VaultModel.h"
-class QComboBox; class QLineEdit; class QPlainTextEdit; class QCheckBox; class QLabel;
+class QComboBox; class QLineEdit; class QPlainTextEdit; class QCheckBox; class QLabel; class QDateEdit;
 class QDialogButtonBox; class QStackedWidget;
 namespace tb::ui { void populateGroups(QComboBox& combo, const model::VaultModel& model); }
 class EntryEditDialog : public QDialog {
@@ -25,7 +25,8 @@ private:
     QComboBox *type_{}, *group_{};
     QLineEdit *title_{}, *url_{}, *login_{}, *password_{}, *token_{}, *sshPass_{}, *sshPath_{}, *sshComment_{}, *tags_{};
     QPlainTextEdit *note_{}, *sshPublic_{};
-    QCheckBox *favorite_{}, *reverify_{};
+    QCheckBox *favorite_{}, *reverify_{}, *expiry_{};
+    QDateEdit* expiryDate_{};
     QLabel* error_{};
     QWidget* fields_{};
     QDialogButtonBox* buttons_{};

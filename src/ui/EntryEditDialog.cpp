@@ -1,6 +1,7 @@
 #include "EntryEditDialog.h"
 #include "../vault/Crypto.h"
 #include <QCheckBox>
+#include <QDateEdit>
 #include <QComboBox>
 #include <QCompleter>
 #include <QDialogButtonBox>
@@ -111,6 +112,13 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     form->addRow(QStringLiteral("&Тип:"), type_); form->addRow(QStringLiteral("&Проект/группа:"), group_);
     form->addRow(QStringLiteral("&Название:"), title_); form->addRow(QStringLiteral("Адрес (&URL):"), url_);
     form->addRow(QStringLiteral("&Заметка:"), note_);
+    // Срок действия: опционален; дата выбирается с календарём, хранится UTC-полночь.
+    expiry_ = new QCheckBox(QStringLiteral("Действителен до"), fields_); expiry_->setObjectName(QStringLiteral("entryExpiry"));
+    expiryDate_ = new QDateEdit(fields_); expiryDate_->setObjectName(QStringLiteral("entryExpiryDate"));
+    expiryDate_->setCalendarPopup(true); expiryDate_->setDisplayFormat(QStringLiteral("dd.MM.yyyy"));
+    expiryDate_->setDate(QDate::currentDate().addDays(30)); expiryDate_->setEnabled(false);
+    connect(expiry_, &QCheckBox::toggled, expiryDate_, &QDateEdit::setEnabled);
+    form->addRow(expiry_, expiryDate_);
     // Теги: свободный ввод через запятую; подсказки — все теги хранилища (allTags).
     tags_ = line(fields_, "entryTags"); tags_->setMaxLength(4096);
     tags_->setPlaceholderText(QStringLiteral("теги через запятую, например: прод, сервер"));
@@ -172,6 +180,7 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     sshPass_->setText(original_.sshPassphrase); sshComment_->setText(original_.sshComment);
     sshPublic_->setPlainText(QString::fromUtf8(original_.sshPublic)); sshPublic_->document()->setModified(false);
     favorite_->setChecked(original_.favorite); reverify_->setChecked(original_.reverify);
+    if (original_.expiresAt.isValid()) { expiry_->setChecked(true); expiryDate_->setDate(original_.expiresAt.date()); }
     const auto available = screen()->availableGeometry();
     resize(qMin(580, available.width() - 40), qMin(sizeHint().height(), available.height() - 80)); title_->setFocus();
 }
@@ -187,6 +196,8 @@ void EntryEditDialog::accept() {
     e.type = EntryType(type_->currentIndex()); e.groupId = group_->currentData().value<Id>();
     e.title = title_->text(); e.url = url_->text(); e.note = note_->toPlainText();
     e.favorite = favorite_->isChecked(); e.reverify = reverify_->isChecked();
+    e.expiresAt = expiry_->isChecked()
+        ? QDateTime(expiryDate_->date(), QTime(0, 0), Qt::UTC) : QDateTime();
     // Нормализация и лимиты тегов — зона ответственности модели: UI только делит
     // текст по запятым, а пробный validation.setEntry ниже покажет нарушение
     // (больше 16 тегов / длиннее 32 символов) в entryError без дублирования правил.

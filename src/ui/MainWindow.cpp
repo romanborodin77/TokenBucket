@@ -193,7 +193,10 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     sortMode_ = new QComboBox(controls); sortMode_->setObjectName(QStringLiteral("sortMode"));
     sortMode_->setAccessibleName(QStringLiteral("Сортировка записей"));
     sortMode_->addItems({QStringLiteral("По названию"), QStringLiteral("По дате изменения")});
-    controlsLayout->addWidget(typeFilter_); controlsLayout->addWidget(sortMode_);
+    expiryFilter_ = new QComboBox(controls); expiryFilter_->setObjectName(QStringLiteral("expiryFilter"));
+    expiryFilter_->setAccessibleName(QStringLiteral("Фильтр по сроку действия"));
+    expiryFilter_->addItems({QStringLiteral("Любой срок"), QStringLiteral("Истекают (30 дн.)"), QStringLiteral("Просрочены")});
+    controlsLayout->addWidget(typeFilter_); controlsLayout->addWidget(sortMode_); controlsLayout->addWidget(expiryFilter_);
     layout->addWidget(controls);
     tagBar_ = new QWidget(central); tagBar_->setObjectName(QStringLiteral("tagBar"));
     auto* tagLayout = new QHBoxLayout(tagBar_); tagLayout->setContentsMargins(0, 0, 0, 0);
@@ -201,6 +204,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     layout->addWidget(tagBar_);
     connect(typeFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     connect(sortMode_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
+    connect(expiryFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     auto* splitter = new QSplitter(central);
     auto* vaultTree = new VaultTree(splitter); tree_ = vaultTree;
     vaultTree->moveRequest = [this](model::Id node, model::Id target) { return moveNodeTo(node, target); };
@@ -324,6 +328,15 @@ void MainWindow::refillList(model::Id selected) {
             }), ids.end());
         // Семантика И: запись проходит, только если содержит каждый выбранный тег (без учёта регистра);
         // фильтр типа и теги действуют одновременно.
+        // Срок действия: 1 — истекают в горизонте 30 дней, 2 — просрочены (дата UTC-полночь).
+        const int expiryMode = expiryFilter_->currentIndex();
+        if (expiryMode > 0)
+            ids.erase(std::remove_if(ids.begin(), ids.end(), [this, expiryMode](model::Id id) {
+                const auto* entry = app_.model()->entry(id);
+                if (!entry || !entry->expiresAt.isValid()) return true; // без срока не попадают ни в одну ветку
+                const qint64 days = QDateTime::currentDateTimeUtc().daysTo(entry->expiresAt);
+                return expiryMode == 1 ? !(days >= 0 && days <= model::VaultModel::ExpiryWarningDays) : days >= 0;
+            }), ids.end());
         if (!selectedTags_.isEmpty())
             ids.erase(std::remove_if(ids.begin(), ids.end(), [this](model::Id id) {
                 const auto* entry = app_.model()->entry(id);
@@ -343,8 +356,18 @@ void MainWindow::refillList(model::Id selected) {
         });
         for (auto id : ids) {
             const auto* entry = app_.model()->entry(id);
-            auto* item = new QListWidgetItem(entry->favorite ? QStringLiteral("★ ") + entry->title : entry->title, list_); item->setData(Qt::UserRole, id);
+            QString title = entry->favorite ? QStringLiteral("★ ") + entry->title : entry->title;
+            // Пометка срока: ⏳ истекает в горизонте 30 дней, ⏰ просрочен (с датой).
+            if (entry->expiresAt.isValid()) {
+                const qint64 days = QDateTime::currentDateTimeUtc().daysTo(entry->expiresAt);
+                const QString dateText = entry->expiresAt.toLocalTime().toString(QStringLiteral("dd.MM.yyyy"));
+                if (days < 0) title += QStringLiteral("  ⏰ просрочен %1").arg(dateText);
+                else if (days <= model::VaultModel::ExpiryWarningDays) title += QStringLiteral("  ⏳ до %1").arg(dateText);
+            }
+            auto* item = new QListWidgetItem(title, list_); item->setData(Qt::UserRole, id);
             if (id == selected) list_->setCurrentItem(item);
+            if (entry->expiresAt.isValid() && QDateTime::currentDateTimeUtc() > entry->expiresAt)
+                item->setForeground(palette().brush(QPalette::Disabled, QPalette::Text)); // просроченные приглушены
         }
         if (!list_->currentItem() && list_->count()) list_->setCurrentRow(0);
     }

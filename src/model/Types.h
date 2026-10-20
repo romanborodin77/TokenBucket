@@ -13,6 +13,7 @@ struct Entry {
     QString title, note, url, login, password, token, sshPassphrase, sshComment;
     QByteArray sshPrivate, sshPublic;
     QDateTime created, modified;
+    QDateTime expiresAt; // срок действия секрета; null — бессрочно (UTC, полночь даты)
     bool favorite = false, reverify = false;
     QStringList tags; // теги записи; канонизируются в VaultModel::setEntry: trim, без пустых и дублей (без учёта регистра)
 };

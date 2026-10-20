@@ -77,6 +77,7 @@ private:
     QLineEdit* search_{};
     QComboBox* typeFilter_{};
     QComboBox* sortMode_{};
+    QComboBox* expiryFilter_{};
     QWidget* tagBar_{};
     QStringList selectedTags_{};
     QStackedWidget* right_{};

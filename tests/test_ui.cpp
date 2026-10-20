@@ -19,6 +19,7 @@
 #include <QDir>
 #include <QScreen>
 #include <QCheckBox>
+#include <QDateEdit>
 #include <QAccessible>
 #include <QSettings>
 #include <QSignalSpy>
@@ -298,6 +299,50 @@ private slots:
         QVERIFY(panel);
         QTRY_VERIFY(panel->isVisible());
         QVERIFY(panel->findChild<QLineEdit*>()); // фокус не проверяем: offscreen не отдаёт его
+    }
+    void expiryInEditorListAndFilter() {
+        Application app(dir_.path() + "/expiry"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        auto make = [&app, group](const QString& title, const QDate& date) {
+            model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+            e.type = model::EntryType::ApiToken; e.title = title; e.token = "t";
+            e.expiresAt = QDateTime(date, QTime(0, 0), Qt::UTC);
+            QVERIFY(app.model()->setEntry(e).isEmpty());
+        };
+        make(QStringLiteral("Свежая"), QDate::currentDate().addDays(400));
+        make(QStringLiteral("Истекающая"), QDate::currentDate().addDays(10));
+        make(QStringLiteral("Просроченная"), QDate::currentDate().addDays(-3));
+        QVERIFY(app.save(&error));
+        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        QCOMPARE(w.list()->count(), 3);
+        // Редактор: чекбокс и календарная дата переживают круг через запись.
+        ::EntryEditDialog dialog(*app.model(), std::nullopt);
+        dialog.findChild<QComboBox*>(QStringLiteral("entryType"))->setCurrentIndex(0);
+        dialog.findChild<QLineEdit*>(QStringLiteral("entryTitle"))->setText(QStringLiteral("Новая со сроком"));
+        auto* expiryBox = dialog.findChild<QCheckBox*>(QStringLiteral("entryExpiry"));
+        auto* expiryDate = dialog.findChild<QDateEdit*>(QStringLiteral("entryExpiryDate"));
+        QVERIFY(expiryBox && expiryDate);
+        QVERIFY(!expiryDate->isEnabled());           // до включения чекбокса дата неактивна
+        expiryBox->setChecked(true);
+        QVERIFY(expiryDate->isEnabled());
+        expiryDate->setDate(QDate(2030, 1, 2));
+        dialog.accept();
+        QVERIFY(dialog.entry() && dialog.entry()->expiresAt == QDateTime(QDate(2030, 1, 2), QTime(0, 0), Qt::UTC));
+        // Пометки в списке и фильтр.
+        QStringList titles;
+        for (int i = 0; i < w.list()->count(); ++i) titles << w.list()->item(i)->text();
+        QVERIFY(titles.join(QChar(u' ')).contains(QStringLiteral("⏳")));
+        QVERIFY(titles.join(QChar(u' ')).contains(QStringLiteral("⏰")));
+        auto* expiryFilter = w.findChild<QComboBox*>(QStringLiteral("expiryFilter"));
+        QVERIFY(expiryFilter);
+        expiryFilter->setCurrentIndex(2);           // «Просрочены»
+        QCOMPARE(w.list()->count(), 1);
+        QVERIFY(w.list()->item(0)->text().contains(QStringLiteral("Просроченная")));
+        expiryFilter->setCurrentIndex(1);           // «Истекают (30 дн.)»
+        QCOMPARE(w.list()->count(), 1);
+        QVERIFY(w.list()->item(0)->text().contains(QStringLiteral("Истекающая")));
+        expiryFilter->setCurrentIndex(0);
+        QCOMPARE(w.list()->count(), 3);
     }
     void aboutDialogShowsBrandAndStack() {
         ui::AboutDialog dialog;

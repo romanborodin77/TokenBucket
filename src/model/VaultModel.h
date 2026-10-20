@@ -10,6 +10,7 @@ public:
     static constexpr qsizetype MaxSecretBytes = 1024 * 1024;
     static constexpr qsizetype MaxPlainBytesCBOR = 64LL * 1024 * 1024;
     static constexpr int MaxDepth = 8;
+    static constexpr int ExpiryWarningDays = 30; // горизонт подсветки «скоро истекает»
     static constexpr int MaxTags = 16;      // тегов на запись: верхняя граница UI-чипов и CBOR
     static constexpr int MaxTagChars = 32;  // длина одного тега в символах QString
 
