@@ -8,6 +8,11 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 namespace tb::ui {
+// Диалог «пароль + подтверждение» для экспорта и смены мастер-пароля: поля
+// параметризуются (title/note/prompt), note несёт объяснение последствий
+// («старый пароль перестаёт действовать», «экспорт переносим…»). Пароль
+// существует в QLineEdit минимальное время: вызыватель забирает его в SecureBytes
+// и сразу очищает (деструктор чистит поля страховочно).
 ExportDialog::ExportDialog(QWidget* parent, const QString& title, const QString& note, const QString& prompt)
     : QDialog(parent) {
     setWindowTitle(title.isEmpty() ? QStringLiteral("TokenBucket — пароль") : title);

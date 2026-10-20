@@ -5,6 +5,10 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
+// Экран разблокировки. Kind::Password — ввод мастер-пароля (IME-подсказки скрытого
+// ввода, чтобы раскладки/облака не запоминали пароль); Kind::Hello — единственная
+// кнопка «Проверить через Windows Hello» (сам запрос показывает платформенный слой
+// по HWND родителя). Деструктор очищает поле: пароль не остаётся в памяти виджета.
 UnlockDialog::UnlockDialog(Kind kind, QWidget* parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("Разблокировка TokenBucket"));
     auto* layout = new QVBoxLayout(this);

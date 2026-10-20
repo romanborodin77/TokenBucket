@@ -3,6 +3,8 @@
 class QRadioButton;
 class QLineEdit;
 class QLabel;
+// Первый запуск: выбор способа разблокировки нового хранилища (см. SetupDialog.cpp).
+// Пароль отдаётся как UTF-8 QByteArray — вызыватель оборачивает в SecureBytes и чистит.
 class SetupDialog : public QDialog {
     Q_OBJECT
 public:

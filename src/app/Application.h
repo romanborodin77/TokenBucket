@@ -11,6 +11,13 @@
 #include "../platform/hello_win.h"
 #endif
 namespace tb {
+// Ядро приложения: владеет моделью, ключом данных и файлом хранилища; переводит
+// интерфейс между состояниями-шлюзами. Долгие операции (создание/разблокировка/
+// сохранение/экспорт/смена режима — Argon2id занимает секунды) выполняются через
+// execute() в QtConcurrent; на время операции выставляется busy_, а «поколение»
+// generation() аннулирует результаты операций, завершившихся после блокировки:
+// поздний ответ уже сброшенного хранилища не применяется (защита от гонки
+// «пользователь нажал Блокировку, пока Argon2id считался»).
 class Application : public QObject {
     Q_OBJECT
 public:
@@ -25,10 +32,10 @@ public:
 #endif
     Gate gate() const { return gate_; }
     Mode mode() const { return mode_; }
-    Mode unlockMode() const { return hint_; }
+    Mode unlockMode() const { return hint_; }               // подсказка для экрана разблокировки (режим прошлого раза)
     bool busy() const { return busy_; }
-    static std::unique_ptr<QLockFile> acquireInstanceLock(const QString& dir, QString* err);
-    static bool validPassword(const QByteArray& utf8);
+    static std::unique_ptr<QLockFile> acquireInstanceLock(const QString& dir, QString* err); // единственный экземпляр
+    static bool validPassword(const QByteArray& utf8);      // 12–1024 байта UTF-8 (спека)
     bool createPasswordVault(const QByteArray& pw, QString* err);
     bool unlock(const QByteArray& pw, QString* err);
     bool save(QString* err);
@@ -41,7 +48,7 @@ public:
     bool switchToHello(QString* err);
 #endif
     model::VaultModel* model() { return &model_; }
-    quint64 generation() const { return generation_.load(); }
+    quint64 generation() const { return generation_.load(); } // растёт на каждой lock(): сверка для асинхронных проверок
     QString storePathForTest() const { return store_.mainPath(); }
 #ifdef Q_OS_WIN
     bool createHelloVault(QString* err, void* hwnd = nullptr);
@@ -53,6 +60,10 @@ signals:
     void busyChanged(bool busy);
 private:
     struct Outcome;
+    // Запуск job в QtConcurrent с модальным прогрессом и применением результата в
+    // GUI-потоке: adopt=true — операция переводит хранилище в Ready (создание/
+    // разблокировка/импорт/смена режима), false — только сохранение поверх текущего.
+    // Поколение сверяется до применения: результат отменённой операции выбрасывается.
     bool execute(std::function<std::shared_ptr<Outcome>(quint64)> job, Mode mode, bool adopt, QString* err);
     bool canStart(Gate expected, QString* err) const;
     store::VaultStore store_;

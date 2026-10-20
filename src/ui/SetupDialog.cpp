@@ -8,6 +8,11 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QVBoxLayout>
+// Создание нового хранилища: выбор способа разблокировки (пароль или Windows Hello)
+// и ввод мастер-пароля с подтверждением. Текст предупреждения Hello-режима — часть
+// согласия пользователя с границами DPAPI (ключ не переносим, процесс от того же
+// пользователя может обойти проверку — спека §4). Пароли живут в QLineEdit ровно
+// до accept: main сразу забирает их в SecureBytes и вызывает clearSecrets().
 SetupDialog::SetupDialog(bool helloAvailable, QWidget* parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("Создание хранилища TokenBucket"));
     auto* layout = new QVBoxLayout(this);
@@ -58,6 +63,8 @@ QByteArray SetupDialog::masterPassword() const { return pw1_->text().toUtf8(); }
 bool SetupDialog::helloChosen() const { return hello_->isChecked(); }
 void SetupDialog::clearSecrets() { pw1_->clear(); pw2_->clear(); }
 void SetupDialog::accept() {
+    // Валидация до закрытия: пароль обязан пройти требования спеки и совпасть
+    // с подтверждением; ошибки показываются в самом диалоге, а не вторым окном.
     if (helloChosen() && hello_->isEnabled()) { QDialog::accept(); return; }
     tb::SecureBytes password(masterPassword()), confirmation(pw2_->text().toUtf8());
     if (!tb::Application::validPassword(password.bytes())) {

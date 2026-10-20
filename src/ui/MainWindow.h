@@ -9,6 +9,13 @@ class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; cla
 class QScrollArea; class QLabel; class QAction;
 namespace tb::ui {
 class EntryCard;
+// Главное окно: дерево проектов/групп — список записей с фильтрами/сортировкой —
+// карточка записи. Все изменения модели идут через commit()/commitEntry()
+// (сохранение + откат при отказе). Крестик СВОРАЧИВАЕТ в трей без блокировки
+// (closeEvent → hide); настоящий выход — requestExit() («Выход» из трея/меню):
+// тогда closeEvent вызывает Application::lock и разрешает закрытие. Живёт один
+// цикл Ready (пересоздаётся после разблокировки) — поэтому трей и таймеры
+// принадлежат main, а не окну.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:

@@ -4,6 +4,10 @@
 #include <new>
 #include <utility>
 namespace tb {
+// Ключ шифрования в защищённой памяти libsodium: sodium_malloc даёт guard-страницы
+// вокруг региона (обращение за пределы — крах процесса, а не тихая порча) и канарейки,
+// проверяемые при освобождении. Копирование запрещено, только перемещение.
+// data() отдаёт сырой указатель на 32 байта (XChaCha20-Poly1305 ключ).
 class SecureKey {
 public:
     static constexpr size_t Size = 32;
@@ -18,10 +22,16 @@ public:
     }
     unsigned char* data() { return p_; }
     const unsigned char* data() const { return p_; }
+    // Сравнение ключей — только sodium_memcmp: защита от атак по времени.
     bool operator==(const SecureKey& o) const { return sodium_memcmp(p_, o.p_, Size) == 0; }
 private:
     unsigned char* p_;
 };
+// Обёртка над QByteArray с затиранием: содержимое гарантированно обнуляется
+// (sodium_memzero, не оптимизируется компилятором) в clear() и в деструкторе.
+// Память лежит в обычной куче — это осознанный компромисс: очистка есть, guard-страниц нет.
+// Для сериализации модели без обычной кучи см. cbor::SecureBuffer (CborWriter.h).
+// Копирование запрещено; release() передаёт владение байтами наружу (например, в файл).
 class SecureBytes {
 public:
     SecureBytes() = default;

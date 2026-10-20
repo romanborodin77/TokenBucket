@@ -7,6 +7,9 @@
 #include <vector>
 namespace tb::store {
 namespace {
+// DACL «только владелец и SYSTEM»: строится из SDDL по SID текущего пользователя
+// (не по имени — SID не зависит от локализации). PROTECTED-семантика (P:) отключает
+// наследование прав родительского каталога. Все файлы хранилища создаются с ним.
 struct PrivateSecurity {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     PrivateSecurity() {
@@ -26,12 +29,16 @@ struct PrivateSecurity {
     }
     ~PrivateSecurity() { if (descriptor) LocalFree(descriptor); }
 };
+// Symlink/junction: замена через такой путь ушла бы мимо настоящего каталога.
 bool reparsePoint(const QString& path) {
     const DWORD attr = GetFileAttributesW(reinterpret_cast<LPCWSTR>(path.utf16()));
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT);
 }
 struct RealOps : FileOps {
     bool writeAll(const QString& path, const QByteArray& bytes) override {
+        // CREATE_NEW: отказ, если файл уже есть, — вызывающий обязан был его удалить;
+        // случайная перезапись поверх чужого содержимого исключена. Flush — чтобы
+        // после «сохранено» данные реально на диске перед атомарной заменой.
         PrivateSecurity security;
         if (!security.descriptor || bytes.size() > MAXDWORD) return false;
         SECURITY_ATTRIBUTES sa{sizeof(sa), security.descriptor, FALSE};
@@ -53,6 +60,9 @@ struct RealOps : FileOps {
 };
 }
 bool ensurePrivateDir(const QString& dir) {
+    // Каталог данных: создаётся с тем же DACL «владелец+SYSTEM» и принудительно
+    // защищается от наследования (PROTECTED_DACL) даже если уже существует —
+    // права не зависят от того, кто и с какими настройками создал его раньше.
     if (reparsePoint(dir) || !QDir().mkpath(QFileInfo(dir).absolutePath())) return false;
     PrivateSecurity security;
     if (!security.descriptor) return false;

@@ -5,12 +5,15 @@
 #include <UserConsentVerifierInterop.h>
 namespace tb::platform::hello {
 namespace {
+// WinRT-вызовы требуют COM-apartment; инициализация на каждый вызов (RAII) —
+// поток QtConcurrent не держит apartment между вызовами.
 struct Apartment {
     Apartment() { winrt::init_apartment(winrt::apartment_type::multi_threaded); }
     ~Apartment() { winrt::uninit_apartment(); }
 };
 }
 Availability availability() {
+    // Проверка «Hello настроен» без показа диалога: доступность биометрии/PIN.
     try {
         Apartment apartment;
         using namespace winrt::Windows::Security::Credentials::UI;
@@ -22,6 +25,10 @@ Availability availability() {
     return Availability::Unavailable;
 }
 Result request(void* hwnd, const QString& prompt) {
+    // Запрос подтверждения Windows Hello. Долгие крипто-операции выполняются в
+    // QtConcurrent-потоке, а WinRT-interop требует HWND окна-владельца в GUI-потоке —
+    // main передаёт winId модального прогресс-диалога сюда (см. run() в main.cpp).
+    // Отмена пользователем и сбой различаются: Canceled не считается ошибкой владельца.
     if (!hwnd || !IsWindow(static_cast<HWND>(hwnd))) return Result::Failed;
     try {
         Apartment apartment;

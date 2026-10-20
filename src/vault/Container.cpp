@@ -9,6 +9,17 @@
 #endif
 namespace tb::container {
 namespace {
+// Формат файла TBVK v1 (все числа little-endian, LENGTH-поля — uint32/uint64):
+//
+//   [0..60]   головка: магия "TBVK" | версия(2Б) | режим(1Б: 1=пароль, 2=Hello)
+//             | kdf(2Б: 1=Argon2id) | opslimit(4Б) | memlimit(4Б) | соль(16Б)
+//             | wrapNonce(24Б, у Hello — нули) | wrapLen(4Б)
+//   [61..]    wrap: ключ данных (32Б) + тег (16Б), зашифрованный KEK'ом (пароль → Argon2id
+//             по соли; Hello → DPAPI учётной записи, wrapLen произвольный)
+//   затем     ctNonce(24Б) | ctLen(8Б) | ct: CBOR модели + тег, XChaCha20-Poly1305 ключом данных
+//
+// Целостность: aad1 = байты [0..60] для wrap, aad2 = байты от [0..60]+wrap+ctNonce+ctLen
+// для тела — подмена любого байта, включая заголовок, обнаруживается при расшифровке.
 constexpr char kMagic[4] = {'T','B','V','K'};
 constexpr uint16_t kVersion = 1, kKdfArgon2id = 1;
 constexpr uint32_t kOpslimit = 3, kMemlimit = 64u * 1024 * 1024;
@@ -21,6 +32,9 @@ struct Parsed {
 };
 
 bool parse(const QByteArray& f, Parsed& p) {
+    // Разбор без криптографии: только структура и длина. mode=255 означает «формат
+    // распознан, но версия/параметры не поддержаны» — вызывающий отдаёт отдельный
+    // отказ, чтобы старые файлы не выглядели повреждёнными.
     if (f.size() < kHead + 24 + 8 + 16 || f.size() > int(MaxFileBytes)) return false;
     QDataStream ds(f); // Qt 6: конструктор для чтения из const QByteArray&
     ds.setByteOrder(QDataStream::LittleEndian);
@@ -94,6 +108,9 @@ QByteArray packPassword(const QByteArray& pw, const QByteArray& cbor, SecureKey*
 
 Opened openPassword(const QByteArray& f, const QByteArray& pw) {
     Opened r; Parsed p;
+    // Открытие парольного контейнера: пароль → KEK (Argon2id по соли из заголовка) →
+    // распаковка ключа данных → расшифровка тела. Любая ошибка на этом пути —
+    // WrongKey: неверно указанный пароль и испорченный файл неотличимы (так задумано).
     if (f.size() > int(MaxFileBytes)) { r.status = Status::TooLarge; return r; }
     if (!parse(f, p)) { r.status = Status::BadFormat; return r; }
     if (p.mode == 255 || p.mode != ModePassword) { r.status = Status::Unsupported; return r; }

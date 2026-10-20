@@ -1,6 +1,7 @@
 #pragma once
 #include <QDialog>
 class QLineEdit;
+// Экран разблокировки существующего хранилища (Kind задаёт способ из hint прошлого раза).
 class UnlockDialog : public QDialog {
     Q_OBJECT
 public:

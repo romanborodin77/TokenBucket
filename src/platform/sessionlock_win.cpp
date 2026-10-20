@@ -4,6 +4,10 @@
 #include <wtsapi32.h>
 namespace tb::platform {
 namespace {
+// Скрытое окно-приёмник: WTS-уведомления о сеансе доставляются через сообщения
+// Windows, нужен HWND. Блокировка seанса (WTS_SESSION_LOCK) и уход в сон
+// (PBT_APMSUSPEND) немедленно запирают хранилище — не дожидаясь таймера
+// автоблокировки: свернутое спящее устройство не должно держать секреты в памяти.
 class Receiver : public QWidget {
 public:
     SessionWatcher& watcher;

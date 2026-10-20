@@ -3,6 +3,7 @@
 class QLineEdit;
 class QLabel;
 namespace tb::ui {
+// Параметризуемый диалог «пароль + подтверждение» для экспорта/смены мастер-пароля.
 class ExportDialog : public QDialog {
     Q_OBJECT
 public:

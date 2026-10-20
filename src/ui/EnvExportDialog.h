@@ -4,6 +4,11 @@ class QLineEdit;
 class QRadioButton;
 class QLabel;
 namespace tb::ui {
+// Диалог выдачи секрета в переменную окружения (спека 2026-10-20-envexport-design):
+// Temporary — запустить выбранную программу с переменной в её окружении (секрет
+// нигде не сохраняется); Permanent — записать в HKCU\Environment открытым текстом
+// (осознанный риск M-2: предупреждение показано, чекбокс «стирать при выходе»
+// синхронизирован с QSettings env-clear-on-exit). Валидация имени — envops::validName.
 class EnvExportDialog : public QDialog {
     Q_OBJECT
 public:

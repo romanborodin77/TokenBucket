@@ -2,6 +2,11 @@
 #include <QByteArray>
 #include "SecureBytes.h"
 namespace tb::container {
+// Упаковка/распаковка контейнера TBVK (формат — в начале Container.cpp).
+// Пары pack*/open* симметричны по режиму; ptr,len-варианты pack принимают
+// открытый CBOR из защищённого буфера (путь сохранения), QByteArray-варианты —
+// обёртки для тестов. Пустой QByteArray результата = отказ (причина не сообщается:
+// вызывающий показывает общее сообщение и не выдаёт деталей формата наружу).
 enum class Status { Ok, BadFormat, Unsupported, WrongKey, TooLarge };
 constexpr uint8_t ModePassword = 1, ModeHello = 2;
 constexpr qsizetype MaxFileBytes  = 80LL * 1024 * 1024;

@@ -9,6 +9,10 @@
 #include <unistd.h>
 namespace tb::store {
 namespace {
+// Linux-ветка (НИ РАЗУ не компилировалась — Linux-версия отложена, см. RESUME.MD).
+// Контракт тот же, что у fileops_win: создание только нового файла (O_CREAT|O_EXCL,
+// права 0600 при umask-независимом fchmod), отказ от symlink (O_NOFOLLOW),
+// fsync файла и каталога перед атомарным rename.
 struct RealOps : FileOps {
     bool writeAll(const QString& path, const QByteArray& bytes) override {
         const auto name = QFile::encodeName(path);

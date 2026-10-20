@@ -4,6 +4,12 @@
 #include <QLineEdit>
 #include <QMessageBox>
 namespace tb::ui {
+// Повторная проверка владельца для записей с флагом reverify (показ/копирование
+// секрета, редактор, выдача). Путь Hello — verifyHello по HWND родителя; путь
+// пароля — QInputDialog + Application::checkPassword. Ключевая защита от гонок —
+// сверка generation ПОСЛЕ диалога и ПОСЛЕ проверки: пока вводился пароль,
+// хранилище могли заблокировать (например, по таймеру) — тогда результат
+// проверки выбрасывается. Текст password-поля затирается сразу после accept.
 bool VerifyDialog::verify(Application& app, QWidget* parent, const QString& action) {
     if (app.gate() != Application::Gate::Ready || app.busy()) return false;
     const auto generation = app.generation(); QString error; bool verified = false;
