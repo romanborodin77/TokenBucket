@@ -2,6 +2,7 @@
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
 #include "AboutDialog.h"
+#include "../io/Import.h"
 #include "TrayController.h"
 #include "ExportDialog.h"
 #include "Theme.h"
@@ -107,6 +108,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
 #endif
     action(vault, QStringLiteral("Защищённый экспорт…"), &MainWindow::exportVault);
     action(vault, QStringLiteral("Импорт из файла…"), &MainWindow::importVault);
+    action(vault, QStringLiteral("Импорт из CSV / KeePass XML…"), &MainWindow::importFromCsvKeePass);
     vault->addSeparator();
     auto* settings = menuBar()->addMenu(QStringLiteral("&Настройки"));
 #ifdef Q_OS_WIN
@@ -636,6 +638,68 @@ void MainWindow::changeMasterPassword() {
 bool MainWindow::moveNodeTo(model::Id node, model::Id newParent) {
     if (!ready() || node == newParent || newParent.isNull()) { refreshAll(); return false; }
     return commit([&](auto& model) { return model.moveNode(node, newParent); });
+}
+void MainWindow::importFromCsvKeePass() {
+    if (!ready() || editing_) return;
+    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Импорт из CSV / KeePass XML"), {},
+        QStringLiteral("CSV (*.csv);;KeePass XML (*.xml);;Все файлы (*.*)"));
+    if (path.isEmpty() || !ready() || app_.generation() != generation) return;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > 80 * 1024 * 1024) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось открыть файл импорта (или он больше 80 МиБ)."));
+        return;
+    }
+    const QByteArray bytes = file.readAll();
+    file.close();
+    const bool keepass = path.endsWith(QStringLiteral(".xml"), Qt::CaseInsensitive);
+    QString error;
+    const int added = applyImport(bytes, keepass, &error);
+    if (added < 0) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
+    refreshAll();
+    statusBar()->showMessage(QStringLiteral("Импортировано записей: %1").arg(added), 5000);
+    QMessageBox::information(this, QStringLiteral("TokenBucket"),
+        QStringLiteral("Импортировано записей: %1%2.").arg(added)
+            .arg(error.isEmpty() ? QString() : QStringLiteral(" — Пропуски и замечания: %1").arg(error)));
+}
+int MainWindow::applyImport(const QByteArray& bytes, bool keepassXml, QString* err) {
+    const io::ImportResult parsed = keepassXml ? io::parseKeePassXml(bytes) : io::parseCsv(bytes);
+    // Все записи селятся под проект «Импорт» (создаётся при необходимости), группы — по пути из файла.
+    model::Id root;
+    for (auto id : app_.model()->nodes().keys())
+        if (app_.model()->nodes().value(id).parent.isNull() && app_.model()->nodes().value(id).name == QLatin1String("Импорт")) root = id;
+    if (root.isNull()) {
+        root = QUuid::createUuid();
+        const QString createError = app_.model()->addNode(root, {}, QStringLiteral("Импорт"));
+        if (!createError.isEmpty()) { if (err) *err = createError; return -1; }
+    }
+    int added = 0;
+    QStringList notes;
+    for (const auto& imported : parsed.entries) {
+        model::Id parent = root;
+        for (const QString& part : imported.groupPath) {
+            model::Id child;
+            for (auto id : app_.model()->nodes().keys())
+                if (app_.model()->nodes().value(id).parent == parent && app_.model()->nodes().value(id).name == part) { child = id; break; }
+            if (child.isNull()) {
+                child = QUuid::createUuid();
+                const QString createError = app_.model()->addNode(child, parent, part);
+                if (!createError.isEmpty()) { notes << createError; child = parent; break; } // упёрлись в лимит глубины — селятся выше
+                parent = child;
+            } else parent = child;
+        }
+        model::Entry e = imported.entry;
+        e.id = QUuid::createUuid(); e.groupId = parent;
+        e.created = e.modified = QDateTime::currentDateTimeUtc();
+        const QString entryError = app_.model()->setEntry(e);
+        if (entryError.isEmpty()) ++added; else notes << QStringLiteral("%1: %2").arg(e.title, entryError);
+    }
+    if (parsed.skipped > 0) notes << QStringLiteral("Пропущено строк файла: %1 (%2)").arg(parsed.skipped).arg(parsed.lastSkipReason);
+    // Импорт меняет модель — фиксируем одним сохранением (откат commit() не нужен: ошибки не отменяют уже добавленное).
+    QString saveError;
+    if (added > 0 && !app_.save(&saveError)) notes << saveError;
+    if (err) *err = notes.join(QLatin1Char('\n'));
+    return added;
 }
 void MainWindow::treeMenu(const QPoint& pos) {
     const auto item = tree_->itemAt(pos);

@@ -25,6 +25,7 @@ tb_add_test(test_ssh)
 tb_add_test(test_paste_win)
 tb_add_test(test_pwchange)
 tb_add_test(test_e2e)
+tb_add_test(test_import)
 if(WIN32)
   tb_add_test(test_env_win)
   set_tests_properties(test_lock PROPERTIES ENVIRONMENT

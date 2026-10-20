@@ -37,6 +37,7 @@ public slots:
     void moveSelectedNode();
     void deleteSelectedNode();
     void exportVault();
+    void importFromCsvKeePass(); // выбор файла через диалог; применение — applyImport
     void importVault();
     void switchUnlockMode();
     void changeMasterPassword();
@@ -66,6 +67,7 @@ private:
     void listMenu(const QPoint& pos);
     void toggleFavorite();
     void updateSwitchActionText();
+    int applyImport(const QByteArray& bytes, bool keepassXml, QString* err); // возвращает число добавленных
     model::Id selectedNode() const;
     model::Id selectedEntry() const;
 #ifdef Q_OS_WIN
