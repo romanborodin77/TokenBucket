@@ -11,15 +11,7 @@
 #include "ui/SetupDialog.h"
 #include "ui/UnlockDialog.h"
 #include "ui/MainWindow.h"
-#include <QDateTime>
-#include <QDir>
-#include <QFile>
 namespace {
-void trace(const char* step) {
-    QFile f(QDir::temp().absoluteFilePath(QStringLiteral("tb-trace.log")));
-    if (f.open(QIODevice::Append | QIODevice::WriteOnly))
-        f.write((QDateTime::currentDateTime().toString(QStringLiteral("hh:mm:ss.zzz ")) + QLatin1String(step) + QLatin1Char('\n')).toUtf8());
-}
 bool run(tb::Application& core, const std::function<bool(void*, QString*)>& operation, QString* err) {
     QProgressDialog progress(QStringLiteral("Обработка хранилища…"), QStringLiteral("Отменить"), 0, 0);
     progress.setWindowTitle(QStringLiteral("TokenBucket"));
@@ -30,27 +22,18 @@ bool run(tb::Application& core, const std::function<bool(void*, QString*)>& oper
     return operation(reinterpret_cast<void*>(progress.winId()), err);
 }
 int start() {
-    trace("start");
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    trace(qPrintable(dir));
     QString error;
-    trace("before-lock");
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
-    trace("after-lock");
-    if (!instanceLock) { trace("lock-failed"); QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), error); return 1; }
-    trace("before-core");
     tb::Application core(dir);
-    trace("after-core");
-    trace("before-idle");
     tb::IdleTimer idle(5 * 60 * 1000); idle.setActive(false);
-    trace("before-session");
     tb::platform::SessionWatcher session;
     if (!session.error().isEmpty()) { QMessageBox::critical(nullptr, QStringLiteral("TokenBucket"), session.error()); return 1; }
     QObject::connect(&idle, &tb::IdleTimer::idleTimeout, &core, &tb::Application::lock);
     QObject::connect(&session, &tb::platform::SessionWatcher::lockNow, &core, &tb::Application::lock);
     QObject::connect(&core, &tb::Application::stateChanged, &idle, [&] { idle.setActive(core.gate() == tb::Application::Gate::Ready); });
-    bool quitting = false;
-    QObject::connect(qApp, &QCoreApplication::aboutToQuit, &core, [&] { quitting = true; core.lock(); });
+    // Выход всегда идёт через closeEvent окна → Application::lock(); aboutToQuit здесь не
+    // срабатывает, так как app.exec() не используется (событийный цикл ниже — QEventLoop).
     for (;;) {
         if (core.gate() == tb::Application::Gate::NeedSetup) {
             SetupDialog dialog(false);
@@ -61,9 +44,7 @@ int start() {
             });
             availability.setFuture(QtConcurrent::run(tb::platform::hello::availability));
 #endif
-            trace("setup-shown");
             if (dialog.exec() != QDialog::Accepted) return 0;
-            trace("setup-accepted");
             tb::SecureBytes password(dialog.masterPassword()); dialog.clearSecrets();
             const bool ok = run(core, [&](void* hwnd, QString* err) {
 #ifdef Q_OS_WIN
@@ -80,11 +61,8 @@ int start() {
                 return 1;
             }
 #endif
-            trace("unlock-shown");
             UnlockDialog dialog(core.unlockMode() == tb::Application::Mode::Hello ? UnlockDialog::Kind::Hello : UnlockDialog::Kind::Password);
-            trace("setup-shown");
             if (dialog.exec() != QDialog::Accepted) return 0;
-            trace("setup-accepted");
             tb::SecureBytes password(dialog.password()); dialog.clearSecrets();
             const bool ok = run(core, [&](void* hwnd, QString* err) {
 #ifdef Q_OS_WIN
@@ -95,14 +73,13 @@ int start() {
             password.clear();
             if (!ok) { QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"), error); continue; }
         } else {
-            trace("mainwindow");
             QEventLoop loop; tb::ui::MainWindow window(core); bool closed = false;
             QObject::connect(&window, &tb::ui::MainWindow::closing, &loop, [&] { closed = true; loop.quit(); });
             QObject::connect(&core, &tb::Application::stateChanged, &loop, [&] {
                 if (core.gate() != tb::Application::Gate::Ready) loop.quit();
             });
             window.show(); loop.exec();
-            if (closed || quitting) return 0;
+            if (closed) return 0;
         }
     }
 }
