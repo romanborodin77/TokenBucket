@@ -2,6 +2,7 @@
 #include <QHash>
 #include <QList>
 #include "Types.h"
+#include "../vault/CborWriter.h"
 namespace tb::model {
 class VaultModel {
 public:
@@ -37,11 +38,13 @@ public:
     QString renameTag(const QString& from, const QString& to);   // "" — успех, иначе текст ошибки
     QString removeTag(const QString& tag);                       // "" — успех, иначе текст ошибки
 
-    QByteArray toCbor() const;
+    QByteArray toCbor() const;      // эталон Qt: используется тестами для золотого сравнения
+    cbor::SecureBuffer toCborSecure() const; // рабочий путь записи: секреты не проходят через обычную кучу
     enum class ParseStatus { Ok, Bad, TooLarge };
     ParseStatus fromCbor(const QByteArray& cbor, QString* err);
     void clear();
 private:
+    void encodeTo(cbor::CborWriter& w) const; // единая логика обоих проходов toCborSecure
     bool wouldCycle(Id node, Id newParent) const;
     static bool secretTooBig(const Entry& e);
     QHash<Id, Node> nodes_;

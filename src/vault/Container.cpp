@@ -48,16 +48,16 @@ bool parse(const QByteArray& f, Parsed& p) {
     return true;
 }
 
-QByteArray sealBody(QByteArray prefix, const SecureKey& key, const QByteArray& cbor) {
+QByteArray sealBody(QByteArray prefix, const SecureKey& key, const unsigned char* cbor, qsizetype cborLen) {
     unsigned char nonce[24]; randombytes_buf(nonce, sizeof nonce);
     QByteArray tail;
     QDataStream ds(&tail, QIODevice::WriteOnly);
     ds.setByteOrder(QDataStream::LittleEndian);
     ds.writeRawData(reinterpret_cast<const char*>(nonce), 24);
-    ds << quint64(cbor.size() + 16);
+    ds << quint64(cborLen + 16);
     prefix += tail;
     crypto::Blob ct;
-    if (!crypto::seal(key, prefix, cbor, ct, nonce)) return {};
+    if (!crypto::seal(key, prefix, cbor, quint64(cborLen), ct, nonce)) return {};
     return prefix + ct.ct;
 }
 } // namespace
@@ -68,13 +68,12 @@ uint8_t readMode(const QByteArray& f) {
     return p.mode == 255 ? 0 : p.mode;
 }
 
-QByteArray packPassword(const QByteArray& pw, const QByteArray& cbor, SecureKey* outKey) {
-    if (pw.size() < 12 || pw.size() > 1024 || cbor.size() > int(MaxPlainBytes)) return {};
+QByteArray packPassword(const QByteArray& pw, const unsigned char* cbor, qsizetype cborLen, SecureKey* outKey) {
+    if (pw.size() < 12 || pw.size() > 1024 || cborLen < 0 || cborLen > MaxPlainBytes) return {};
     SecureKey dataKey, kek;
     randombytes_buf(dataKey.data(), SecureKey::Size);
     QByteArray salt(16, '\0'); randombytes_buf(salt.data(), 16);
     if (!crypto::deriveKey(pw, reinterpret_cast<const unsigned char*>(salt.constData()), kek)) return {};
-    QByteArray keyBytes(reinterpret_cast<const char*>(dataKey.data()), int(SecureKey::Size));
     crypto::Blob wrap;
     randombytes_buf(wrap.nonce, sizeof wrap.nonce);
     // aad1 = первые 61 байт итогового файла = константная головка без wrap
@@ -82,12 +81,15 @@ QByteArray packPassword(const QByteArray& pw, const QByteArray& cbor, SecureKey*
         ds.writeRawData(kMagic,4); ds << kVersion << uint8_t(ModePassword) << kKdfArgon2id << kOpslimit << kMemlimit;
         ds.writeRawData(salt.constData(),16); ds.writeRawData(reinterpret_cast<const char*>(wrap.nonce),24); ds << uint32_t(SecureKey::Size + 16); }
     unsigned char wrapNonce[24]; memcpy(wrapNonce, wrap.nonce, 24);
-    const bool wrapped = crypto::seal(kek, head, keyBytes, wrap, wrapNonce);
-    sodium_memzero(keyBytes.data(), keyBytes.size());
+    // Ключ заворачивается прямо из защищённого буфера SecureKey — без копии в обычной куче.
+    const bool wrapped = crypto::seal(kek, head, dataKey.data(), SecureKey::Size, wrap, wrapNonce);
     if (!wrapped) return {};
-    QByteArray file = sealBody(head + wrap.ct, dataKey, cbor);
+    QByteArray file = sealBody(head + wrap.ct, dataKey, cbor, cborLen);
     if (!file.isEmpty() && outKey) memcpy(outKey->data(), dataKey.data(), SecureKey::Size);
     return file;
+}
+QByteArray packPassword(const QByteArray& pw, const QByteArray& cbor, SecureKey* outKey) {
+    return packPassword(pw, reinterpret_cast<const unsigned char*>(cbor.constData()), cbor.size(), outKey);
 }
 
 Opened openPassword(const QByteArray& f, const QByteArray& pw) {
@@ -112,11 +114,14 @@ Opened openPassword(const QByteArray& f, const QByteArray& pw) {
     return r;
 }
 
-QByteArray reseal(const QByteArray& f, const SecureKey& dataKey, const QByteArray& cbor) {
-    if (cbor.size() > int(MaxPlainBytes)) return {};
+QByteArray reseal(const QByteArray& f, const SecureKey& dataKey, const unsigned char* cbor, qsizetype cborLen) {
+    if (cborLen < 0 || cborLen > MaxPlainBytes) return {};
     Parsed p;
     if (!parse(f, p) || p.mode == 255) return {};
-    return sealBody(f.left(kHead + p.wrap.size()), dataKey, cbor);
+    return sealBody(f.left(kHead + p.wrap.size()), dataKey, cbor, cborLen);
+}
+QByteArray reseal(const QByteArray& f, const SecureKey& dataKey, const QByteArray& cbor) {
+    return reseal(f, dataKey, reinterpret_cast<const unsigned char*>(cbor.constData()), cbor.size());
 }
 
 #ifdef Q_OS_WIN
@@ -129,8 +134,8 @@ QByteArray dpapiWrap(SecureKey& key) {
     return r;
 }
 }
-QByteArray packHello(const QByteArray& cbor, SecureKey* outKey) {
-    if (cbor.size() > int(MaxPlainBytes)) return {};
+QByteArray packHello(const unsigned char* cbor, qsizetype cborLen, SecureKey* outKey) {
+    if (cborLen < 0 || cborLen > MaxPlainBytes) return {};
     SecureKey dataKey;
     randombytes_buf(dataKey.data(), SecureKey::Size);
     QByteArray wrap = dpapiWrap(dataKey);
@@ -140,9 +145,12 @@ QByteArray packHello(const QByteArray& cbor, SecureKey* outKey) {
     QByteArray head; { QDataStream ds(&head, QIODevice::WriteOnly); ds.setByteOrder(QDataStream::LittleEndian);
         ds.writeRawData(kMagic,4); ds << kVersion << uint8_t(ModeHello) << kKdfArgon2id << kOpslimit << kMemlimit;
         ds.writeRawData(salt.constData(),16); ds.writeRawData(wrapNonce.constData(),24); ds << uint32_t(wrap.size()); }
-    QByteArray file = sealBody(head + wrap, dataKey, cbor);
+    QByteArray file = sealBody(head + wrap, dataKey, cbor, cborLen);
     if (!file.isEmpty() && outKey) memcpy(outKey->data(), dataKey.data(), SecureKey::Size);
     return file;
+}
+QByteArray packHello(const QByteArray& cbor, SecureKey* outKey) {
+    return packHello(reinterpret_cast<const unsigned char*>(cbor.constData()), cbor.size(), outKey);
 }
 Opened openHello(const QByteArray& f) {
     Opened r; Parsed p;

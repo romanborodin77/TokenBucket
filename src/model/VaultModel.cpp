@@ -169,6 +169,64 @@ QByteArray VaultModel::toCbor() const {
     root[u"entries"_s] = es;
     return QCborValue(root).toCbor();
 }
+// Защищённая сериализация: та же структура и тот же ПОРЯДОК ключей, что у toCbor()
+// (QCborMap сохраняет порядок вставки, а не сортирует), поэтому выход побайтово
+// совпадает с QCborValue::toCbor() — это фиксирует золотой тест.
+void VaultModel::encodeTo(cbor::CborWriter& w) const {
+    w.beginMap(3);
+    w.text(u"v"); w.uint(3);
+    w.text(u"nodes"); {
+        w.beginArray(size_t(nodes_.size()));
+        for (auto& n : nodes_) {
+            w.beginMap(3);
+            w.text(u"id"); w.text(idStr(n.id));
+            w.text(u"p"); w.text(n.parent.isNull() ? QString() : idStr(n.parent));
+            w.text(u"n"); w.text(n.name);
+        }
+    }
+    w.text(u"entries"); {
+        w.beginArray(size_t(entries_.size()));
+        for (auto& e : entries_) {
+            w.beginMap(19);
+            w.text(u"id"); w.text(idStr(e.id));
+            w.text(u"g"); w.text(idStr(e.groupId));
+            w.text(u"type"); w.uint(quint64(int(e.type)));
+            w.text(u"title"); w.text(e.title);
+            w.text(u"note"); w.text(e.note);
+            w.text(u"url"); w.text(e.url);
+            w.text(u"cr"); w.text(iso(e.created));
+            w.text(u"mod"); w.text(iso(e.modified));
+            w.text(u"fav"); w.boolean(e.favorite);
+            w.text(u"rv"); w.boolean(e.reverify);
+            w.text(u"tok"); w.bytesUtf8(e.token);
+            w.text(u"login"); w.text(e.login);
+            w.text(u"pw"); w.bytesUtf8(e.password);
+            w.text(u"sshpriv"); w.bytes(e.sshPrivate.constData(), size_t(e.sshPrivate.size()));
+            w.text(u"sshpub"); w.bytes(e.sshPublic.constData(), size_t(e.sshPublic.size()));
+            w.text(u"sshph"); w.text(e.sshPassphrase);
+            w.text(u"sshc"); w.text(e.sshComment);
+            w.text(u"exp"); w.text(e.expiresAt.isValid() ? iso(e.expiresAt) : QString()); // пусто — бессрочно
+            w.text(u"tags"); {
+                w.beginArray(size_t(e.tags.size()));
+                for (const QString& tag : e.tags) w.text(tag);
+            }
+        }
+    }
+}
+cbor::SecureBuffer VaultModel::toCborSecure() const {
+    // Проход 1 — сухой подсчёт точного размера; проход 2 — запись в буфер ровно того
+    // размера. Оба прохода исполняют одну и ту же encodeTo, поэтому размеры совпадают,
+    // а секреты нигде не попадают в QByteArray/обычную кучу.
+    cbor::CborWriter counter;
+    encodeTo(counter);
+    cbor::SecureBuffer buffer(counter.position());
+    cbor::CborWriter writer;
+    writer.setOutput(buffer.data(), buffer.size());
+    encodeTo(writer);
+    Q_ASSERT_X(!writer.overflow() && writer.position() == buffer.size(),
+               "VaultModel::toCborSecure", "расхождение проходов подсчёта и записи");
+    return buffer;
+}
 VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* err) {
     if (err) err->clear();
     const auto bad = [&] { if (err) *err = "Хранилище повреждено."; return ParseStatus::Bad; };

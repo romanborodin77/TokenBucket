@@ -96,7 +96,11 @@ bool Application::createPasswordVault(const QByteArray& pw, QString* err) {
     return execute([this, secret](quint64 expected) {
         auto result = std::make_shared<Outcome>();
         result->key = std::make_unique<SecureKey>();
-        result->file = container::packPassword(secret->bytes(), result->model.toCbor(), result->key.get());
+        // Секреты сериализуются сразу в защищённый буфер (без обычной кучи) и
+        // оттуда уходят в шифратор контейнера.
+        cbor::SecureBuffer cbor(result->model.toCborSecure());
+        result->file = cbor.size() > container::MaxPlainBytes
+            ? QByteArray() : container::packPassword(secret->bytes(), cbor.data(), cbor.size(), result->key.get());
         secret->clear();
         if (generation() != expected) return result;
         result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
@@ -119,14 +123,14 @@ bool Application::unlock(const QByteArray& pw, QString* err) {
 }
 bool Application::save(QString* err) {
     if (!canStart(Gate::Ready, err)) return false;
-    auto plain = std::make_shared<SecureBytes>(model_.toCbor());
+    auto plain = std::make_shared<cbor::SecureBuffer>(model_.toCborSecure());
     if (plain->size() > container::MaxPlainBytes) return fail(err, "Содержимое хранилища превышает 64 МиБ.");
     auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
     const auto file = file_;
-    return execute([this, plain, key, file](quint64 expected) {
+    return execute([this, plain, key, file](quint64 expected) mutable {
         auto result = std::make_shared<Outcome>();
-        result->file = container::reseal(file, *key, plain->bytes());
-        plain->clear();
+        result->file = container::reseal(file, *key, plain->data(), plain->size());
+        plain.reset(); // освобождает sodium-буфер немедленно, не дожидаясь конца лямбды
         if (generation() != expected) return result;
         result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
         if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сохранить хранилище.");
@@ -142,7 +146,7 @@ void Application::lock() {
 QByteArray Application::exportContainer(const QByteArray& exportPw, QString* err) {
     if (!canStart(Gate::Ready, err)) return {};
     if (!validPassword(exportPw)) { fail(err, "Пароль экспорта: минимум 12 и максимум 1024 байта UTF-8."); return {}; }
-    auto plain = std::make_shared<SecureBytes>(model_.toCbor());
+    auto plain = std::make_shared<cbor::SecureBuffer>(model_.toCborSecure());
     if (plain->size() > container::MaxPlainBytes) { fail(err, "Содержимое хранилища превышает 64 МиБ."); return {}; }
     const quint64 expected = generation_;
     auto secret = std::make_shared<SecureBytes>(exportPw);
@@ -151,14 +155,14 @@ QByteArray Application::exportContainer(const QByteArray& exportPw, QString* err
     try {
         exported = waitFor(QtConcurrent::run([this, expected, plain, secret]() -> QByteArray {
             if (expected != generation_) return {};
-            const QByteArray bytes = container::packPassword(secret->bytes(), plain->bytes(), nullptr);
+            const QByteArray bytes = container::packPassword(secret->bytes(), plain->data(), plain->size(), nullptr);
             return expected == generation_ ? bytes : QByteArray();
         }));
         if (expected != generation_) { exported.clear(); error = QStringLiteral("Операция отменена блокировкой хранилища."); }
         else if (exported.isEmpty()) error = QStringLiteral("Не удалось создать файл экспорта.");
     }
     catch (...) { exported.clear(); error = QStringLiteral("Не удалось создать файл экспорта."); }
-    plain->clear(); secret->clear();
+    plain.reset(); secret->clear();
     if (err) *err = error;
     const bool canceled = expected != generation_;
     busy_ = false; emit busyChanged(false);
@@ -184,9 +188,9 @@ bool Application::importContainer(const QByteArray& bytes, const QByteArray& imp
         plain.clear();
         if (generation() != expected) return result;
         result->key = std::make_unique<SecureKey>();
-        SecureBytes cbor(result->model.toCbor());
-        result->file = cbor.size() > container::MaxPlainBytes ? QByteArray() : container::packPassword(localSecret->bytes(), cbor.bytes(), result->key.get());
-        cbor.clear();
+        cbor::SecureBuffer cbor(result->model.toCborSecure());
+        result->file = cbor.size() > container::MaxPlainBytes
+            ? QByteArray() : container::packPassword(localSecret->bytes(), cbor.data(), cbor.size(), result->key.get());
         if (generation() != expected) return result;
         result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
         if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось импортировать хранилище.");
@@ -202,10 +206,9 @@ bool Application::switchToPassword(const QByteArray& newPw, QString* err) {
         auto result = std::make_shared<Outcome>();
         result->model = *snapshot;
         result->key = std::make_unique<SecureKey>();
-        SecureBytes cbor(result->model.toCbor());
+        cbor::SecureBuffer cbor(result->model.toCborSecure());
         if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
-        result->file = container::packPassword(secret->bytes(), cbor.bytes(), result->key.get());
-        cbor.clear();
+        result->file = container::packPassword(secret->bytes(), cbor.data(), cbor.size(), result->key.get());
         if (generation() != expected) return result;
         result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
         if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сменить режим разблокировки.");
@@ -220,10 +223,9 @@ bool Application::switchToHello(QString* err) {
         auto result = std::make_shared<Outcome>();
         result->model = *snapshot;
         result->key = std::make_unique<SecureKey>();
-        SecureBytes cbor(result->model.toCbor());
+        cbor::SecureBuffer cbor(result->model.toCborSecure());
         if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
-        result->file = container::packHello(cbor.bytes(), result->key.get());
-        cbor.clear();
+        result->file = container::packHello(cbor.data(), cbor.size(), result->key.get());
         if (generation() != expected) return result;
         result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
         if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сменить режим разблокировки.");
@@ -267,7 +269,9 @@ bool Application::createHelloVault(QString* err, void* hwnd) {
         }
         if (generation() != expected) return result;
         result->key = std::make_unique<SecureKey>();
-        result->file = container::packHello(result->model.toCbor(), result->key.get());
+        cbor::SecureBuffer cbor(result->model.toCborSecure());
+        if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
+        result->file = container::packHello(cbor.data(), cbor.size(), result->key.get());
         if (generation() != expected) return result;
         result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
         if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось создать хранилище Windows Hello.");

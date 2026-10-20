@@ -2,14 +2,18 @@
 #include <QCborMap>
 #include <QCborArray>
 #include <QCborValue>
+#include <functional>
 #include "../src/model/VaultModel.h"
+#include "../src/vault/CborWriter.h"
 using namespace tb::model;
 namespace model = tb::model; // тесты тегов из плана используют уточнение model::
+namespace cbor = tb::cbor;
 using namespace Qt::StringLiterals;
 class TestModel : public QObject {
     Q_OBJECT
     VaultModel m;
     Id p1{QUuid::createUuid()}, g1{QUuid::createUuid()};
+    bool encodeBroken_ = false; // копится в encodeUnit, проверяется одним QVERIFY2 в конце юнит-слота
 private slots:
     void init() { m = VaultModel{}; QVERIFY(m.addNode(p1, Id(), "Проект").isEmpty()); QVERIFY(m.addNode(g1, p1, "Группа").isEmpty()); }
     void nodeCrudAndDepth() {
@@ -231,7 +235,9 @@ private slots:
         // v2-файл (без exp) читается, срок пуст; v3 с битым exp — отказ.
         const auto uid = [](QUuid id) { return id.toString(QUuid::WithoutBraces); };
         // Берём РЕАЛЬНУЮ запись из m (полная карта v3), понижаем до v2: v→2, exp→удалён.
-        const auto full = QCborValue::fromCbor(m.toCbor()).toMap();
+        // Берём снимок из ЧИСТОЙ модели первого круга: общая m могла получить записи
+        // с невалидными датами от предыдущих слотов (invalidCborFieldTypes Null-ит поля).
+        const auto full = QCborValue::fromCbor(fresh.toCbor()).toMap();
         QCborMap one = full.value(u"entries"_s).toArray().first().toMap();
         one.remove(u"exp"_s);
         QCborMap root; root[u"v"_s] = 2;
@@ -271,6 +277,116 @@ private slots:
         QVERIFY(m.removeTag(QStringLiteral("PRODUCTION")).isEmpty()); // латиница: тег «production» — тоже латиница
         QVERIFY(m.entry(first.id)->tags.isEmpty());
         QVERIFY(m.search(QStringLiteral("production")).isEmpty());
+    }
+    // ===== Защищённый CBOR-писатель (toCborSecure) =====
+    model::Entry richEntry() {
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = g1; e.type = EntryType::SshKey;
+        e.title = QStringLiteral("заголовок 🚀 عربى"); e.note = QStringLiteral("заметка");
+        e.url = QStringLiteral("https://пример.рф/путь");
+        e.token = QStringLiteral("токен-секрет-ü"); e.login = QStringLiteral("логин-日本");
+        e.password = QStringLiteral("пароль-секрет");
+        e.sshPrivate = QByteArrayLiteral("\x00\x01\x02\xff--приватный-ключ--");
+        e.sshPublic = QByteArrayLiteral("ssh-ed25519 AAAA test");
+        e.sshPassphrase = QStringLiteral("фраза"); e.sshComment = QStringLiteral("комментарий");
+        e.favorite = true; e.reverify = false;
+        e.created = QDateTime::currentDateTimeUtc(); e.modified = e.created.addSecs(7);
+        e.expiresAt = QDateTime(QDate(2027, 1, 2), QTime(3, 4, 5, 678), Qt::UTC);
+        e.tags = {QStringLiteral("прод 🚀"), QStringLiteral("Сервер")};
+        return e;
+    }
+    void secureCborGoldenByteMatch() {
+        // Золотой тест: защищённый энкодер обязан выдавать побайтово те же данные,
+        // что и эталонный QCborValue::toCbor() — иначе файлы двух писателей
+        // несовместимы. Покрыты все виды значений модели, включая пустые секреты
+        // и бессрочные записи.
+        model::Entry e = richEntry();
+        QVERIFY(m.setEntry(e).isEmpty());
+        model::Entry minimal; minimal.id = QUuid::createUuid(); minimal.groupId = p1;
+        minimal.type = EntryType::ApiToken; minimal.title = QStringLiteral("минимум"); minimal.token = QStringLiteral("x");
+        QVERIFY(m.setEntry(minimal).isEmpty());
+        const QByteArray reference = m.toCbor();
+        cbor::SecureBuffer produced = m.toCborSecure();
+        QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(produced.data()), qsizetype(produced.size())), reference);
+        // Пустая модель тоже должна совпадать (пустые массивы, карта из трёх ключей).
+        model::VaultModel empty;
+        cbor::SecureBuffer emptyProduced = empty.toCborSecure();
+        QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(emptyProduced.data()), qsizetype(emptyProduced.size())), empty.toCbor());
+    }
+    void secureCborRoundtrip() {
+        model::Entry e = richEntry();
+        QVERIFY(m.setEntry(e).isEmpty());
+        cbor::SecureBuffer produced = m.toCborSecure();
+        // Чтение идёт через QCborValue::fromCbor в обычной куче — задокументированный
+        // остаточный риск (docs/security); здесь важно лишь, что защищённый писатель
+        // производит корректный читаемый CBOR.
+        const QByteArray bytes(reinterpret_cast<const char*>(produced.data()), qsizetype(produced.size()));
+        model::VaultModel fresh; QString err;
+        QCOMPARE(fresh.fromCbor(bytes, &err), model::VaultModel::ParseStatus::Ok);
+        const model::Entry* loaded = fresh.entry(e.id);
+        QVERIFY(loaded);
+        QCOMPARE(loaded->title, e.title);
+        QCOMPARE(loaded->token, e.token);
+        QCOMPARE(loaded->password, e.password);
+        QCOMPARE(loaded->sshPrivate, e.sshPrivate);
+        QCOMPARE(loaded->sshPublic, e.sshPublic);
+        QCOMPARE(loaded->expiresAt, e.expiresAt);
+        QCOMPARE(loaded->tags, e.tags);
+        QCOMPARE(loaded->favorite, true);
+        QCOMPARE(loaded->reverify, false);
+    }
+    void cborWriterEncodingUnits() {
+        // Юниты энкодера против эталона Qt: границы длин CBOR (0/23/24/255/256/…
+        // /2^32+), bool, строки (ascii, кириллица, эмодзи-суррогаты, пустая),
+        // байтовые строки, definite-массивы и карты. Расхождение с Qt здесь
+        // означает неверную ручную кодировку ещё до уровня модели.
+        // qint64-границы: quint64 > INT64_MAX моделью не пишется, эталона QCborValue для major 0 там нет.
+        for (quint64 v : {quint64(0), quint64(1), quint64(23), quint64(24), quint64(25), quint64(255),
+                          quint64(256), quint64(65535), quint64(65536), quint64(4294967295u),
+                          quint64(4294967296u), quint64(9223372036854775807u)})
+            QCOMPARE(encodeUnit([&](cbor::CborWriter& w) { w.uint(v); }), QCborValue(qint64(v)).toCbor());
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.boolean(false); }), QCborValue(false).toCbor());
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.boolean(true); }), QCborValue(true).toCbor());
+        for (const QString s : {QStringLiteral(""), QStringLiteral("ascii"),
+                                QStringLiteral("кириллица-ü"), QStringLiteral("🚀🎉 пара суррогатов")})
+            QCOMPARE(encodeUnit([&](cbor::CborWriter& w) { w.text(s); }), QCborValue(s).toCbor());
+        // Битый одинокий суррогат: наш писатель заменяет его на U+FFFD (3 байта),
+        // как QString::toUtf8(); Qt-эталон здесь непригоден — QCborValue на такой
+        // строке молча выдаёт пустую. В модели битых суррогатов не бывает.
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.text(QString(1, QChar(0xD800))); }),
+                 QByteArray::fromHex("63efbfbd"));
+        for (const QByteArray b : {QByteArray(), QByteArrayLiteral("\x00\x01\xff"), QByteArray(300, 'z')})
+            QCOMPARE(encodeUnit([&](cbor::CborWriter& w) { w.bytes(b.constData(), size_t(b.size())); }),
+                     QCborValue(b).toCbor());
+        // bytesUtf8: QString как байтовая строка UTF-8 — именно так пишутся токены/пароли.
+        const QString secret = QStringLiteral("секрет-🚀");
+        QCOMPARE(encodeUnit([&](cbor::CborWriter& w) { w.bytesUtf8(secret); }), QCborValue(secret.toUtf8()).toCbor());
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.beginArray(0); }), QCborValue(QCborArray()).toCbor());
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.beginMap(0); }), QCborValue(QCborMap()).toCbor());
+        const QCborArray twoInts = QCborArray{1, 2};
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.beginArray(2); w.uint(1); w.uint(2); }),
+                 QCborValue(twoInts).toCbor());
+        const QCborMap pairOfTextKeys = QCborMap{{QStringLiteral("b"), 1}, {QStringLiteral("a"), 2}};
+        // QCborMap сохраняет порядок вставки (не сортирует): эталон собираем
+        // в том же порядке, в котором пишет энкодер — b, затем a.
+        QCOMPARE(encodeUnit([](cbor::CborWriter& w) {
+                      w.beginMap(2); w.text(u"b"); w.uint(1); w.text(u"a"); w.uint(2);
+                  }),
+                 QCborValue(pairOfTextKeys).toCbor());
+        // Оба прохода каждого кейса обязаны сойтись по размеру и уложиться в буфер.
+        QVERIFY2(!encodeBroken_, "расхождение проходов подсчёта и записи");
+    }
+    // Прогоняет body через оба прохода писателя и возвращает записанные байты.
+    // QVERIFY внутри нельзя (метод не void): факт расхождения проходов копится
+    // в encodeBroken_ и проверяется одним QVERIFY2 в конце слота.
+    QByteArray encodeUnit(const std::function<void(cbor::CborWriter&)>& body) {
+        cbor::CborWriter counter;
+        body(counter);
+        QByteArray out(qsizetype(counter.position()), '\0'); // содержимое целиком перезапишет писатель
+        cbor::CborWriter writer;
+        writer.setOutput(reinterpret_cast<unsigned char*>(out.data()), size_t(out.size()));
+        body(writer);
+        encodeBroken_ = encodeBroken_ || writer.overflow() || writer.position() != counter.position();
+        return out;
     }
 };
 QTEST_MAIN(TestModel)
