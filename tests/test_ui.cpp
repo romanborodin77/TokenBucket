@@ -26,6 +26,8 @@
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/EntryEditDialog.h"
 #include "../src/ui/EntryCard.h"
+#include "../src/ui/AboutDialog.h"
+#include "../src/ui/Brand.h"
 #include "../src/ui/Theme.h"
 using namespace tb;
 class TestUi : public QObject {
@@ -251,6 +253,25 @@ private slots:
             dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
             QVERIFY(!dialog.entry()); QVERIFY(!dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().isEmpty());
         }
+    }
+    void aboutDialogShowsBrandAndStack() {
+        ui::AboutDialog dialog;
+        auto* logo = dialog.findChild<QLabel*>(QStringLiteral("aboutLogo"));
+        auto* version = dialog.findChild<QLabel*>(QStringLiteral("aboutVersion"));
+        const QPixmap logoPixmap = logo->pixmap();
+        QVERIFY(logo && !logoPixmap.isNull());
+        QVERIFY(version && version->text().contains(QStringLiteral("Версия")));
+        QStringList parts;
+        for (auto* label : dialog.findChildren<QLabel*>()) parts << label->text();
+        const QString text = parts.join(QLatin1Char('\n'));
+        QVERIFY(text.contains(QStringLiteral("TokenBucket")));
+        QVERIFY(text.contains(QStringLiteral("XChaCha20-Poly1305")));
+        QVERIFY(text.contains(QStringLiteral("Argon2id")));
+        QVERIFY(text.contains(QLatin1String(qVersion())));          // runtime-версия Qt
+        QVERIFY(text.contains(QStringLiteral("Роман Бородин")));
+        QVERIFY(text.contains(QStringLiteral("workplace-it@rambler.ru")));
+        QVERIFY(!tb::ui::brand::icon(16).isNull());                  // логотип в обоих тонах
+        QCOMPARE(tb::ui::brand::icon(48, tb::ui::brand::Tone::Locked).width(), 48);
     }
     void passwordGeneratorProducesLongDistinctPasswords() {
         tb::model::VaultModel model; EntryEditDialog dialog(model, std::nullopt);

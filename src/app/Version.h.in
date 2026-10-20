@@ -1,0 +1,8 @@
+#pragma once
+// Единственный источник версии продукта — CMake (project VERSION). Генерируется при
+// конфигурации; поднимайте версию в CMakeLists.txt, все места (окно «О программе»,
+// свойства EXE) обновятся автоматически.
+#define TOKENBUCKET_VERSION "@PROJECT_VERSION@"
+#define TOKENBUCKET_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define TOKENBUCKET_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define TOKENBUCKET_VERSION_PATCH @PROJECT_VERSION_PATCH@

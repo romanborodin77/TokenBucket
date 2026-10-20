@@ -1,10 +1,18 @@
 cmake_minimum_required(VERSION 3.30)
-project(TokenBucket VERSION 0.1.0 LANGUAGES CXX)
+project(TokenBucket VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Test Concurrent)
 find_package(unofficial-sodium CONFIG REQUIRED)
 qt_standard_project_setup()
+
+# Счётчик версий и ресурсы EXE из единого источника — project VERSION.
+configure_file(src/app/Version.h.in Version.h @ONLY)
+if(WIN32)
+  # Иконка EXE (assets/icon.ico) перегенерируется утилитой brandtool + tools/make-icon.cmd.
+  set(TB_ICON "${CMAKE_SOURCE_DIR}/assets/icon.ico")
+  configure_file(cmake/TokenBucket.rc.in TokenBucket.rc @ONLY)
+endif()
 
 add_library(tokenbucket_core STATIC
   src/vault/Crypto.cpp
@@ -27,12 +35,21 @@ add_library(tokenbucket_core STATIC
   src/ui/TrayController.cpp
   src/ui/Theme.h
   src/ui/Theme.cpp
+  src/ui/Brand.h
+  src/ui/Brand.cpp
+  src/ui/AboutDialog.h
+  src/ui/AboutDialog.cpp
 )
-target_include_directories(tokenbucket_core PUBLIC src)
+target_include_directories(tokenbucket_core PUBLIC src $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>)
 target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent unofficial-sodium::sodium)
 
 qt_add_executable(TokenBucket WIN32 src/main.cpp)
 target_link_libraries(TokenBucket PRIVATE tokenbucket_core)
+if(WIN32)
+  target_sources(TokenBucket PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/TokenBucket.rc)
+  add_executable(brandtool tools/brandtool.cpp)
+  target_link_libraries(brandtool PRIVATE tokenbucket_core)
+endif()
 
 if(WIN32)
   target_sources(tokenbucket_core PRIVATE src/platform/fileops_win.cpp)

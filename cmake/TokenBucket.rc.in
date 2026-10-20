@@ -1,0 +1,39 @@
+#include <windows.h>
+// Версия и иконка EXE генерируются из единого источника — project VERSION в CMakeLists.txt.
+#define TBS(major,minor,patch) major,minor,patch,0
+#define TBS_(major,minor,patch) #major "." #minor "." #patch ".0"
+
+1 ICON "@TB_ICON@"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION TBS(@PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@)
+ PRODUCTVERSION TBS(@PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@)
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Роман Бородин"
+            VALUE "FileDescription", "TokenBucket — защищённое хранилище токенов и ключей"
+            VALUE "FileVersion", TBS_(@PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@)
+            VALUE "InternalName", "TokenBucket"
+            VALUE "LegalCopyright", "© 2026 Роман Бородин"
+            VALUE "OriginalFilename", "TokenBucket.exe"
+            VALUE "ProductName", "TokenBucket"
+            VALUE "ProductVersion", TBS_(@PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@)
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

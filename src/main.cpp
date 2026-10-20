@@ -16,6 +16,8 @@
 #include "ui/UnlockDialog.h"
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"
+#include "ui/Brand.h"
+#include "Version.h"
 #include "ui/TrayController.h"
 namespace {
 int runApp(); // тело главного цикла; start() добавляет очистку на выходе
@@ -129,6 +131,9 @@ int runApp() {
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TokenBucket")); app.setOrganizationName(QStringLiteral("TokenBucket"));
+    // Счётчик версий из CMake; иконка всех окон — логотип «Щит-жетон».
+    app.setApplicationVersion(QString::fromLatin1(TOKENBUCKET_VERSION));
+    app.setWindowIcon(QIcon(tb::ui::brand::logo(256)));
     app.setQuitOnLastWindowClosed(false);
     tb::ui::theme::apply(tb::ui::theme::load()); // до создания окон: палитра наследуется всеми окнами
     try { return start(); }

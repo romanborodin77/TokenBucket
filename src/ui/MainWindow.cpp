@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
+#include "AboutDialog.h"
 #include "ExportDialog.h"
 #include "Theme.h"
 #include "VerifyDialog.h"
@@ -152,6 +153,9 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     }
 #endif
     updateSwitchActionText();
+    auto* help = menuBar()->addMenu(QStringLiteral("&Справка"));
+    auto* about = help->addAction(QStringLiteral("О программе…"), this, &MainWindow::showAbout);
+    about->setShortcut(QKeySequence::HelpContents); // F1
     auto* lock = vault->addAction(QStringLiteral("Заблокировать"), &app_, &Application::lock); lock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
     // Настоящий выход из приложения: requestExit ставит exiting_ — closeEvent блокирует
     // хранилище и завершает работу. Крестик окна по-прежнему лишь сворачивает в трей.
@@ -643,6 +647,7 @@ void MainWindow::updateSwitchActionText() {
 #endif
     if (changePwAction_) changePwAction_->setVisible(app_.mode() != Application::Mode::Hello);
 }
+void MainWindow::showAbout() { ui::AboutDialog dialog(this); dialog.exec(); }
 #ifdef Q_OS_WIN
 void MainWindow::changeHotkey() {
     if (!hotkey_) return;
