@@ -2,6 +2,17 @@
 
 Обновлено: 2026-10-19 (Europe/Moscow).
 
+## Статус Linux-версии (отложена до явной команды пользователя)
+
+Решение пользователя 2026-10-20: разработка Linux-версии ОТЛОЖЕНА до его явной команды. Не начинать задачу 14 и Linux-остаток задачи 15 без прямого поручения; доработки вести только для Windows.
+
+Состояние на момент отложения:
+- Код Linux-веток написан, но НИ РАЗУ не компилировался и не запускался: `src/platform/fileops_posix.cpp` (права 0700/0600, fsync файла и каталога — тест posixFileAndDirPermissions в test_store под #ifndef Q_OS_WIN ждёт первой сборки), `src/platform/sessionlock_linux.cpp` (DBus: org.gnome.ScreenSaver ActiveChanged + login1 PrepareForSleep; собирается с Qt6::DBus под NOT WIN32), Linux-ветка `MiniPanel` (копирование + подсказка «вставьте вручную»).
+- Задача 14 плана v1 НЕ НАЧАТА: `tools/ubuntu-setup.sh`, `src/platform/gshortcut_linux.{h,cpp}` (PanelIpc: QLocalServer «tokenbucket-panel», --show-panel), интеграция в main.cpp — план: `docs/superpowers/plans/2026-10-18-tokenbucket-v1.md`, задача 14.
+- Остаток задачи 15 для Linux: сборка .deb (файлы packaging/debian/ готовы), матрица приёмки Ubuntu (`docs/acceptance/2026-10-18-ubuntu.md` — пустая, все пункты НЕ ПРОВЕРЕНО).
+- Требуемая среда: машина/ВМ Ubuntu 24.04 x64 GNOME Wayland; на машине разработки её нет (WSL — только docker-desktop; сборка в WSL не заменяет испытаний GNOME по спеке §8).
+- При возобновлении: выполнить задачу 14 по плану, затем остаток 15; все Windows-доработки, сделанные после f3890f4 (включая CBOR v2 с тегами), на Linux не проверялись — учесть в матрице.
+
 ## Актуальная точка продолжения
 - 2026-10-20 (вечер): волна отложенного долга закрыта вручную (лимит субагентов; пользователь: «принимай решения, реализуй»): снята временная трассировка и мёртвое aboutToQuit (ff06ddd — main.cpp чист); повторы очистки буфера при выходе (5×20 мс, open() без вложенного цикла событий при разрушении), sendCtrlV → bool с сообщением при отказе, устранена утечка обёрток QLayoutItem в refillTagBar, тесты: null-check в entryTagsPersistThroughEditor, И-семантика двух чипов (третья запись с обоими тегами), entryTagsLimitShowsErrorInEditor (c9a4a7d). Полный CTest 12/12 целей (test_ui — 19 слотов); dist и zip обновлены (c9a4a7d).
 - Остаток долга (сознательно отложено, обоснования в записи ниже): trace-лог tb-trace.log во временной папке можно удалить вручную; rename не ремапит выбранный чип; O(tags×entries) tooltip чипов; manual-проверка контекстного меню чипа и живой прогон тегов — за матрицей приёмки.
