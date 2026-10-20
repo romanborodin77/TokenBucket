@@ -39,6 +39,8 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(copyPhrase_, &QPushButton::clicked, this, [this] { copyField(2); });
     connect(sshToFile_, &QPushButton::clicked, this, &EntryCard::saveSshToFile);
     connect(&app_, &Application::busyChanged, this, &EntryCard::updateEnabled);
+    // Инвариант: модель может быть очищена из QtConcurrent-потока (lock) — указатели на Entry
+    // не живут через диалоги/циклы событий.
     connect(&app_, &Application::stateChanged, this, [this] { if (app_.gate() != Application::Gate::Ready) clear(); else updateEnabled(); });
     qApp->installEventFilter(this); clear();
 }
@@ -94,11 +96,22 @@ void EntryCard::saveSshToFile() {
     if (!authorize()) return;
     const auto* entry = app_.model()->entry(id_);
     if (!entry || entry->type != model::EntryType::SshKey || entry->sshPrivate.isEmpty()) return;
+    // Копия до диалогов: дальше warning/QFileDialog/question крутят вложенный цикл событий, за который
+    // QtConcurrent-операция или автолок могут очистить модель — указатель entry стал бы висячим,
+    // поэтому работаем только с локальной копией и после каждого диалога перепроверяем актуальность
+    // (страж как в authorize: поколение/выбор не сменились, шлюз готов, запись всё ещё существует).
+    const QByteArray key = entry->sshPrivate;
+    const auto generation = app_.generation(), selection = selection_; const auto id = id_;
+    const auto stillValid = [&] {
+        return generation == app_.generation() && selection == selection_ && id == id_
+            && app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id);
+    };
     if (QMessageBox::warning(this, QStringLiteral("TokenBucket"),
             QStringLiteral("Приватный ключ будет сохранён за пределами хранилища в незашифрованном виде. Продолжить?"),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    if (!stillValid()) return;
     const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранение приватного ключа"));
-    if (path.isEmpty()) return;
+    if (path.isEmpty() || !stillValid()) return;
     QString error;
     const QString temporary = path + QStringLiteral(".tb-new");
     if (!isSafeTarget(path, &error) || !isSafeTarget(temporary, &error)) {
@@ -108,13 +121,14 @@ void EntryCard::saveSshToFile() {
     if (QFile::exists(path)) {
         if (QMessageBox::question(this, QStringLiteral("TokenBucket"), QStringLiteral("Файл существует. Перезаписать?"),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        if (!stillValid()) return;
         if (QFile::exists(temporary) && !store::realFileOps().removeFile(temporary)) {
             QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось подготовить замену файла.")); return;
         }
-        if ((written = store::realFileOps().writeAll(temporary, entry->sshPrivate))
+        if ((written = store::realFileOps().writeAll(temporary, key))
             && !(written = store::realFileOps().renameReplace(temporary, path)))
             store::realFileOps().removeFile(temporary);
-    } else written = store::realFileOps().writeAll(path, entry->sshPrivate);
+    } else written = store::realFileOps().writeAll(path, key);
     if (!written) {
         QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось записать файл ключа.")); return;
     }

@@ -52,14 +52,23 @@ void MiniPanel::popup() {
 void MiniPanel::send() {
     auto* item = list_->currentItem();
     if (!item || app_.gate() != Application::Gate::Ready || app_.busy()) return;
-    const auto* entry = app_.model()->entry(QUuid::fromString(item->data(Qt::UserRole).toString()));
+    // Инвариант: модель может быть очищена из QtConcurrent-потока (lock) — указатели на Entry
+    // не живут через диалоги/циклы событий.
+    const auto id = QUuid::fromString(item->data(Qt::UserRole).toString());
+    const auto* entry = app_.model()->entry(id);
     if (!entry) return;
     if (!paste::eligibleForAutoPaste(*entry)) {
         QMessageBox::information(this, QStringLiteral("TokenBucket"), QStringLiteral("Этот секрет недоступен для быстрой вставки. Используйте копирование или файл."));
         return;
     }
-    if (entry->reverify && !VerifyDialog::verify(app_, this)) return;
-    const auto text = entry->type == model::EntryType::ApiToken ? entry->token : entry->password;
+    // Копии до verify: VerifyDialog и QMessageBox крутят вложенный цикл событий, за который
+    // модель может быть очищена (автолок/QtConcurrent) и entry станет висячим — дальше только локали.
+    const auto type = entry->type;
+    const QString token = entry->token, password = entry->password;
+    const bool reverify = entry->reverify;
+    if (reverify && !VerifyDialog::verify(app_, this)) return;
+    if (app_.gate() != Application::Gate::Ready || app_.busy() || !app_.model()->entry(id)) return;
+    const QString text = type == model::EntryType::ApiToken ? token : password;
     QString error;
     if (!clip_.copySecret(text, &error)) {
         if (app_.gate() == Application::Gate::Ready) QMessageBox::warning(this, QStringLiteral("TokenBucket"), error);

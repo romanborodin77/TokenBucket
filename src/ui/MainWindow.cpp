@@ -232,13 +232,16 @@ void MainWindow::refreshAll() {
         if (selection) tree_->setCurrentItem(selection);
         else if (tree_->topLevelItemCount()) tree_->setCurrentItem(tree_->topLevelItem(0));
     }
+    // Порядок важен: refillTagBar сначала обрезает «мёртвые» выбранные теги (после
+    // переименования/удаления выбранного чипа) и лишь затем refillList рисует список —
+    // иначе список фильтруется по устаревшему набору уже несуществующим тегом.
+    refillTagBar();
     refillList(entry); updateEnabled(); updateSwitchActionText();
     if (app_.gate() == Application::Gate::Ready) {
         const auto mode = app_.mode() == Application::Mode::Hello ? QStringLiteral("Windows Hello") : QStringLiteral("мастер-пароль");
         vaultInfo_->setText(QStringLiteral("Записей: %1 · Проектов и групп: %2 · Разблокировка: %3")
             .arg(app_.model()->entries().size()).arg(app_.model()->nodes().size()).arg(mode));
     } else vaultInfo_->clear();
-    refillTagBar();
 }
 void MainWindow::refillList(model::Id selected) {
     QSignalBlocker block(list_); list_->clear();

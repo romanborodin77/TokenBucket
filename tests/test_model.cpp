@@ -219,6 +219,9 @@ private slots:
         first.tags = {QStringLiteral("прод"), QStringLiteral("web")};
         model::Entry second = first; second.id = QUuid::createUuid(); second.title = "2"; second.tags = {QStringLiteral("прод")};
         QVERIFY(m.setEntry(first).isEmpty()); QVERIFY(m.setEntry(second).isEmpty());
+        QCOMPARE(m.search(QStringLiteral("ПРОД")).size(), 2);          // только теги; имена узлов «ПРОД» не содержат
+        const auto partial = m.search(QStringLiteral("eb"));           // часть тега «web»
+        QVERIFY(partial.contains(first.id)); QVERIFY(!partial.contains(second.id));
         QVERIFY(m.renameTag(QStringLiteral("ПРОД"), QStringLiteral("production")).isEmpty());
         QCOMPARE(m.entry(first.id)->tags, (QStringList{QStringLiteral("production"), QStringLiteral("web")}));
         QCOMPARE(m.entry(second.id)->tags, (QStringList{QStringLiteral("production")}));

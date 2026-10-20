@@ -3,6 +3,7 @@
 #include <QCborMap>
 #include <QCborValue>
 #include <QCborStreamReader>
+#include <QSet>
 #include <functional>
 #include <algorithm>
 using namespace Qt::StringLiterals;
@@ -124,16 +125,22 @@ QList<Id> VaultModel::entriesInSubtree(Id groupId) const {
 QList<Id> VaultModel::search(const QString& needle) const {
     QList<Id> r;
     if (needle.isEmpty()) return r;
+    // Дедупликация через QSet (хеш-проверка за O(1)): содержит-проверка по QList была
+    // квадратичной — на 10 000 записей каждый узел поиска тянул бы проход по всему результату.
+    // Порядок возврата и так недетерминирован (итерация QHash), поведения это не меняет.
+    QSet<Id> seen;
     for (auto& e : entries_)
         if (e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
             || e.note.contains(needle, Qt::CaseInsensitive)
             // Тег — поисковый атрибут записи; секреты, как и выше, не ищутся.
-            || std::any_of(e.tags.cbegin(), e.tags.cend(), [&](const QString& tag) { return tag.contains(needle, Qt::CaseInsensitive); }))
+            || std::any_of(e.tags.cbegin(), e.tags.cend(), [&](const QString& tag) { return tag.contains(needle, Qt::CaseInsensitive); })) {
+            seen.insert(e.id);
             r << e.id;
+        }
     for (auto& n : nodes_)
         if (n.name.contains(needle, Qt::CaseInsensitive))
             for (auto id : entriesInSubtree(n.id))
-                if (!r.contains(id)) r << id;
+                if (!seen.contains(id)) { seen.insert(id); r << id; }
     return r;
 }
 QByteArray VaultModel::toCbor() const {
