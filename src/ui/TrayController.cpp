@@ -4,6 +4,7 @@
 #include <QAction>
 #include <QGuiApplication>
 #include <QMenu>
+#include <QSettings>
 namespace tb::ui {
 TrayController::TrayController(Application& app, QObject* parent) : QObject(parent), app_(app), tray_(this) {
     menu_ = new QMenu; // без родителя-виджета: удаляем сами
@@ -25,7 +26,25 @@ TrayController::TrayController(Application& app, QObject* parent) : QObject(pare
     }
 }
 TrayController::~TrayController() { delete menu_; }
-void TrayController::onStateChanged() { refresh(); }
+void TrayController::onStateChanged() {
+    // Переход Ready → заблокировано виден только в трее, если окно свёрнуто, — уведомляем.
+    const bool ready = app_.gate() == Application::Gate::Ready;
+    if (wasReady_ && !ready) notify(QStringLiteral("Хранилище заблокировано"));
+    wasReady_ = ready;
+    refresh();
+}
+bool TrayController::notificationsEnabled() {
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    return settings.value(QStringLiteral("trayNotifications"), true).toBool();
+}
+void TrayController::setNotificationsEnabled(bool on) {
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    settings.setValue(QStringLiteral("trayNotifications"), on);
+}
+void TrayController::notify(const QString& text) {
+    if (!notificationsEnabled() || !tray_.isVisible()) return;
+    tray_.showMessage(QStringLiteral("TokenBucket"), text, QIcon(brand::icon(32)), 4000);
+}
 void TrayController::refresh() {
     const bool ready = app_.gate() == Application::Gate::Ready;
     lockAction_->setEnabled(ready);

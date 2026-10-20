@@ -2,6 +2,7 @@
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
 #include "AboutDialog.h"
+#include "TrayController.h"
 #include "ExportDialog.h"
 #include "Theme.h"
 #include "VerifyDialog.h"
@@ -146,6 +147,19 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     {
         // Опция выхода: стирать установленные нами переменные окружения при завершении
         // программы, чтобы секреты не оставались в реестре (QSettings env-clear-on-exit).
+        auto* autoStart = settings->addAction(QStringLiteral("Запускать вместе с Windows"));
+        autoStart->setCheckable(true); autoStart->setObjectName(QStringLiteral("autoStart"));
+        autoStart->setChecked(platform::autostart::enabled());
+        connect(autoStart, &QAction::toggled, this, [this, autoStart](bool on) {
+            QString error;
+            if (platform::autostart::setEnabled(on, &error)) return;
+            QMessageBox::warning(this, QStringLiteral("TokenBucket"), error);
+            QSignalBlocker block(autoStart); autoStart->setChecked(!on); // состояние пункта следует за реестром
+        });
+        auto* notifications = settings->addAction(QStringLiteral("Уведомления в области уведомлений"));
+        notifications->setCheckable(true); notifications->setObjectName(QStringLiteral("trayNotifications"));
+        notifications->setChecked(TrayController::notificationsEnabled());
+        connect(notifications, &QAction::toggled, this, [](bool on) { TrayController::setNotificationsEnabled(on); });
         auto* clearOnExit = settings->addAction(QStringLiteral("Стирать переменные окружения при выходе"));
         clearOnExit->setCheckable(true); clearOnExit->setObjectName(QStringLiteral("envClearOnExit"));
         clearOnExit->setChecked(platform::envops::clearOnExitEnabled());
@@ -224,8 +238,12 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     connect(card_, &EntryCard::copyRequested, this, [this](const QString& text) {
         if (!ready()) return; QString error;
         if (!clipboard_.copySecret(text, &error)) { if (app_.gate() == Application::Gate::Ready) report(error); }
-        else statusBar()->showMessage(QStringLiteral("Скопировано. Очистка буфера через 20 секунд."), 5000);
+        else {
+            statusBar()->showMessage(QStringLiteral("Скопировано. Очистка буфера через 20 секунд."), 5000);
+            emit notifyRequested(QStringLiteral("Секрет скопирован. Буфер очистится через 20 секунд."));
+        }
     });
+    connect(&clipboard_, &ClipboardGuard::cleared, this, [this] { emit notifyRequested(QStringLiteral("Буфер обмена очищен")); });
     connect(&app_, &Application::busyChanged, this, [this](bool busy) { updateEnabled(); statusBar()->showMessage(busy ? QStringLiteral("Выполняется операция…") : QString()); });
     connect(&app_, &Application::stateChanged, this, [this] {
         if (app_.gate() != Application::Gate::Ready) {

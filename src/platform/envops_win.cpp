@@ -1,4 +1,6 @@
 #include "EnvOps.h"
+#include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QSettings>
 #include <windows.h>
@@ -142,5 +144,41 @@ int clearAllExported() {
         if (deleteKnownUserVariable(name, &error)) { forgetExported(name); ++removed; }
     }
     return removed;
+}
+}
+
+namespace tb::platform::autostart {
+namespace {
+constexpr wchar_t kRunKey[] = L"Software\Microsoft\Windows\CurrentVersion\Run";
+constexpr wchar_t kValueName[] = L"TokenBucket";
+}
+QString commandForTest() {
+    // Кавычки обязательны: путь к программе обычно содержит пробелы; --tray просит
+    // стартовать свёрнутым в трей, не показывая окно при входе в систему.
+    return QStringLiteral("\"%1\" --tray").arg(QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
+}
+bool enabled() {
+    wchar_t buffer[1024] = {};
+    DWORD size = sizeof(buffer);
+    return RegGetValueW(HKEY_CURRENT_USER, kRunKey, kValueName, RRF_RT_REG_SZ, nullptr, buffer, &size) == ERROR_SUCCESS;
+}
+bool setEnabled(bool on, QString* err) {
+    if (err) err->clear();
+    if (on) {
+        const std::wstring command = commandForTest().toStdWString();
+        const LSTATUS status = RegSetKeyValueW(HKEY_CURRENT_USER, kRunKey, kValueName, REG_SZ,
+            command.c_str(), DWORD((command.size() + 1) * sizeof(wchar_t)));
+        if (status != ERROR_SUCCESS) {
+            if (err) *err = QStringLiteral("Не удалось включить автозапуск (код %1).").arg(status);
+            return false;
+        }
+        return true;
+    }
+    const LSTATUS status = RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kValueName);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
+        if (err) *err = QStringLiteral("Не удалось выключить автозапуск (код %1).").arg(status);
+        return false;
+    }
+    return true;
 }
 }

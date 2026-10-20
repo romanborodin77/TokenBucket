@@ -24,6 +24,8 @@ public:
     EntryCard* card() const { return card_; }
 signals:
     void closing();
+    // Короткие события для области уведомлений (без секретов): main связывает с треем.
+    void notifyRequested(const QString& text);
     void idleTimeoutChanged(int minutes);
 public slots:
     void addProject();

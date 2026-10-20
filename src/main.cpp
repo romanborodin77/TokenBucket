@@ -40,6 +40,7 @@ int start() {
     return code;
 }
 int runApp() {
+    bool startHidden = QCoreApplication::arguments().contains(QStringLiteral("--tray"));
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QString error;
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
@@ -112,6 +113,7 @@ int runApp() {
             if (!ok) { QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"), error); continue; }
         } else {
             QEventLoop loop; tb::ui::MainWindow window(core); bool closed = false;
+            QObject::connect(&window, &tb::ui::MainWindow::notifyRequested, &tray, &tb::ui::TrayController::notify);
             mainWindow = &window;
             QObject::connect(&window, &tb::ui::MainWindow::closing, &loop, [&] { closed = true; loop.quit(); });
             // Настройка автоблокировки применяется немедленно: окно в области видимости,
@@ -121,7 +123,9 @@ int runApp() {
             QObject::connect(&core, &tb::Application::stateChanged, &loop, [&] {
                 if (core.gate() != tb::Application::Gate::Ready) loop.quit();
             });
-            window.show(); loop.exec();
+            // --tray: автозапуск при входе в Windows стартует свёрнутым, окно не показываем.
+            if (startHidden) startHidden = false; else { window.show(); }
+            loop.exec();
             mainWindow = nullptr; // окно разрушается при выходе из области видимости
             if (closed) return 0;
         }

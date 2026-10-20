@@ -96,6 +96,21 @@ private slots:
         // повторный вызов идемпотентен (переменных и имён нет)
         QCOMPARE(platform::envops::clearAllExported(), 0);
     }
+    void autostartRoundtrip() {
+        const bool initial = platform::autostart::enabled(); // восстановим состояние машины
+        QString err;
+        QVERIFY2(platform::autostart::setEnabled(true, &err), qPrintable(err));
+        QVERIFY(platform::autostart::enabled());
+        // Команда всегда указывает на текущий файл программы и просит старт в трее.
+        const QString command = platform::autostart::commandForTest();
+        QVERIFY(command.startsWith(QLatin1Char('"')));
+        QVERIFY(command.endsWith(QStringLiteral("--tray")));
+        QVERIFY(command.contains(QStringLiteral("test_env_win"), Qt::CaseInsensitive));
+        QVERIFY2(platform::autostart::setEnabled(false, &err), qPrintable(err));
+        QVERIFY(!platform::autostart::enabled());
+        QVERIFY(platform::autostart::setEnabled(false, &err)); // идемпотентно
+        if (initial) QVERIFY(platform::autostart::setEnabled(true, &err));
+    }
     void dialogValidation() {
         ui::EnvExportDialog dialog;
         auto* name = dialog.findChild<QLineEdit*>(QStringLiteral("envVarName"));

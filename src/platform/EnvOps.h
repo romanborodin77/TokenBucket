@@ -25,3 +25,11 @@ bool clearOnExitEnabled();
 void setClearOnExitEnabled(bool enabled);
 int clearAllExported();
 }
+namespace tb::platform::autostart {
+// Автозапуск при входе в Windows: запись HKCU\...\Run («TokenBucket» → "<exe>" --tray).
+// Ключ пользовательский, прав администратора не требует; значение всегда перезаписываем
+// актуальным путём, чтобы запись не «протухала» после переноса программы.
+bool enabled();
+bool setEnabled(bool on, QString* err);
+QString commandForTest(); // путь с аргументом, который записывается в реестр
+}

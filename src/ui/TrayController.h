@@ -17,6 +17,11 @@ public:
     // Вызывается для «Панель быстрой вставки»: main дёргает MainWindow::popupQuickPanel,
     // пока окно живо (панель принадлежит окну).
     void setPanelCallback(std::function<void()> callback) { onPanel_ = std::move(callback); }
+    // Короткое всплывающее уведомление области уведомлений. Секреты сюда не попадают:
+    // передаём только факт события («скопировано», «буфер очищен», «заблокировано»).
+    void notify(const QString& text);
+    static bool notificationsEnabled();
+    static void setNotificationsEnabled(bool on);
 signals:
     void showRequested();
     void lockRequested();
@@ -31,6 +36,7 @@ private:
     QAction* panelAction_ = nullptr;
     QAction* lockAction_ = nullptr;
     std::function<void()> onPanel_;
+    bool wasReady_ = false; // прошлое состояние: отличает блокировку от прочих изменений
 };
 }
 }
