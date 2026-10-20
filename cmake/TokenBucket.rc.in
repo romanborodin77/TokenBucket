@@ -1,5 +1,9 @@
-#include <windows.h>
-// Версия и иконка EXE генерируются из единого источника — project VERSION в CMakeLists.txt.
+﻿#include <windows.h>
+// Версия иконка EXE генерируются из единого источника — project VERSION в CMakeLists.txt.
+// rc.exe без BOM читает строки в системной ANSI-кодировке, и русские значения
+// VERSIONINFO (FileDescription и др.) превращались в кракозябры — Windows показывает
+// FileDescription как имя источника в уведомлениях. Явная страница UTF-8 (+ BOM файла).
+#pragma code_page(65001)
 #define TBS(major,minor,patch) major,minor,patch,0
 #define TBS_(major,minor,patch) #major "." #minor "." #patch ".0"
 
