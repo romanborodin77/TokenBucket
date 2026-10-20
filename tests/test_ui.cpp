@@ -254,6 +254,20 @@ private slots:
             QVERIFY(!dialog.entry()); QVERIFY(!dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().isEmpty());
         }
     }
+    void quickPanelShowsWhileMainWindowHidden() {
+        // Панель быстрой вставки обязана открываться (Ctrl+Alt+Space/трей), даже когда
+        // главное окно скрыто в трей — раньше Qt::Tool прятался вместе с родителем.
+        Application app(dir_.path() + "/qp-hidden"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        ui::MainWindow w(app); // окно не показываем вовсе
+        w.popupQuickPanel();
+        QWidget* panel = nullptr;
+        for (auto* top : QApplication::topLevelWidgets())
+            if (top->objectName() == QStringLiteral("miniPanel")) panel = top;
+        QVERIFY(panel);
+        QTRY_VERIFY(panel->isVisible());
+        QVERIFY(panel->findChild<QLineEdit*>()); // фокус не проверяем: offscreen не отдаёт его
+    }
     void aboutDialogShowsBrandAndStack() {
         ui::AboutDialog dialog;
         auto* logo = dialog.findChild<QLabel*>(QStringLiteral("aboutLogo"));

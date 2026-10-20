@@ -127,7 +127,7 @@ private slots:
         const QByteArray exported = src.exportContainer("пароль-экспорта-1", &err);
         QVERIFY(!exported.isEmpty()); QVERIFY(err.isEmpty());
         QCOMPARE(container::readMode(exported), container::ModePassword);
-        QFile f(dir_.filePath("export.tb")); f.open(QIODevice::WriteOnly); QCOMPARE(f.write(exported), qint64(exported.size())); f.close();
+        QFile f(dir_.filePath("export.tb")); QVERIFY(f.open(QIODevice::WriteOnly)); QCOMPARE(f.write(exported), qint64(exported.size())); f.close();
         Application dst(dir_.filePath("dst"));
         QVERIFY(dst.importContainer(exported, "пароль-экспорта-1", "новый-пароль-123", &err));
         QCOMPARE(dst.mode(), Application::Mode::Password);

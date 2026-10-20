@@ -43,13 +43,19 @@ bool sendCtrlV() {
 }
 }
 namespace platform {
-QuickPaste::QuickPaste(Application& app, ClipboardGuard& clip, QWidget* panelParent, QObject* parent)
-    : QObject(parent), app_(app), clip_(clip), panel_(new ui::MiniPanel(app, clip, panelParent)), hidden_(new QWidget(panel_)) {
+QuickPaste::QuickPaste(Application& app, ClipboardGuard& clip, QWidget* /*panelParent*/, QObject* parent)
+    : QObject(parent), app_(app), clip_(clip) {
+    // Панель сознательно без родителя-окна: Qt::Tool прячется вместе с родителем,
+    // а панель обязана открываться по Ctrl+Alt+Space и из трея при свёрнутом окне.
+    // Владение ручное — удаляем панель в деструкторе (скрытое окно-владелец лежит внутри).
+    panel_ = new ui::MiniPanel(app, clip, nullptr);
+    hidden_ = new QWidget(panel_);
     hidden_->setObjectName(QStringLiteral("hotkeyOwnerWindow"));
 }
 QuickPaste::~QuickPaste() {
     qApp->removeNativeEventFilter(this);
     if (hotkeyId_) UnregisterHotKey(hotkeyHwnd_, hotkeyId_);
+    delete panel_; // панель parentless: скрытое окно-владелец горячей клавиши уходит вместе с ней
 }
 bool QuickPaste::start(QString* err) {
     // offscreen/нет оконного HWND: глобальная горячая клавиша не регистрируется

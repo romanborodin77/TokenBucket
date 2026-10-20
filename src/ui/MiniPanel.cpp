@@ -17,6 +17,7 @@ namespace tb::ui {
 MiniPanel::MiniPanel(Application& app, ClipboardGuard& clip, QWidget* parent)
     : QWidget(parent, Qt::Tool | Qt::FramelessWindowHint), app_(app), clip_(clip) {
     setWindowTitle(QStringLiteral("TokenBucket — быстрая вставка"));
+    setObjectName(QStringLiteral("miniPanel"));
     auto* layout = new QVBoxLayout(this);
     recipientLbl_ = new QLabel(this); recipientLbl_->setTextFormat(Qt::PlainText); recipientLbl_->setWordWrap(true);
     search_ = new QLineEdit(this); search_->setPlaceholderText(QStringLiteral("Быстрый поиск записи…"));
