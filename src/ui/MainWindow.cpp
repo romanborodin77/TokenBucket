@@ -6,10 +6,12 @@
 #include <QAction>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCursor>
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
 #include <QFutureWatcher>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -27,6 +29,7 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QTreeWidgetItemIterator>
 #include <QScreen>
@@ -130,6 +133,10 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     sortMode_->addItems({QStringLiteral("По названию"), QStringLiteral("По дате изменения")});
     controlsLayout->addWidget(typeFilter_); controlsLayout->addWidget(sortMode_);
     layout->addWidget(controls);
+    tagBar_ = new QWidget(central); tagBar_->setObjectName(QStringLiteral("tagBar"));
+    auto* tagLayout = new QHBoxLayout(tagBar_); tagLayout->setContentsMargins(0, 0, 0, 0);
+    tagLayout->addStretch(1);
+    layout->addWidget(tagBar_);
     connect(typeFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     connect(sortMode_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     auto* splitter = new QSplitter(central);
@@ -231,6 +238,7 @@ void MainWindow::refreshAll() {
         vaultInfo_->setText(QStringLiteral("Записей: %1 · Проектов и групп: %2 · Разблокировка: %3")
             .arg(app_.model()->entries().size()).arg(app_.model()->nodes().size()).arg(mode));
     } else vaultInfo_->clear();
+    refillTagBar();
 }
 void MainWindow::refillList(model::Id selected) {
     QSignalBlocker block(list_); list_->clear();
@@ -241,6 +249,19 @@ void MainWindow::refillList(model::Id selected) {
             ids.erase(std::remove_if(ids.begin(), ids.end(), [this, typeFilter](model::Id id) {
                 const auto* entry = app_.model()->entry(id);
                 return !entry || int(entry->type) != typeFilter;
+            }), ids.end());
+        // Семантика И: запись проходит, только если содержит каждый выбранный тег (без учёта регистра);
+        // фильтр типа и теги действуют одновременно.
+        if (!selectedTags_.isEmpty())
+            ids.erase(std::remove_if(ids.begin(), ids.end(), [this](model::Id id) {
+                const auto* entry = app_.model()->entry(id);
+                if (!entry) return true;
+                for (const QString& selected : selectedTags_) {
+                    const bool has = std::any_of(entry->tags.cbegin(), entry->tags.cend(), [&](const QString& tag) {
+                        return tag.compare(selected, Qt::CaseInsensitive) == 0; });
+                    if (!has) return true;
+                }
+                return false;
             }), ids.end());
         const bool byDate = sortMode_->currentIndex() == 1;
         std::sort(ids.begin(), ids.end(), [this, byDate](model::Id a, model::Id b) {
@@ -256,6 +277,60 @@ void MainWindow::refillList(model::Id selected) {
         if (!list_->currentItem() && list_->count()) list_->setCurrentRow(0);
     }
     showMetadata();
+}
+void MainWindow::refillTagBar() {
+    const auto tags = app_.gate() == Application::Gate::Ready ? app_.model()->allTags() : QStringList();
+    // Обрезка «мёртвых» выбранных тегов: после переименования/удаления или блокировки
+    // тега может уже не быть — выбор не должен фильтровать список несуществующим тегом.
+    QStringList alive;
+    for (const QString& selected : selectedTags_)
+        if (std::any_of(tags.cbegin(), tags.cend(), [&](const QString& tag) { return tag.compare(selected, Qt::CaseInsensitive) == 0; }))
+            alive << selected;
+    selectedTags_ = alive;
+    // Пересборка: чипы заменяются целиком; stretch вынимается отдельно и возвращается в конец —
+    // иначе он был бы удалён вместе с чипами и чипы перестали бы прижиматься к левому краю.
+    QLayoutItem* stretch = nullptr;
+    while (auto* item = tagBar_->layout()->takeAt(0)) {
+        if (item->widget()) item->widget()->deleteLater(); else stretch = item;
+    }
+    auto* layout = static_cast<QHBoxLayout*>(tagBar_->layout());
+    for (const QString& tag : tags) {
+        int uses = 0;
+        for (const auto& entry : app_.model()->entries()) uses += entry.tags.contains(tag, Qt::CaseInsensitive) ? 1 : 0;
+        auto* chip = new QToolButton(tagBar_);
+        chip->setText(tag); chip->setCheckable(true); chip->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        chip->setToolTip(QStringLiteral("Записей: %1").arg(uses));
+        chip->setChecked(std::any_of(selectedTags_.cbegin(), selectedTags_.cend(),
+            [&](const QString& selected) { return selected.compare(tag, Qt::CaseInsensitive) == 0; }));
+        connect(chip, &QToolButton::clicked, this, [this, tag] {
+            auto match = std::find_if(selectedTags_.begin(), selectedTags_.end(), [&](const QString& selected) {
+                return selected.compare(tag, Qt::CaseInsensitive) == 0; });
+            if (match != selectedTags_.end()) selectedTags_.erase(match); else selectedTags_ << tag;
+            refillList();
+        });
+        chip->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(chip, &QToolButton::customContextMenuRequested, this, [this, tag, chip] {
+            QMenu menu(chip);
+            menu.addAction(QStringLiteral("Переименовать тег…"), this, [this, tag] { renameTag(tag); });
+            menu.addAction(QStringLiteral("Удалить тег…"), this, [this, tag] { removeTag(tag); });
+            menu.exec(QCursor::pos());
+        });
+        layout->addWidget(chip);
+    }
+    if (stretch) layout->addItem(stretch); else layout->addStretch(1);
+}
+void MainWindow::renameTag(const QString& tag) {
+    bool ok = false;
+    const auto name = QInputDialog::getText(this, QStringLiteral("Переименование тега"),
+        QStringLiteral("Новое имя тега «%1»:").arg(tag), QLineEdit::Normal, tag, &ok);
+    if (!ok) return;
+    commit([&](auto& model) { return model.renameTag(tag, name); });
+}
+void MainWindow::removeTag(const QString& tag) {
+    if (QMessageBox::question(this, QStringLiteral("Удаление тега"),
+            QStringLiteral("Удалить тег «%1» со всех записей?").arg(tag),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    commit([&](auto& model) { return model.removeTag(tag); });
 }
 void MainWindow::showMetadata() {
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(selectedEntry()) : nullptr;

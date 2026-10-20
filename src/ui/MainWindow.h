@@ -46,6 +46,9 @@ private:
     void report(const QString& error);
     void updateEnabled();
     void refillList(model::Id entry = {});
+    void refillTagBar();
+    void renameTag(const QString& tag);
+    void removeTag(const QString& tag);
     void showMetadata();
     void openCardDialog();
     void selectNode(model::Id id);
@@ -61,6 +64,8 @@ private:
     QLineEdit* search_{};
     QComboBox* typeFilter_{};
     QComboBox* sortMode_{};
+    QWidget* tagBar_{};
+    QStringList selectedTags_{};
     QStackedWidget* right_{};
     EntryCard* card_{};
     QScrollArea* cardScroll_{};

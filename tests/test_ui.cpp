@@ -13,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QToolButton>
 #include <QTextDocument>
 #include <QTimer>
 #include <QDir>
@@ -271,6 +272,30 @@ private slots:
         QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
         filter->setCurrentIndex(0); sort->setCurrentIndex(0);
         QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+    }
+    void tagBarChipsFilterList() {
+        Application app(dir_.path() + "/tags"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry alpha; alpha.id = QUuid::createUuid(); alpha.groupId = group;
+        alpha.type = model::EntryType::ApiToken; alpha.title = "Альфа"; alpha.token = "t1"; alpha.tags = {QStringLiteral("Прод")};
+        model::Entry beta = alpha; beta.id = QUuid::createUuid(); beta.title = "Бета"; beta.tags = {QStringLiteral("web")};
+        QVERIFY(app.model()->setEntry(alpha).isEmpty()); QVERIFY(app.model()->setEntry(beta).isEmpty());
+        QVERIFY(app.save(&error));
+        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        auto* tagBar = w.findChild<QWidget*>(QStringLiteral("tagBar")); QVERIFY(tagBar);
+        const auto chips = tagBar->findChildren<QToolButton*>();
+        QCOMPARE(chips.size(), 2);
+        QToolButton* prod = nullptr;
+        for (auto* chip : chips) if (chip->text() == QStringLiteral("Прод")) prod = chip;
+        QVERIFY(prod);
+        prod->click();                                   // регистр чипа совпадает с хранением
+        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        auto* filter = w.findChild<QComboBox*>(QStringLiteral("typeFilter"));
+        filter->setCurrentIndex(2);                      // «Учётные данные»: Альфа (API-токен) отсекается — фильтры работают вместе
+        QCOMPARE(w.list()->count(), 0);
+        filter->setCurrentIndex(0);
+        prod->click();                                   // снятие чипа
+        QCOMPARE(w.list()->count(), 2);
     }
     void moveNodeToValidatesModelRules() {
         Application app(dir_.path() + "/dnd"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
