@@ -33,6 +33,10 @@ bool validName(const QString& name) {
 bool startWithVariable(const QString& program, const QString& arguments, const QString& name,
                        const QString& value, QString* err) {
     if (err) err->clear();
+    if (!validName(name)) { // защита и здесь, как в setUserVariable: пустое имя дало бы запись "=value"
+        if (err) *err = QStringLiteral("Недопустимое имя переменной окружения.");
+        return false;
+    }
     if (program.isEmpty()) {
         if (err) *err = QStringLiteral("Не указана программа для запуска.");
         return false;
@@ -54,9 +58,12 @@ bool startWithVariable(const QString& program, const QString& arguments, const Q
     const std::wstring entry = (name + QLatin1Char('=') + value).toStdWString();
     block.insert(block.end(), entry.c_str(), entry.c_str() + entry.size() + 1);
     block.push_back(L'\0'); // завершающий нуль всего блока
-    // Путь программы квотируем целиком (пробелы не должны рвать командную строку);
-    // параметры передаём строкой «как есть» — их квотирование остаётся за пользователем.
-    QString commandLine = QStringLiteral("\"%1\"").arg(program);
+    // Квотируем только незаквотированный путь с пробелом/табуляцией: путь, уже введённый в
+    // кавычках, повторное квотирование ломает; без пробелов квот не нужен. Параметры —
+    // строкой «как есть»: их квотирование остаётся за пользователем.
+    const bool needsQuotes = !program.startsWith(QLatin1Char('"'))
+        && (program.contains(QLatin1Char(' ')) || program.contains(QLatin1Char('\t')));
+    QString commandLine = needsQuotes ? QStringLiteral("\"%1\"").arg(program) : program;
     if (!arguments.trimmed().isEmpty()) commandLine += QLatin1Char(' ') + arguments;
     const std::wstring wideProgram = program.toStdWString();
     std::wstring wideCommandLine = commandLine.toStdWString(); // неконстантный буфер: CreateProcessW может писать в него

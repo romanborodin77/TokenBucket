@@ -674,6 +674,9 @@ void MainWindow::exportToEnvironment() {
     // entry стал бы висячим. Дальше работаем только с копией и после каждого диалога
     // перепроверяем, что шлюз готов и поколение не сменилось (страж как в saveSshToFile).
     const QString secret = entry->type == model::EntryType::ApiToken ? entry->token : entry->password;
+    // NUL в секрете недопустим: и env-блок CreateProcessW, и REG_SZ в реестре молча усекают
+    // строку на нём — для security-фичи отказываемся явно, а не отдаём усечённое значение.
+    if (secret.contains(QChar(u'\0'))) { report(QStringLiteral("Секрет содержит недопустимые символы для переменной окружения.")); return; }
     if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("выдача секрета в переменную окружения"))) return;
     if (!ready() || app_.generation() != generation) return;
     EnvExportDialog dialog(this);
