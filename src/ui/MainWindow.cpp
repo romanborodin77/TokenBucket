@@ -48,6 +48,9 @@
 #ifdef Q_OS_WIN
 #include "../platform/hello_win.h"
 #include "../platform/QuickPasteWin.h"
+#include "../platform/QuickPaste.h"
+#include "../platform/EnvOps.h"
+#include "EnvExportDialog.h"
 #include <QKeySequenceEdit>
 #include <QTimer>
 #endif
@@ -94,6 +97,11 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     addEntryAction->setShortcut(QKeySequence::New);
     auto* edit = action(entries, QStringLiteral("Изменить запись…"), &MainWindow::editSelected); edit->setShortcut(QKeySequence(Qt::Key_F2));
     action(entries, QStringLiteral("Удалить запись…"), &MainWindow::deleteSelected);
+#ifdef Q_OS_WIN
+    // Не через mutations_: доступность зависит не только от Ready, но и от выбранной записи
+    // (тип и однострочность секрета) — управляем сами в updateEnabled/showMetadata.
+    envExportAction_ = entries->addAction(QStringLiteral("В переменную окружения…"), this, &MainWindow::exportToEnvironment);
+#endif
     action(vault, QStringLiteral("Защищённый экспорт…"), &MainWindow::exportVault);
     action(vault, QStringLiteral("Импорт из файла…"), &MainWindow::importVault);
     vault->addSeparator();
@@ -133,10 +141,13 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     }
 #ifdef Q_OS_WIN
     settings->addAction(QStringLiteral("Горячая клавиша быстрой вставки…"), this, &MainWindow::changeHotkey);
+    settings->addAction(QStringLiteral("Удалить переменные TokenBucket…"), this, &MainWindow::removeExportedVariables);
 #endif
     updateSwitchActionText();
     auto* lock = vault->addAction(QStringLiteral("Заблокировать"), &app_, &Application::lock); lock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
-    vault->addAction(QStringLiteral("Закрыть"), this, &QWidget::close, QKeySequence::Quit);
+    // Настоящий выход из приложения: requestExit ставит exiting_ — closeEvent блокирует
+    // хранилище и завершает работу. Крестик окна по-прежнему лишь сворачивает в трей.
+    vault->addAction(QStringLiteral("Выход"), this, &MainWindow::requestExit, QKeySequence::Quit);
     auto* toolbar = addToolBar(QStringLiteral("Действия")); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     toolbar->addAction(addProjectAction); toolbar->addAction(addEntryAction); toolbar->addAction(edit); toolbar->addSeparator(); toolbar->addAction(lock);
     addProjectAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
@@ -232,6 +243,9 @@ MainWindow::~MainWindow() = default;
 bool MainWindow::ready() const { return app_.gate() == Application::Gate::Ready && !app_.busy(); }
 void MainWindow::updateEnabled() {
     centralWidget()->setEnabled(ready()); for (auto* action : mutations_) action->setEnabled(ready());
+#ifdef Q_OS_WIN
+    if (envExportAction_) envExportAction_->setEnabled(canExportEnv());
+#endif
 }
 model::Id MainWindow::selectedNode() const { const auto* item = tree_->currentItem(); return item ? item->data(0, Qt::UserRole).value<model::Id>() : model::Id{}; }
 model::Id MainWindow::selectedEntry() const { const auto* item = list_->currentItem(); return item ? item->data(Qt::UserRole).value<model::Id>() : model::Id{}; }
@@ -366,6 +380,9 @@ void MainWindow::showMetadata() {
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(selectedEntry()) : nullptr;
     right_->setCurrentIndex(entry ? 1 : 0); if (!entry) { card_->clear(); return; }
     card_->showEntry(entry->id);
+#ifdef Q_OS_WIN
+    if (envExportAction_) envExportAction_->setEnabled(canExportEnv()); // доступность зависит от выбора
+#endif
 }
 void MainWindow::openCardDialog() {
     if (!narrow_ || !ready() || cardOpen_ || selectedEntry().isNull()) return;
@@ -585,6 +602,12 @@ void MainWindow::listMenu(const QPoint& pos) {
     menu.addAction(QStringLiteral("Изменить…\tF2"), this, &MainWindow::editSelected);
     menu.addAction(QStringLiteral("Копировать секрет"), this, [this] { card_->copySecret(); });
     const auto* entry = app_.model()->entry(id);
+#ifdef Q_OS_WIN
+    // Тот же критерий, что и для пункта меню: ApiToken/Credentials с однострочным секретом
+    // (eligibleForAutoPaste отсекает и SSH-ключи, и переводы строк).
+    if (entry && paste::eligibleForAutoPaste(*entry))
+        menu.addAction(QStringLiteral("В переменную окружения…"), this, &MainWindow::exportToEnvironment);
+#endif
     QAction* favorite = menu.addAction(QStringLiteral("В избранное"));
     favorite->setCheckable(true); favorite->setChecked(entry && entry->favorite);
     connect(favorite, &QAction::toggled, this, &MainWindow::toggleFavorite);
@@ -633,6 +656,70 @@ void MainWindow::changeHotkey() {
     settings.setValue(QStringLiteral("hotkey"), chosen.toString());
     QString error;
     if (!hotkey_->reRegister(&error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+}
+bool MainWindow::canExportEnv() const {
+    if (!ready()) return false;
+    const auto* entry = app_.model()->entry(selectedEntry());
+    // однострочный токен/пароль: eligibleForAutoPaste заодно отсекает SSH-ключи (многострочные)
+    return entry && paste::eligibleForAutoPaste(*entry);
+}
+void MainWindow::exportToEnvironment() {
+    if (!ready() || editing_) return;
+    QScopedValueRollback guard(editing_, true);
+    const auto generation = app_.generation();
+    const auto* entry = app_.model()->entry(selectedEntry());
+    if (!entry || !paste::eligibleForAutoPaste(*entry)) { report(QStringLiteral("Выберите запись с однострочным токеном или паролем.")); return; }
+    // Копия секрета в локаль ДО диалогов: VerifyDialog/EnvExportDialog крутят вложенные циклы
+    // событий, за которые автолок или QtConcurrent-операция могут очистить модель — указатель
+    // entry стал бы висячим. Дальше работаем только с копией и после каждого диалога
+    // перепроверяем, что шлюз готов и поколение не сменилось (страж как в saveSshToFile).
+    const QString secret = entry->type == model::EntryType::ApiToken ? entry->token : entry->password;
+    if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("выдача секрета в переменную окружения"))) return;
+    if (!ready() || app_.generation() != generation) return;
+    EnvExportDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
+    QString error;
+    if (dialog.mode() == EnvExportDialog::Mode::Temporary) {
+        if (!platform::envops::startWithVariable(dialog.program(), dialog.arguments(), dialog.name(), secret, &error)) {
+            QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
+        }
+        QMessageBox::information(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Приложение запущено с переменной %1 в своём окружении. Секрет нигде не сохранён и исчезнет вместе с процессом.").arg(dialog.name()));
+        return;
+    }
+    if (QMessageBox::question(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Значение будет храниться в реестре в открытом виде и будет доступно любому процессу "
+                           "от вашего имени. Новые процессы увидят переменную после перезапуска оболочки/проводника "
+                           "или выхода из системы. Установить переменную %1?").arg(dialog.name()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    if (!ready() || app_.generation() != generation) return;
+    if (!platform::envops::setUserVariable(dialog.name(), secret, &error)) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
+    }
+    platform::envops::rememberExported(dialog.name());
+    QMessageBox::information(this, QStringLiteral("TokenBucket"),
+        QStringLiteral("Переменная %1 установлена. Новые процессы увидят её после перезапуска оболочки/проводника или выхода из системы.").arg(dialog.name()));
+}
+void MainWindow::removeExportedVariables() {
+    const QStringList names = platform::envops::exportedNames();
+    if (names.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Переменные окружения, установленные TokenBucket, не найдены."));
+        return;
+    }
+    bool ok = false;
+    const QString name = QInputDialog::getItem(this, QStringLiteral("Удаление переменных TokenBucket"),
+        QStringLiteral("Пользовательская переменная:"), names, 0, false, &ok);
+    if (!ok || name.isEmpty()) return;
+    if (QMessageBox::question(this, QStringLiteral("TokenBucket"),
+            QStringLiteral("Удалить пользовательскую переменную «%1»?").arg(name),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    QString error;
+    if (!platform::envops::deleteKnownUserVariable(name, &error)) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
+    }
+    platform::envops::forgetExported(name);
+    statusBar()->showMessage(QStringLiteral("Переменная %1 удалена.").arg(name), 5000);
 }
 #endif
 void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }

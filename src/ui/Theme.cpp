@@ -53,6 +53,9 @@ void apply(Mode mode) {
         p.setColor(QPalette::Disabled, QPalette::Highlight, QColor(0x45, 0x45, 0x45));
         p.setColor(QPalette::HighlightedText, Qt::white);
         p.setColor(QPalette::Disabled, QPalette::HighlightedText, disabled);
+        // PlaceholderText не наследуется от стандартной палитры стиля: без явной роли
+        // подсказки мест ввода в тёмной теме остаются почти невидимыми.
+        p.setColor(QPalette::PlaceholderText, QColor(0x8a, 0x8a, 0x8a));
         QApplication::setPalette(p);
     } else {
         QApplication::setPalette(QApplication::style()->standardPalette());

@@ -41,6 +41,8 @@ public slots:
     void configureIdleTimeout();
 #ifdef Q_OS_WIN
     void changeHotkey();
+    void exportToEnvironment();
+    void removeExportedVariables();
 #endif
 protected:
     void resizeEvent(QResizeEvent*) override;
@@ -63,6 +65,9 @@ private:
     void updateSwitchActionText();
     model::Id selectedNode() const;
     model::Id selectedEntry() const;
+#ifdef Q_OS_WIN
+    bool canExportEnv() const;
+#endif
     Application& app_;
     QTreeWidget* tree_{};
     QListWidget* list_{};
@@ -83,6 +88,7 @@ private:
     bool helloAvailable_ = false;
 #ifdef Q_OS_WIN
     std::unique_ptr<platform::QuickPaste> hotkey_;
+    QAction* envExportAction_{};
 #endif
     bool editing_ = false, narrow_ = false, cardOpen_ = false;
     bool exiting_ = false;
