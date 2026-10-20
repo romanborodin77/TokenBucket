@@ -74,6 +74,28 @@ private slots:
         platform::envops::forgetExported(name);
         QVERIFY(!platform::envops::exportedNames().contains(name));
     }
+    void clearAllExportedAndOptionRoundtrip() {
+        const QString first = QStringLiteral("TOKENBUCKET_TEST_ENV"), second = QStringLiteral("TOKENBUCKET_TEST_ENV_2");
+        platform::envops::forgetExported(first); platform::envops::forgetExported(second);
+        QString err;
+        QVERIFY2(platform::envops::setUserVariable(first, QStringLiteral("один"), &err), qPrintable(err));
+        QVERIFY2(platform::envops::setUserVariable(second, QStringLiteral("два"), &err), qPrintable(err));
+        platform::envops::rememberExported(first); platform::envops::rememberExported(second);
+        // опция: выключена по умолчанию в наших тестах не гарантируется — проверяем раундтрип
+        platform::envops::setClearOnExitEnabled(true);
+        QVERIFY(platform::envops::clearOnExitEnabled());
+        platform::envops::setClearOnExitEnabled(false);
+        QVERIFY(!platform::envops::clearOnExitEnabled());
+        QCOMPARE(platform::envops::clearAllExported(), 2);
+        const std::wstring w1 = first.toStdWString(), w2 = second.toStdWString();
+        wchar_t buf[64] = {}; DWORD size = sizeof(buf);
+        QCOMPARE(RegGetValueW(HKEY_CURRENT_USER, L"Environment", w1.c_str(), RRF_RT_REG_SZ, nullptr, buf, &size), LSTATUS(ERROR_FILE_NOT_FOUND));
+        size = sizeof(buf);
+        QCOMPARE(RegGetValueW(HKEY_CURRENT_USER, L"Environment", w2.c_str(), RRF_RT_REG_SZ, nullptr, buf, &size), LSTATUS(ERROR_FILE_NOT_FOUND));
+        QVERIFY(platform::envops::exportedNames().isEmpty());
+        // повторный вызов идемпотентен (переменных и имён нет)
+        QCOMPARE(platform::envops::clearAllExported(), 0);
+    }
     void dialogValidation() {
         ui::EnvExportDialog dialog;
         auto* name = dialog.findChild<QLineEdit*>(QStringLiteral("envVarName"));

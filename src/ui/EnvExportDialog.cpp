@@ -1,5 +1,6 @@
 #include "EnvExportDialog.h"
 #include "../platform/EnvOps.h"
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -49,6 +50,13 @@ EnvExportDialog::EnvExportDialog(QWidget* parent) : QDialog(parent) {
         "после перезапуска оболочки/проводника или выхода из системы."), permPage);
     warning->setWordWrap(true); warning->setTextFormat(Qt::PlainText);
     permLayout->addWidget(warning);
+    // Опция synced с QSettings: включённая — переменные TokenBucket стираются из реестра
+    // при завершении программы (см. main.cpp, точка выхода).
+    auto* clearOnExit = new QCheckBox(QStringLiteral("Стирать переменные TokenBucket при выходе из программы"), permPage);
+    clearOnExit->setObjectName(QStringLiteral("clearOnExit"));
+    clearOnExit->setChecked(tb::platform::envops::clearOnExitEnabled());
+    connect(clearOnExit, &QCheckBox::toggled, permPage, [](bool on) { tb::platform::envops::setClearOnExitEnabled(on); });
+    permLayout->addWidget(clearOnExit);
     pages->addWidget(permPage);
     layout->addWidget(pages);
     connect(temporary_, &QRadioButton::toggled, pages, [pages](bool temporary) {

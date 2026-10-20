@@ -142,6 +142,14 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
 #ifdef Q_OS_WIN
     settings->addAction(QStringLiteral("Горячая клавиша быстрой вставки…"), this, &MainWindow::changeHotkey);
     settings->addAction(QStringLiteral("Удалить переменные TokenBucket…"), this, &MainWindow::removeExportedVariables);
+    {
+        // Опция выхода: стирать установленные нами переменные окружения при завершении
+        // программы, чтобы секреты не оставались в реестре (QSettings env-clear-on-exit).
+        auto* clearOnExit = settings->addAction(QStringLiteral("Стирать переменные окружения при выходе"));
+        clearOnExit->setCheckable(true); clearOnExit->setObjectName(QStringLiteral("envClearOnExit"));
+        clearOnExit->setChecked(platform::envops::clearOnExitEnabled());
+        connect(clearOnExit, &QAction::toggled, this, [](bool on) { platform::envops::setClearOnExitEnabled(on); });
+    }
 #endif
     updateSwitchActionText();
     auto* lock = vault->addAction(QStringLiteral("Заблокировать"), &app_, &Application::lock); lock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));

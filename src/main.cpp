@@ -9,12 +9,16 @@
 #include "app/Application.h"
 #include "app/IdleTimer.h"
 #include "platform/SessionWatcher.h"
+#ifdef Q_OS_WIN
+#include "platform/EnvOps.h"
+#endif
 #include "ui/SetupDialog.h"
 #include "ui/UnlockDialog.h"
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"
 #include "ui/TrayController.h"
 namespace {
+int runApp(); // тело главного цикла; start() добавляет очистку на выходе
 bool run(tb::Application& core, const std::function<bool(void*, QString*)>& operation, QString* err) {
     QProgressDialog progress(QStringLiteral("Обработка хранилища…"), QStringLiteral("Отменить"), 0, 0);
     progress.setWindowTitle(QStringLiteral("TokenBucket"));
@@ -25,6 +29,15 @@ bool run(tb::Application& core, const std::function<bool(void*, QString*)>& oper
     return operation(reinterpret_cast<void*>(progress.winId()), err);
 }
 int start() {
+    const int code = runApp();
+#ifdef Q_OS_WIN
+    // Единая точка выхода: по опции стираем установленные нами пользовательские
+    // переменные окружения, чтобы секреты не оставались в реестре после программы.
+    if (tb::platform::envops::clearOnExitEnabled()) tb::platform::envops::clearAllExported();
+#endif
+    return code;
+}
+int runApp() {
     const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QString error;
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);

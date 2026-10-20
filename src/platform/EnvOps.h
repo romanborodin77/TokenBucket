@@ -17,4 +17,11 @@ bool deleteKnownUserVariable(const QString& name, QString* err);
 QStringList exportedNames();
 void rememberExported(const QString& name);
 void forgetExported(const QString& name);
+// Опция «стирать установленные нами переменные при выходе из программы» (QSettings
+// env-clear-on-exit, по умолчанию выключена) и само стирание всех учтённых переменных.
+// Возвращает число стёртых; имена стёртых (и уже отсутствующих) забываются, при отказе
+// удаления имя остаётся в списке — переменную можно будет удалить вручную.
+bool clearOnExitEnabled();
+void setClearOnExitEnabled(bool enabled);
+int clearAllExported();
 }

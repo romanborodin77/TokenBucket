@@ -125,4 +125,22 @@ void forgetExported(const QString& name) {
     QStringList names = exportedNames();
     if (names.removeAll(name)) storeExported(names);
 }
+bool clearOnExitEnabled() {
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    return settings.value(QStringLiteral("env-clear-on-exit"), false).toBool();
+}
+void setClearOnExitEnabled(bool enabled) {
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+    settings.setValue(QStringLiteral("env-clear-on-exit"), enabled);
+}
+int clearAllExported() {
+    int removed = 0;
+    for (const QString& name : exportedNames()) {
+        QString error;
+        // Идемпотентно: отсутствующая переменная считается стёртой; при реальном отказе
+        // имя остаётся в списке, чтобы переменную можно было удалить вручную позже.
+        if (deleteKnownUserVariable(name, &error)) { forgetExported(name); ++removed; }
+    }
+    return removed;
+}
 }
