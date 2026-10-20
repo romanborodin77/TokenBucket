@@ -33,7 +33,9 @@ QString compilerLine() {
 }
 QLabel* keyValue(const QString& key, const QString& value, QWidget* parent, bool linkEmail = false) {
     auto* row = new QLabel(parent);
-    row->setTextFormat(linkEmail ? Qt::RichText : Qt::PlainText);
+    // Текст всегда собирается как HTML (<b> + &nbsp;), поэтому формат — RichText
+    // для всех строк: с PlainText QLabel показывал бы теги разметки как обычный текст.
+    row->setTextFormat(Qt::RichText);
     if (linkEmail)
         row->setText(QStringLiteral("<b>%1</b>&nbsp;&nbsp;<a href=\"mailto:%2\" style=\"color:palette(link);text-decoration:none\">%2</a>")
                          .arg(key.toHtmlEscaped(), value.toHtmlEscaped()));
@@ -94,7 +96,7 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
     bodyLayout->addSpacing(10);
     bodyLayout->addWidget(keyValue(tr("Контейнер"), tr("TBVK v1 · мастер-пароль / Windows Hello (DPAPI)"), body));
     bodyLayout->addWidget(keyValue(tr("Шифрование"), tr("XChaCha20-Poly1305 · ключ Argon2id (64 МиБ, opslimit 3)"), body));
-    bodyLayout->addWidget(keyValue(tr("Формат данных"), tr("CBOR v2 (теги) · до 10 000 записей · секрет до 1 МиБ"), body));
+    bodyLayout->addWidget(keyValue(tr("Формат данных"), tr("CBOR v3 (теги, сроки) · до 10 000 записей · секрет до 1 МиБ"), body));
     bodyLayout->addWidget(keyValue(tr("Интерфейс"), qtLicense, body));
     bodyLayout->addWidget(keyValue(tr("Криптография"), sodium, body));
     bodyLayout->addWidget(keyValue(tr("Сборка"), QStringLiteral("%1 · %2")
