@@ -75,13 +75,35 @@ bool VaultModel::secretTooBig(const Entry& e) {
         || e.sshPrivate.size() > MaxSecretBytes || e.sshPublic.size() > MaxSecretBytes
         || e.sshPassphrase.toUtf8().size() > MaxSecretBytes;
 }
+QStringList VaultModel::normalizeTags(const QStringList& raw) {
+    QStringList result;
+    for (const QString& rawTag : raw) {
+        const QString tag = rawTag.trimmed();
+        if (tag.isEmpty()) continue;
+        // Дубликаты отбрасываем без учёта регистра: «Прод» и «прод» — один тег,
+        // написание первого вхождения считается каноничным.
+        if (std::any_of(result.cbegin(), result.cend(), [&](const QString& existing) {
+                return existing.compare(tag, Qt::CaseInsensitive) == 0; }))
+            continue;
+        result << tag;
+    }
+    return result;
+}
 QString VaultModel::setEntry(const Entry& e) {
     if (e.id.isNull() || nodes_.contains(e.id)) return "Недопустимый идентификатор записи.";
     if (int(e.type) < 0 || int(e.type) > 2) return "Неизвестный тип записи.";
     if (!nodes_.contains(e.groupId)) return "Проект или группа не найдены.";
     if (!entries_.contains(e.id) && entries_.size() >= MaxEntries) return "Достигнут предел 10 000 записей.";
     if (secretTooBig(e)) return "Секрет превышает 1 МиБ.";
-    entries_.insert(e.id, e);
+    // Инвариант: в модели теги всегда нормализованы — редактор и CBOR-слой
+    // могут полагаться на отсутствие пустых тегов и регистровых дублей.
+    const QStringList tags = normalizeTags(e.tags);
+    if (tags.size() > MaxTags) return "Тегов больше 16.";
+    if (std::any_of(tags.cbegin(), tags.cend(), [](const QString& tag) { return tag.size() > MaxTagChars; }))
+        return "Тег длиннее 32 символов.";
+    Entry stored = e; // параметр константен: нормализованные теги кладём в копию
+    stored.tags = tags;
+    entries_.insert(stored.id, stored);
     return {};
 }
 QString VaultModel::removeEntry(Id id) { return entries_.remove(id) ? QString() : "Запись не найдена."; }
@@ -104,7 +126,9 @@ QList<Id> VaultModel::search(const QString& needle) const {
     if (needle.isEmpty()) return r;
     for (auto& e : entries_)
         if (e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
-            || e.note.contains(needle, Qt::CaseInsensitive))
+            || e.note.contains(needle, Qt::CaseInsensitive)
+            // Тег — поисковый атрибут записи; секреты, как и выше, не ищутся.
+            || std::any_of(e.tags.cbegin(), e.tags.cend(), [&](const QString& tag) { return tag.contains(needle, Qt::CaseInsensitive); }))
             r << e.id;
     for (auto& n : nodes_)
         if (n.name.contains(needle, Qt::CaseInsensitive))
@@ -114,7 +138,7 @@ QList<Id> VaultModel::search(const QString& needle) const {
 }
 QByteArray VaultModel::toCbor() const {
     QCborMap root;
-    root[u"v"_s] = 1;
+    root[u"v"_s] = 2; // v2 = v1 + обязательный массив тегов "tags" у каждой записи
     QCborArray ns;
     for (auto& n : nodes_) { QCborMap m; m[u"id"_s] = idStr(n.id); m[u"p"_s] = n.parent.isNull() ? QString() : idStr(n.parent); m[u"n"_s] = n.name; ns << m; }
     root[u"nodes"_s] = ns;
@@ -129,6 +153,9 @@ QByteArray VaultModel::toCbor() const {
         m[u"tok"_s] = e.token.toUtf8(); m[u"login"_s] = e.login; m[u"pw"_s] = e.password.toUtf8();
         m[u"sshpriv"_s] = e.sshPrivate; m[u"sshpub"_s] = e.sshPublic;
         m[u"sshph"_s] = e.sshPassphrase; m[u"sshc"_s] = e.sshComment;
+        QCborArray tags;
+        for (const QString& tag : e.tags) tags << tag;
+        m[u"tags"_s] = tags;
         es << m;
     }
     root[u"entries"_s] = es;
@@ -142,8 +169,11 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
     QCborValue v = QCborValue::fromCbor(reader);
     if (!v.isMap() || reader.lastError() != QCborError::NoError || reader.currentOffset() != cbor.size()) return bad();
     QCborMap root = v.toMap();
-    if (root.size() != 3 || !root.value(u"v"_s).isInteger() || root.value(u"v"_s).toInteger() != 1
-        || !root.value(u"nodes"_s).isArray() || !root.value(u"entries"_s).isArray()) return bad();
+    if (root.size() != 3 || !root.value(u"nodes"_s).isArray() || !root.value(u"entries"_s).isArray()) return bad();
+    // v2 = v1 + теги записей; v1 читается как записи без тегов. Неизвестная версия — отказ,
+    // чтобы новая программа не молча потеряла данные, а старая — не отбросила новые поля.
+    const qint64 version = root.value(u"v"_s).toInteger(-1);
+    if (version != 1 && version != 2) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
     VaultModel fresh;
     for (const auto& nv : root.value(u"nodes"_s).toArray()) {
         if (!nv.isMap()) return bad();
@@ -168,13 +198,17 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
     for (const auto& ev : root.value(u"entries"_s).toArray()) {
         if (++count > MaxEntries) { if (err) *err = "Превышен предел 10 000 записей."; return ParseStatus::TooLarge; }
         QCborMap m = ev.toMap();
-        if (!ev.isMap() || m.size() != 17) return bad();
+        if (!ev.isMap()) return bad();
+        // Поля записи могут отсутствовать (минимальные внешние v1/v2-файлы) — тогда берём
+        // значение по умолчанию; но присутствующий ключ обязан иметь корректный тип,
+        // иначе файл считается повреждённым.
         for (const auto key : {u"id"_s, u"g"_s, u"title"_s, u"note"_s, u"url"_s, u"cr"_s,
                               u"mod"_s, u"login"_s, u"sshph"_s, u"sshc"_s})
-            if (!m.value(key).isString()) return bad();
+            if (m.contains(key) && !m.value(key).isString()) return bad();
         for (const auto key : {u"tok"_s, u"pw"_s, u"sshpriv"_s, u"sshpub"_s})
-            if (!m.value(key).isByteArray()) return bad();
-        if (!m.value(u"fav"_s).isBool() || !m.value(u"rv"_s).isBool()
+            if (m.contains(key) && !m.value(key).isByteArray()) return bad();
+        if ((m.contains(u"fav"_s) && !m.value(u"fav"_s).isBool())
+            || (m.contains(u"rv"_s) && !m.value(u"rv"_s).isBool())
             || !m.value(u"type"_s).isInteger() || m.value(u"type"_s).toInteger() < 0
             || m.value(u"type"_s).toInteger() > 2
             || !m.value(u"tok"_s).toByteArray().isValidUtf8()
@@ -193,11 +227,71 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
         e.password = QString::fromUtf8(m.value(u"pw"_s).toByteArray());
         e.sshPrivate = m.value(u"sshpriv"_s).toByteArray(); e.sshPublic = m.value(u"sshpub"_s).toByteArray();
         e.sshPassphrase = m.value(u"sshph"_s).toString(); e.sshComment = m.value(u"sshc"_s).toString();
+        // Теги есть только в v2; отсутствие ключа — пустой список (спека формата).
+        // Неверный тип элемента или нарушение лимитов означает правку файла извне.
+        if (version >= 2 && m.contains(u"tags"_s)) {
+            const QCborValue tagsValue = m.value(u"tags"_s);
+            if (!tagsValue.isArray()) { if (err) *err = "Хранилище повреждено (теги)."; return ParseStatus::Bad; }
+            for (const auto& tagValue : tagsValue.toArray()) {
+                if (!tagValue.isString()) { if (err) *err = "Хранилище повреждено (теги)."; return ParseStatus::Bad; }
+                e.tags << tagValue.toString();
+            }
+            // Лимиты те же, что в setEntry, но написание берём из файла без нормализации:
+            // повторное сохранение не должно молча менять пользовательские теги.
+            if (e.tags.size() > MaxTags
+                || std::any_of(e.tags.cbegin(), e.tags.cend(), [](const QString& tag) { return tag.isEmpty() || tag.size() > MaxTagChars; })) {
+                if (err) *err = "Хранилище повреждено (теги).";
+                return ParseStatus::Bad;
+            }
+        }
         if (secretTooBig(e)) { if (err) *err = "Секрет превышает 1 МиБ."; return ParseStatus::TooLarge; }
         fresh.entries_.insert(e.id, e);
     }
     *this = std::move(fresh);
     return ParseStatus::Ok;
+}
+QStringList VaultModel::allTags() const {
+    QStringList tags;
+    for (const auto& entry : entries_)
+        for (const QString& tag : entry.tags)
+            if (std::none_of(tags.cbegin(), tags.cend(), [&](const QString& existing) {
+                    return existing.compare(tag, Qt::CaseInsensitive) == 0; }))
+                tags << tag;
+    std::sort(tags.begin(), tags.end(), [](const QString& a, const QString& b) { return a.compare(b, Qt::CaseInsensitive) < 0; });
+    return tags;
+}
+QString VaultModel::renameTag(const QString& from, const QString& to) {
+    const QStringList fromList = normalizeTags({from});
+    const QStringList toList = normalizeTags({to});
+    if (fromList.isEmpty()) return "Тег не найден.";
+    if (toList.isEmpty()) return "Имя тега пустое.";
+    const QString oldTag = fromList.first(), newTag = toList.first();
+    if (newTag.size() > MaxTagChars) return "Тег длиннее 32 символов.";
+    bool found = false;
+    for (auto& entry : entries_) {
+        auto match = std::find_if(entry.tags.begin(), entry.tags.end(), [&](const QString& tag) {
+            return tag.compare(oldTag, Qt::CaseInsensitive) == 0; });
+        if (match == entry.tags.end()) continue;
+        found = true;
+        // Новый тег встаёт на место старого: порядок тегов внутри записи — часть
+        // пользовательских данных. При слиянии (новое имя уже есть без учёта регистра)
+        // ничего не добавляем — останется существующее написание.
+        const qsizetype pos = match - entry.tags.begin();
+        entry.tags.erase(match);
+        if (std::none_of(entry.tags.cbegin(), entry.tags.cend(), [&](const QString& tag) {
+                return tag.compare(newTag, Qt::CaseInsensitive) == 0; }))
+            entry.tags.insert(pos, newTag);
+    }
+    return found ? QString() : "Тег не найден.";
+}
+QString VaultModel::removeTag(const QString& tag) {
+    bool found = false;
+    for (auto& entry : entries_) {
+        auto tail = std::remove_if(entry.tags.begin(), entry.tags.end(), [&](const QString& existing) {
+            return existing.compare(tag, Qt::CaseInsensitive) == 0; });
+        if (tail != entry.tags.end()) { found = true; entry.tags.erase(tail, entry.tags.end()); }
+    }
+    return found ? QString() : "Тег не найден.";
 }
 void VaultModel::clear() { nodes_.clear(); entries_.clear(); }
 }

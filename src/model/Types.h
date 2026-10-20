@@ -2,6 +2,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QString>
+#include <QStringList>
 #include <QUuid>
 namespace tb::model {
 using Id = QUuid;
@@ -13,5 +14,6 @@ struct Entry {
     QByteArray sshPrivate, sshPublic;
     QDateTime created, modified;
     bool favorite = false, reverify = false;
+    QStringList tags; // теги записи; канонизируются в VaultModel::setEntry: trim, без пустых и дублей (без учёта регистра)
 };
 }

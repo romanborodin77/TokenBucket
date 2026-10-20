@@ -1,8 +1,11 @@
 #include <QtTest>
 #include <QCborMap>
 #include <QCborArray>
+#include <QCborValue>
 #include "../src/model/VaultModel.h"
 using namespace tb::model;
+namespace model = tb::model; // тесты тегов из плана используют уточнение model::
+using namespace Qt::StringLiterals;
 class TestModel : public QObject {
     Q_OBJECT
     VaultModel m;
@@ -167,6 +170,66 @@ private slots:
         QCOMPARE(m.depth(tail), 8);
         QVERIFY(m.moveNode(root, project).isEmpty());
         QCOMPARE(m.depth(tail), 8);
+    }
+    void tagsNormalizeAndLimit() {
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = g1; e.title = "T";
+        e.tags = {QStringLiteral("Прод"), QStringLiteral(" прод "), QStringLiteral("СЕРВЕР"), QStringLiteral("прод")};
+        QVERIFY(m.setEntry(e).isEmpty());
+        QCOMPARE(m.entry(e.id)->tags, (QStringList{QStringLiteral("Прод"), QStringLiteral("СЕРВЕР")}));
+        model::Entry many = e; many.id = QUuid::createUuid(); many.tags.clear();
+        for (int i = 0; i < 16; ++i) many.tags << QStringLiteral("тег%1").arg(i);
+        QVERIFY(m.setEntry(many).isEmpty());
+        model::Entry over = many; over.id = QUuid::createUuid();
+        over.tags << QStringLiteral("лишний");
+        QVERIFY(!m.setEntry(over).isEmpty());                        // 17 тегов
+        model::Entry longTag = e; longTag.id = QUuid::createUuid();
+        longTag.tags = {QString(33, QChar('д'))};
+        QVERIFY(!m.setEntry(longTag).isEmpty());
+        model::Entry border = e; border.id = QUuid::createUuid();
+        border.tags = {QString(32, QChar('я'))};
+        QVERIFY(m.setEntry(border).isEmpty());
+    }
+    void tagsCborV2RoundtripAndV1Reads() {
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = g1; e.title = "Т";
+        e.tags = {QStringLiteral("прод 🚀"), QStringLiteral("Сервер")};
+        QVERIFY(m.setEntry(e).isEmpty());
+        model::VaultModel fresh;
+        QVERIFY(fresh.fromCbor(m.toCbor(), nullptr) == model::VaultModel::ParseStatus::Ok);
+        QCOMPARE(fresh.entry(e.id)->tags, e.tags);
+        const auto uid = [](QUuid id) { return id.toString(QUuid::WithoutBraces); };
+        // В ручном файле только узел-проект p1, поэтому запись кладём прямо в него.
+        QCborMap node; node[u"id"_s] = uid(p1); node[u"p"_s] = QString(); node[u"n"_s] = QStringLiteral("P");
+        QCborMap one; one[u"id"_s] = uid(e.id); one[u"g"_s] = uid(p1); one[u"type"_s] = 0; one[u"title"_s] = QStringLiteral("T");
+        QCborMap root; QCborArray ns{node}, es{one};
+        root[u"v"_s] = 1; root[u"nodes"_s] = ns; root[u"entries"_s] = es;
+        model::VaultModel v1; QString err;
+        QCOMPARE(v1.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Ok);
+        QVERIFY(v1.entry(e.id)->tags.isEmpty());
+        root[u"v"_s] = 2; one[u"tags"_s] = QStringLiteral("не-массив");
+        es[0] = one; root[u"entries"_s] = es;   // QCbor-контейнеры хранят значения: правку one возвращаем в root
+        model::VaultModel bad; err.clear();
+        QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
+        QVERIFY(err.contains(QStringLiteral("теги")));
+        root[u"v"_s] = 3; err.clear();
+        QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
+        QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
+    }
+    void tagsRenameAndRemove() {
+        model::Entry first; first.id = QUuid::createUuid(); first.groupId = g1; first.title = "1";
+        first.tags = {QStringLiteral("прод"), QStringLiteral("web")};
+        model::Entry second = first; second.id = QUuid::createUuid(); second.title = "2"; second.tags = {QStringLiteral("прод")};
+        QVERIFY(m.setEntry(first).isEmpty()); QVERIFY(m.setEntry(second).isEmpty());
+        QVERIFY(m.renameTag(QStringLiteral("ПРОД"), QStringLiteral("production")).isEmpty());
+        QCOMPARE(m.entry(first.id)->tags, (QStringList{QStringLiteral("production"), QStringLiteral("web")}));
+        QCOMPARE(m.entry(second.id)->tags, (QStringList{QStringLiteral("production")}));
+        QVERIFY(m.renameTag(QStringLiteral("web"), QStringLiteral("Production")).isEmpty());   // слияние
+        QCOMPARE(m.entry(first.id)->tags, (QStringList{QStringLiteral("production")}));
+        QCOMPARE(m.renameTag(QStringLiteral("нет"), QStringLiteral("x")), QStringLiteral("Тег не найден."));
+        QCOMPARE(m.renameTag(QStringLiteral("production"), QStringLiteral("   ")), QStringLiteral("Имя тега пустое."));
+        QCOMPARE(m.removeTag(QStringLiteral("нет")), QStringLiteral("Тег не найден."));
+        QVERIFY(m.removeTag(QStringLiteral("PRODUCTION")).isEmpty()); // латиница: тег «production» — тоже латиница
+        QVERIFY(m.entry(first.id)->tags.isEmpty());
+        QVERIFY(m.search(QStringLiteral("production")).isEmpty());
     }
 };
 QTEST_MAIN(TestModel)

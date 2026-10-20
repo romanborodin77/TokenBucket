@@ -10,6 +10,8 @@ public:
     static constexpr qsizetype MaxSecretBytes = 1024 * 1024;
     static constexpr qsizetype MaxPlainBytesCBOR = 64LL * 1024 * 1024;
     static constexpr int MaxDepth = 8;
+    static constexpr int MaxTags = 16;      // тегов на запись: верхняя граница UI-чипов и CBOR
+    static constexpr int MaxTagChars = 32;  // длина одного тега в символах QString
 
     QString addNode(Id id, Id parent, const QString& name);
     QString renameNode(Id id, const QString& name);
@@ -26,6 +28,13 @@ public:
     QList<Id> entriesInGroup(Id groupId) const;
     QList<Id> entriesInSubtree(Id groupId) const;
     QList<Id> search(const QString& needle) const;
+
+    // Нормализация тегов: trim, пустые отбрасываются, дедупликация без учёта регистра —
+    // каноничным считается первое написание. Инвариант всех тегов, хранящихся в модели.
+    static QStringList normalizeTags(const QStringList& raw);
+    QStringList allTags() const;                                 // уникальные теги хранилища, отсортированы без учёта регистра
+    QString renameTag(const QString& from, const QString& to);   // "" — успех, иначе текст ошибки
+    QString removeTag(const QString& tag);                       // "" — успех, иначе текст ошибки
 
     QByteArray toCbor() const;
     enum class ParseStatus { Ok, Bad, TooLarge };
