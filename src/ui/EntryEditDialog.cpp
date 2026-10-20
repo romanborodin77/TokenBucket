@@ -2,6 +2,7 @@
 #include "../vault/Crypto.h"
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCompleter>
 #include <QDialogButtonBox>
 #include <QEventLoop>
 #include <QFile>
@@ -24,6 +25,32 @@
 #include <sodium.h>
 #include <algorithm>
 using namespace tb::model;
+namespace {
+// Автодополнение последнего незавершённого тега после запятой.
+class TagCompleter : public QCompleter {
+public:
+    using QCompleter::QCompleter;
+protected:
+    // Стандартный QCompleter дополняет текст поля целиком, а в поле тегов
+    // кандидаты должны подбираться только по фрагменту после последней
+    // запятой — его и отдаём как «путь» для сопоставления.
+    QStringList splitPath(const QString& path) const override {
+        const int comma = path.lastIndexOf(QLatin1Char(','));
+        return {path.mid(comma + 1).trimmed()};
+    }
+    // Подстановка не должна затирать уже введённые теги: собираем весь текст
+    // поля заново — префикс до запятой, подобранный тег и хвост «, »,
+    // чтобы сразу можно было вводить следующий тег.
+    QString pathFromIndex(const QModelIndex& index) const override {
+        const QString completion = index.data(Qt::DisplayRole).toString();
+        const auto* edit = qobject_cast<const QLineEdit*>(widget());
+        if (!edit) return completion;
+        const QString text = edit->text();
+        const int comma = text.lastIndexOf(QLatin1Char(','));
+        return (comma >= 0 ? text.left(comma + 1) + QLatin1Char(' ') : QString()) + completion + QLatin1String(", ");
+    }
+};
+}
 namespace tb::ui {
 void populateGroups(QComboBox& combo, const VaultModel& model) {
     QList<QPair<QString, Id>> groups;
@@ -83,7 +110,17 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     note_->setObjectName(QStringLiteral("entryNote")); note_->setMaximumHeight(100);
     form->addRow(QStringLiteral("&Тип:"), type_); form->addRow(QStringLiteral("&Проект/группа:"), group_);
     form->addRow(QStringLiteral("&Название:"), title_); form->addRow(QStringLiteral("Адрес (&URL):"), url_);
-    form->addRow(QStringLiteral("&Заметка:"), note_); fields->addLayout(form);
+    form->addRow(QStringLiteral("&Заметка:"), note_);
+    // Теги: свободный ввод через запятую; подсказки — все теги хранилища (allTags).
+    tags_ = line(fields_, "entryTags"); tags_->setMaxLength(4096);
+    tags_->setPlaceholderText(QStringLiteral("теги через запятую, например: прод, сервер"));
+    tags_->setAccessibleName(QStringLiteral("Теги записи"));
+    auto* tagCompleter = new TagCompleter(model.allTags(), tags_);
+    tagCompleter->setCaseSensitivity(Qt::CaseInsensitive);
+    tagCompleter->setCompletionMode(QCompleter::InlineCompletion);
+    tags_->setCompleter(tagCompleter);
+    form->addRow(QStringLiteral("Т&еги:"), tags_);
+    fields->addLayout(form);
     auto* pages = new QStackedWidget(fields_);
     token_ = line(pages, "entryToken", true); auto* tokenPage = new QWidget(pages); auto* tokenForm = new QFormLayout(tokenPage);
     tokenForm->addRow(QStringLiteral("Т&окен:"), token_); pages->addWidget(tokenPage);
@@ -130,6 +167,7 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     type_->setCurrentIndex(int(original_.type)); pages->setCurrentIndex(type_->currentIndex());
     if (existing) setGroup(original_.groupId);
     title_->setText(original_.title); url_->setText(original_.url); note_->setPlainText(original_.note);
+    tags_->setText(original_.tags.join(QStringLiteral(", ")));
     token_->setText(original_.token); login_->setText(original_.login); password_->setText(original_.password);
     sshPass_->setText(original_.sshPassphrase); sshComment_->setText(original_.sshComment);
     sshPublic_->setPlainText(QString::fromUtf8(original_.sshPublic)); sshPublic_->document()->setModified(false);
@@ -149,6 +187,10 @@ void EntryEditDialog::accept() {
     e.type = EntryType(type_->currentIndex()); e.groupId = group_->currentData().value<Id>();
     e.title = title_->text(); e.url = url_->text(); e.note = note_->toPlainText();
     e.favorite = favorite_->isChecked(); e.reverify = reverify_->isChecked();
+    // Нормализация и лимиты тегов — зона ответственности модели: UI только делит
+    // текст по запятым, а пробный validation.setEntry ниже покажет нарушение
+    // (больше 16 тегов / длиннее 32 символов) в entryError без дублирования правил.
+    e.tags = VaultModel::normalizeTags(tags_->text().split(QLatin1Char(',')));
     if (e.title.isEmpty()) { error_->setText(QStringLiteral("Название обязательно.")); return; }
     if (e.type == EntryType::ApiToken) e.token = token_->text();
     else if (e.type == EntryType::Credentials) { e.login = login_->text(); e.password = password_->text(); }

@@ -15,14 +15,15 @@ public:
     void clearSecrets();
 public slots:
     void reject() override;
-protected:
+    // accept публичен, как и слот QDialog::accept, который он переопределяет:
+    // закрытие по сохранению можно вызывать напрямую (в том числе из тестов).
     void accept() override;
 private:
     const tb::model::VaultModel& model_;
     tb::model::Entry original_;
     std::optional<tb::model::Entry> result_;
     QComboBox *type_{}, *group_{};
-    QLineEdit *title_{}, *url_{}, *login_{}, *password_{}, *token_{}, *sshPass_{}, *sshPath_{}, *sshComment_{};
+    QLineEdit *title_{}, *url_{}, *login_{}, *password_{}, *token_{}, *sshPass_{}, *sshPath_{}, *sshComment_{}, *tags_{};
     QPlainTextEdit *note_{}, *sshPublic_{};
     QCheckBox *favorite_{}, *reverify_{};
     QLabel* error_{};

@@ -209,6 +209,21 @@ private slots:
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
         QVERIFY(dialog.entry()); QCOMPARE(dialog.entry()->token, entry.token);
     }
+    void entryTagsPersistThroughEditor() {
+        tb::model::VaultModel model;
+        auto group = QUuid::createUuid(); QVERIFY(model.addNode(group, {}, "P").isEmpty());
+        EntryEditDialog dialog(model, std::nullopt);
+        auto* tagsField = dialog.findChild<QLineEdit*>(QStringLiteral("entryTags"));
+        QVERIFY(tagsField);
+        tagsField->setText(QStringLiteral(" прод , Web , web "));
+        field(dialog, "entryTitle")->setText(QStringLiteral("С тегами"));
+        dialog.accept();
+        const auto saved = dialog.entry(); QVERIFY(saved);
+        QCOMPARE(saved->tags, (QStringList{QStringLiteral("прод"), QStringLiteral("Web")}));
+        EntryEditDialog reopen(model, *saved);
+        QCOMPARE(static_cast<QLineEdit*>(reopen.findChild<QLineEdit*>(QStringLiteral("entryTags")))->text(),
+                 QStringLiteral("прод, Web"));
+    }
     void sshRejectsUnsupportedOrOversizedFiles() {
         model::VaultModel model; const auto group = QUuid::createUuid(); QVERIFY(model.addNode(group, {}, "Проект").isEmpty());
         const QList<QByteArray> invalid{{}, "PuTTY-User-Key-File-3: ssh-ed25519", "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----", "-----BEGIN PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----", QByteArray(int(model::VaultModel::MaxSecretBytes) + 1, 'x')};
