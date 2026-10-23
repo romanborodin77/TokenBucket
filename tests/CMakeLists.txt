@@ -28,6 +28,9 @@ tb_add_test(test_e2e)
 tb_add_test(test_import)
 if(WIN32)
   tb_add_test(test_env_win)
+  add_test(NAME test_theme_win COMMAND test_ui themeModesApplyAndLoad -o "${CMAKE_CURRENT_BINARY_DIR}/test_theme_win.txt,txt")
+  set_tests_properties(test_theme_win PROPERTIES ENVIRONMENT
+    "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
   set_tests_properties(test_lock PROPERTIES ENVIRONMENT
     "QT_QPA_PLATFORM=windows;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
   set_tests_properties(test_paste_win PROPERTIES ENVIRONMENT

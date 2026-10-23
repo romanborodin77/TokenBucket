@@ -3,6 +3,7 @@
 #include <QPalette>
 #include <QSettings>
 #include <QStyle>
+#include <QStyleHints>
 namespace tb::ui::theme {
 Mode load() {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
@@ -26,6 +27,9 @@ Mode systemMode() {
 }
 void apply(Mode mode) {
     if (mode == Mode::System) mode = systemMode();
+#if defined(Q_OS_WIN) && QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QApplication::styleHints()->setColorScheme(mode == Mode::Dark ? Qt::ColorScheme::Dark : Qt::ColorScheme::Light);
+#endif
     // Fusion + палитры вместо QSS: единый вид контролов в обеих темах и на всех платформах,
     // тема применяется до создания окон и переключается на лету.
     QApplication::setStyle(QStringLiteral("Fusion"));

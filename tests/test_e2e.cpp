@@ -74,6 +74,7 @@ private slots:
         QApplication::clipboard()->setText("marker");
         panel.popup();
         panel.findChild<QLineEdit*>("miniSearch")->setText("protected");
+        QString reopenedStatus;
         QTimer answer; answer.setInterval(10);
         connect(&answer, &QTimer::timeout, &panel, [&] {
             if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
@@ -81,7 +82,11 @@ private slots:
                 if (interruption == 1) { dialog->reject(); return; }
                 if (interruption == 2) { vault.lock(); return; }
                 if (interruption == 3) vault.model()->removeEntry(e.id);
-                if (interruption == 4) { panel.popup(); panel.popup(); }
+                if (interruption == 4) {
+                    panel.popup(); panel.popup();
+                    panel.findChild<QLineEdit*>("miniSearch")->setText("new-context-missing");
+                    reopenedStatus = panel.findChild<QLabel*>("miniStatus")->text();
+                }
                 dialog->setTextValue("test-password-123"); dialog->accept();
             }
         });
@@ -92,7 +97,10 @@ private slots:
         QCOMPARE(QApplication::clipboard()->text(), interruption ? QStringLiteral("marker") : e.token);
         if (interruption == 0 || interruption == 2) QVERIFY(!panel.isVisible());
         else if (interruption != 4) QVERIFY(panel.isVisible());
-        if (interruption == 4) QVERIFY(panel.findChild<QLabel*>("miniStatus")->text().isEmpty());
+        if (interruption == 4) {
+            QCOMPARE(panel.findChild<QLabel*>("miniStatus")->text(), panel.isVisible() ? reopenedStatus : QString());
+            if (panel.isVisible()) QCOMPARE(panel.findChild<QLineEdit*>("miniSearch")->text(), QStringLiteral("new-context-missing"));
+        }
         panel.close(); clip.clearIfOurs();
     }
     void quickPanelCancelPublication() {
