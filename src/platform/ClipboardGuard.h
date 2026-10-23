@@ -15,6 +15,8 @@ public:
     explicit ClipboardGuard(QObject* parent = nullptr);
     ~ClipboardGuard() override;
     bool copySecret(const QString& text, QString* err);
+    struct Snapshot { bool owned = false; bool clearPending = false; int remainingMs = -1; };
+    Snapshot snapshot() const;
     void cancelPendingCopy() { if (copying_) ++epoch_; }
     void clearIfOurs();
     void triggerClearNowForTest() { clearIfOurs(); }
@@ -24,6 +26,7 @@ private:
     QTimer timer_;
     quint64 epoch_ = 0;   // счётчик наших публикаций: очистка применяется только к последней
     bool copying_ = false, clearing_ = false, destroying_ = false;
+    bool clearPending_ = false;
 #ifdef Q_OS_WIN
     bool open(quint64 epoch);
     void* owner_ = nullptr;          // наше окно-владелец публикации (формат ExcludeClipboardContentFromMonitorProcessing требует HWND)

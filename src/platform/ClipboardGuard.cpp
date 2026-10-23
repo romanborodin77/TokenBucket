@@ -71,7 +71,7 @@ bool ClipboardGuard::copySecret(const QString& text, QString* err) {
     if (!open(epoch)) return fail("Буфер обмена занят или копирование отменено.");
     auto close = qScopeGuard([] { CloseClipboard(); });
     if (epoch != epoch_ || !EmptyClipboard()) return fail("Не удалось открыть буфер для записи.");
-    sequence_ = 0;
+    sequence_ = 0; clearPending_ = false;
     if (!history.publish(historyFormat) || !cloud.publish(cloudFormat) || !exclude.publish(excludeFormat)
         || epoch != epoch_ || !data.publish(CF_UNICODETEXT) || epoch != epoch_) {
         EmptyClipboard(); timer_.stop(); return fail("Не удалось выполнить защищённое копирование.");
@@ -85,17 +85,27 @@ bool ClipboardGuard::copySecret(const QString& text, QString* err) {
     QApplication::clipboard()->setMimeData(data, QClipboard::Clipboard);
     if (epoch != epoch_) { clearIfOurs(); return fail("Копирование отменено."); }
 #endif
-    timer_.start(20000); return true;
+    clearPending_ = false; timer_.start(20000); return true;
+}
+ClipboardGuard::Snapshot ClipboardGuard::snapshot() const {
+#ifdef Q_OS_WIN
+    const bool owned = sequence_ != 0 && GetClipboardSequenceNumber() == sequence_
+        && GetClipboardOwner() == static_cast<HWND>(owner_);
+    return {owned, owned && clearPending_, owned ? timer_.remainingTime() : -1};
+#else
+    return {};
+#endif
 }
 void ClipboardGuard::clearIfOurs() {
     ++epoch_; timer_.stop(); if (clearing_) return; QScopedValueRollback busy(clearing_, true);
 #ifdef Q_OS_WIN
-    if (!sequence_) return;
+    if (!sequence_) { clearPending_ = false; return; }
+    clearPending_ = true;
     if (!open(epoch_)) { if (!destroying_) timer_.start(500); return; }
     auto close = qScopeGuard([] { CloseClipboard(); });
-    if (GetClipboardSequenceNumber() != sequence_ || GetClipboardOwner() != static_cast<HWND>(owner_)) { sequence_ = 0; return; }
+    if (GetClipboardSequenceNumber() != sequence_ || GetClipboardOwner() != static_cast<HWND>(owner_)) { sequence_ = 0; clearPending_ = false; return; }
     if (!EmptyClipboard()) { if (!destroying_) timer_.start(500); return; }
-    sequence_ = 0;
+    sequence_ = 0; clearPending_ = false;
 #else
     auto* clipboard = QApplication::clipboard();
     const auto* data = clipboard->mimeData(QClipboard::Clipboard);

@@ -8,6 +8,7 @@ IdleTimer::IdleTimer(int timeoutMs, QObject* parent) : QObject(parent) {
     qApp->installEventFilter(this); poke();
 }
 void IdleTimer::poke() { if (active_) timer_.start(); }
+int IdleTimer::remainingMs() const { return active_ ? timer_.remainingTime() : -1; }
 void IdleTimer::setActive(bool active) {
     if (active_ == active) return;
     active_ = active; if (active) poke(); else timer_.stop();

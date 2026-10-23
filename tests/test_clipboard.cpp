@@ -105,6 +105,30 @@ private slots:
         QCOMPARE(clipboardText(), QStringLiteral("second")); guard.clearIfOurs(); QVERIFY(clipboardText().isEmpty());
     }
 #ifdef Q_OS_WIN
+    void snapshotTracksOwnershipAndRetry() {
+        tb::ClipboardGuard guard; QString error;
+        QVERIFY(guard.copySecret(QStringLiteral("synthetic-owned"), &error));
+        auto state = guard.snapshot();
+        QVERIFY(state.owned); QVERIFY(!state.clearPending); QVERIFY(state.remainingMs > 0);
+        QVERIFY(openTestClipboard(foreign_));
+        QElapsedTimer elapsed; elapsed.start();
+        state = guard.snapshot();
+        const auto snapshotMs = elapsed.elapsed();
+        guard.clearIfOurs();
+        state = guard.snapshot();
+        CloseClipboard();
+        QVERIFY(snapshotMs < 50);
+        QVERIFY(state.owned); QVERIFY(state.clearPending);
+        QTRY_VERIFY(!guard.snapshot().owned);
+        QVERIFY(!guard.snapshot().clearPending);
+        QVERIFY(guard.copySecret(QStringLiteral("synthetic-owned"), &error));
+        QVERIFY(foreignText(foreign_, QStringLiteral("synthetic-foreign")));
+        QVERIFY(!guard.snapshot().owned);
+        QCOMPARE(guard.snapshot().remainingMs, -1);
+        guard.clearIfOurs();
+        QCOMPARE(clipboardText(), QStringLiteral("synthetic-foreign"));
+        QVERIFY(!guard.snapshot().clearPending);
+    }
     void historyFormatsAndBusyCancellation() {
         tb::ClipboardGuard guard; QString error; QVERIFY(guard.copySecret(QStringLiteral("ours"), &error));
         QVERIFY(openTestClipboard(foreign_));

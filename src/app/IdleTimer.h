@@ -14,6 +14,7 @@ public:
     void poke();              // перезапустить отсчёт (любая активность)
     void setActive(bool active);
     void setIntervalMs(int ms);
+    int remainingMs() const;
 signals:
     void idleTimeout();
 protected:

@@ -12,6 +12,25 @@
 class TestLock : public QObject {
     Q_OBJECT
 private slots:
+    void remainingReadDoesNotRestart() {
+        tb::IdleTimer timer(120);
+        QSignalSpy expired(&timer, &tb::IdleTimer::idleTimeout);
+        const int before = timer.remainingMs();
+        QVERIFY(before > 0);
+        QTest::qWait(35);
+        QVERIFY(timer.remainingMs() < before);
+        for (int i = 0; i < 20; ++i) (void)timer.remainingMs();
+        QTRY_COMPARE(expired.count(), 1);
+        QCOMPARE(timer.remainingMs(), -1);
+        timer.setIntervalMs(200);
+        QVERIFY(timer.remainingMs() > 120);
+        timer.setActive(false);
+        QCOMPARE(timer.remainingMs(), -1);
+        timer.poke();
+        QCOMPARE(timer.remainingMs(), -1);
+        timer.setActive(true);
+        QVERIFY(timer.remainingMs() > 0);
+    }
     void idleTracksInputAndStopsWhileLocked() {
         tb::IdleTimer timer(100); QSignalSpy timeout(&timer, &tb::IdleTimer::idleTimeout);
         QWidget widget;
