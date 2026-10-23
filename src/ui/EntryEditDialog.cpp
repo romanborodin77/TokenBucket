@@ -17,7 +17,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScopedValueRollback>
-#include <QStackedWidget>
 #include <QScrollArea>
 #include <QScreen>
 #include <QTextDocument>
@@ -101,14 +100,16 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     : QDialog(parent), model_(model), original_(existing.value_or(Entry{})) {
     setWindowTitle(existing ? QStringLiteral("Изменение записи") : QStringLiteral("Новая запись"));
     auto* layout = new QVBoxLayout(this);
-    fields_ = new QWidget(this); auto* fields = new QVBoxLayout(fields_); fields->setContentsMargins(0,0,0,0);
+    layout->setContentsMargins(12, 12, 12, 12); layout->setSpacing(8);
+    fields_ = new QWidget(this); auto* fields = new QVBoxLayout(fields_); fields->setContentsMargins(0,0,0,0); fields->setSpacing(8);
+    fields->setSizeConstraint(QLayout::SetMinAndMaxSize);
     auto* form = new QFormLayout;
     type_ = new QComboBox(fields_); type_->setObjectName(QStringLiteral("entryType"));
     type_->addItems({QStringLiteral("API-токен"), QStringLiteral("Учётные данные"), QStringLiteral("SSH-ключ")});
     type_->setEnabled(!existing.has_value());
     group_ = new QComboBox(fields_); group_->setObjectName(QStringLiteral("entryGroup")); tb::ui::populateGroups(*group_, model);
     title_ = line(fields_, "entryTitle"); url_ = line(fields_, "entryUrl"); note_ = new QPlainTextEdit(fields_);
-    note_->setObjectName(QStringLiteral("entryNote")); note_->setMaximumHeight(100);
+    note_->setObjectName(QStringLiteral("entryNote")); note_->setFixedHeight(note_->fontMetrics().lineSpacing() * 3 + 12);
     form->addRow(QStringLiteral("&Тип:"), type_); form->addRow(QStringLiteral("&Проект/группа:"), group_);
     form->addRow(QStringLiteral("&Название:"), title_); form->addRow(QStringLiteral("Адрес (&URL):"), url_);
     form->addRow(QStringLiteral("&Заметка:"), note_);
@@ -129,9 +130,9 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     tags_->setCompleter(tagCompleter);
     form->addRow(QStringLiteral("Т&еги:"), tags_);
     fields->addLayout(form);
-    auto* pages = new QStackedWidget(fields_);
+    auto* pages = new QWidget(fields_); auto* pageLayout = new QVBoxLayout(pages); pageLayout->setContentsMargins(0,0,0,0);
     token_ = line(pages, "entryToken", true); auto* tokenPage = new QWidget(pages); auto* tokenForm = new QFormLayout(tokenPage);
-    tokenForm->addRow(QStringLiteral("Т&окен:"), token_); pages->addWidget(tokenPage);
+    tokenForm->addRow(QStringLiteral("Т&окен:"), token_); pageLayout->addWidget(tokenPage);
     auto* credentials = new QWidget(pages); auto* credentialsForm = new QFormLayout(credentials);
     login_ = line(credentials, "entryLogin"); password_ = line(credentials, "entryPassword", true);
     auto* passwordRow = new QWidget(credentials); auto* passwordLayout = new QHBoxLayout(passwordRow);
@@ -139,27 +140,40 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     auto* generate = new QPushButton(QStringLiteral("Сгенерировать"), passwordRow); generate->setObjectName(QStringLiteral("generatePassword"));
     generate->setToolTip(QStringLiteral("Случайный пароль из 24 символов без похожих знаков (0/O, 1/l/I)"));
     passwordLayout->addWidget(generate);
-    credentialsForm->addRow(QStringLiteral("&Логин:"), login_); credentialsForm->addRow(QStringLiteral("П&ароль:"), passwordRow); pages->addWidget(credentials);
+    credentialsForm->addRow(QStringLiteral("&Логин:"), login_); credentialsForm->addRow(QStringLiteral("П&ароль:"), passwordRow); pageLayout->addWidget(credentials);
     auto* ssh = new QWidget(pages); auto* sshForm = new QFormLayout(ssh);
     sshPath_ = line(ssh, "sshPrivatePath"); sshPath_->setPlaceholderText(existing ? QStringLiteral("Пусто — сохранить прежний ключ") : QStringLiteral("Выберите файл приватного ключа"));
+    sshPath_->setAccessibleName(QStringLiteral("Файл приватного ключа"));
     auto* browse = new QPushButton(QStringLiteral("Выбрать файл…"), ssh);
-    sshPublic_ = new QPlainTextEdit(ssh); sshPublic_->setObjectName(QStringLiteral("sshPublic")); sshPublic_->setMaximumHeight(70);
+    browse->setObjectName(QStringLiteral("browseSshKey"));
+    auto* keyRow = new QWidget(ssh); auto* keyLayout = new QHBoxLayout(keyRow); keyLayout->setContentsMargins(0,0,0,0);
+    keyLayout->addWidget(sshPath_, 1); keyLayout->addWidget(browse);
+    sshPublic_ = new QPlainTextEdit(ssh); sshPublic_->setObjectName(QStringLiteral("sshPublic")); sshPublic_->setFixedHeight(sshPublic_->fontMetrics().lineSpacing() * 3 + 12);
     sshPass_ = line(ssh, "sshPassphrase", true); sshComment_ = line(ssh, "sshComment");
-    sshForm->addRow(QStringLiteral("Файл п&риватного ключа:"), sshPath_); sshForm->addRow(browse);
+    sshForm->addRow(QStringLiteral("Файл п&риватного ключа:"), keyRow);
+    qobject_cast<QLabel*>(sshForm->labelForField(keyRow))->setBuddy(sshPath_);
     sshForm->addRow(QStringLiteral("Публичный ключ:"), sshPublic_);
     sshForm->addRow(QStringLiteral("Парольная фраза:"), sshPass_); sshForm->addRow(QStringLiteral("Описание ключа:"), sshComment_);
-    pages->addWidget(ssh); fields->addWidget(pages);
-    for (auto* layout : {form, tokenForm, credentialsForm, sshForm}) layout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    pageLayout->addWidget(ssh); fields->addWidget(pages);
+    auto* options = new QFormLayout;
+    for (auto* layout : {form, tokenForm, credentialsForm, sshForm, options}) {
+        layout->setRowWrapPolicy(QFormLayout::WrapLongRows); layout->setContentsMargins(0,0,0,0); layout->setVerticalSpacing(6);
+    }
     favorite_ = new QCheckBox(QStringLiteral("Избранное"), fields_); favorite_->setObjectName(QStringLiteral("entryFavorite"));
     reverify_ = new QCheckBox(QStringLiteral("Повторная проверка при показе и копировании"), fields_); reverify_->setObjectName(QStringLiteral("entryReverify"));
-    fields->addWidget(favorite_); fields->addWidget(reverify_);
+    options->addRow(favorite_, reverify_); fields->addLayout(options);
     auto* scroll = new QScrollArea(this); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(fields_); layout->addWidget(scroll, 1);
-    error_ = new QLabel(this); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); error_->setObjectName(QStringLiteral("entryError")); layout->addWidget(error_);
+    error_ = new QLabel(this); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); error_->setObjectName(QStringLiteral("entryError")); error_->hide(); layout->addWidget(error_);
     buttons_ = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     buttons_->button(QDialogButtonBox::Save)->setText(QStringLiteral("Сохранить")); buttons_->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена")); layout->addWidget(buttons_);
     connect(buttons_, &QDialogButtonBox::accepted, this, &EntryEditDialog::accept);
     connect(buttons_, &QDialogButtonBox::rejected, this, &EntryEditDialog::reject);
-    connect(type_, &QComboBox::currentIndexChanged, pages, &QStackedWidget::setCurrentIndex);
+    const auto showType = [this, pages, tokenPage, credentials, ssh](int type) {
+        tokenPage->setVisible(type == 0); credentials->setVisible(type == 1); ssh->setVisible(type == 2);
+        pages->layout()->activate(); pages->updateGeometry();
+        fitToContents();
+    };
+    connect(type_, &QComboBox::currentIndexChanged, this, showType);
     connect(browse, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Приватный ключ SSH"));
         if (!path.isEmpty()) sshPath_->setText(path);
@@ -172,7 +186,7 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
         for (int i = 0; i < 24; ++i) password += alphabet.at(int(randombytes_uniform(uint(alphabet.size()))));
         password_->setText(password);
     });
-    type_->setCurrentIndex(int(original_.type)); pages->setCurrentIndex(type_->currentIndex());
+    type_->setCurrentIndex(int(original_.type));
     if (existing) setGroup(original_.groupId);
     title_->setText(original_.title); url_->setText(original_.url); note_->setPlainText(original_.note);
     tags_->setText(original_.tags.join(QStringLiteral(", ")));
@@ -181,9 +195,26 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     sshPublic_->setPlainText(QString::fromUtf8(original_.sshPublic)); sshPublic_->document()->setModified(false);
     favorite_->setChecked(original_.favorite); reverify_->setChecked(original_.reverify);
     if (original_.expiresAt.isValid()) { expiry_->setChecked(true); expiryDate_->setDate(original_.expiresAt.date()); }
-    const auto available = screen()->availableGeometry();
-    resize(qMin(580, available.width() - 40), qMin(sizeHint().height(), available.height() - 80)); title_->setFocus();
+    showType(type_->currentIndex()); title_->setFocus();
 }
+void EntryEditDialog::fitToContents() {
+    const auto available = screen()->availableGeometry();
+    const int targetWidth = qMin(isVisible() ? width() : 580, available.width() - 40);
+    const auto margins = layout()->contentsMargins();
+    const int contentWidth = targetWidth - margins.left() - margins.right();
+    fields_->layout()->activate();
+    int contentHeight = fields_->heightForWidth(contentWidth);
+    if (contentHeight < 0) contentHeight = fields_->sizeHint().height();
+    int height = contentHeight + margins.top() + margins.bottom() + buttons_->sizeHint().height() + layout()->spacing();
+    if (!error_->isHidden()) height += error_->heightForWidth(contentWidth) + layout()->spacing();
+    resize(targetWidth, qMin(height, available.height() - 80));
+    if (isVisible()) {
+        const auto frame = frameGeometry();
+        move(qBound(available.left(), frame.left(), available.right() - frame.width() + 1),
+             qBound(available.top(), frame.top(), available.bottom() - frame.height() + 1));
+    }
+}
+void EntryEditDialog::showError(const QString& message) { error_->setText(message); error_->show(); fitToContents(); }
 EntryEditDialog::~EntryEditDialog() { clearSecrets(); }
 void EntryEditDialog::setGroup(Id id) { group_->setCurrentIndex(id.isNull() ? -1 : group_->findData(id)); }
 void EntryEditDialog::clearSecrets() {
@@ -202,7 +233,7 @@ void EntryEditDialog::accept() {
     // текст по запятым, а пробный validation.setEntry ниже покажет нарушение
     // (больше 16 тегов / длиннее 32 символов) в entryError без дублирования правил.
     e.tags = VaultModel::normalizeTags(tags_->text().split(QLatin1Char(',')));
-    if (e.title.isEmpty()) { error_->setText(QStringLiteral("Название обязательно.")); return; }
+    if (e.title.isEmpty()) { showError(QStringLiteral("Название обязательно.")); return; }
     if (e.type == EntryType::ApiToken) e.token = token_->text();
     else if (e.type == EntryType::Credentials) { e.login = login_->text(); e.password = password_->text(); }
     else {
@@ -219,13 +250,13 @@ void EntryEditDialog::accept() {
             const auto read = watcher.result();
             fields_->setEnabled(true); buttons_->button(QDialogButtonBox::Save)->setEnabled(true);
             if (canceled_) return;
-            if (!read.error.isEmpty()) { error_->setText(read.error); return; }
+            if (!read.error.isEmpty()) { showError(read.error); return; }
             e.sshPrivate = read.bytes;
         }
-        if (e.sshPrivate.isEmpty()) { error_->setText(QStringLiteral("Выберите файл приватного ключа.")); return; }
+        if (e.sshPrivate.isEmpty()) { showError(QStringLiteral("Выберите файл приватного ключа.")); return; }
     }
     auto validation = model_; const auto error = validation.setEntry(e);
-    if (!error.isEmpty()) { error_->setText(error); return; }
+    if (!error.isEmpty()) { showError(error); return; }
     e.modified = QDateTime::currentDateTimeUtc(); if (!e.created.isValid()) e.created = e.modified;
     result_ = std::move(e); QDialog::accept();
 }

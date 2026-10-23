@@ -3,7 +3,7 @@
 #include <optional>
 #include "../model/VaultModel.h"
 class QComboBox; class QLineEdit; class QPlainTextEdit; class QCheckBox; class QLabel; class QDateEdit;
-class QDialogButtonBox; class QStackedWidget;
+class QDialogButtonBox;
 namespace tb::ui { void populateGroups(QComboBox& combo, const model::VaultModel& model); }
 class EntryEditDialog : public QDialog {
     Q_OBJECT
@@ -19,6 +19,8 @@ public slots:
     // закрытие по сохранению можно вызывать напрямую (в том числе из тестов).
     void accept() override;
 private:
+    void fitToContents();
+    void showError(const QString& message);
     const tb::model::VaultModel& model_;
     tb::model::Entry original_;
     std::optional<tb::model::Entry> result_;

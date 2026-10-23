@@ -25,6 +25,8 @@
 #include <QSplitter>
 #include <QSignalSpy>
 #include <QMenu>
+#include <QScrollArea>
+#include <QScrollBar>
 #include "../src/app/Application.h"
 #include "../src/app/IdleTimer.h"
 #include "../src/ui/MainWindow.h"
@@ -60,6 +62,59 @@ class TestUi : public QObject {
     }
 private slots:
     void init() { uiPreferences_.clear(); }
+    void entryEditorFitsVisibleFields() {
+        model::VaultModel model; const auto group = QUuid::createUuid();
+        QVERIFY(model.addNode(group, {}, "Project").isEmpty());
+        EntryEditDialog dialog(model, std::nullopt); dialog.setGroup(group); dialog.show();
+        QCoreApplication::processEvents();
+        const auto capture = [&](const QString& name) {
+            QCoreApplication::processEvents();
+            const auto dir = qEnvironmentVariable("TOKENBUCKET_UI_CAPTURE_DIR");
+            if (!dir.isEmpty()) QVERIFY(dialog.grab().save(QDir(dir).filePath(name + ".png")));
+        };
+        auto* type = dialog.findChild<QComboBox*>("entryType"); QVERIFY(type);
+        auto* note = dialog.findChild<QPlainTextEdit*>("entryNote"); QVERIFY(note);
+        note->setPlainText(QString(1000, QChar('x')));
+        field(dialog, "entryToken")->setText("synthetic-token");
+        const auto compact = dialog.height(); capture("api-token");
+        type->setCurrentIndex(2);
+        const bool spacious = dialog.screen()->availableGeometry().height() >= 800 && dialog.width() >= 580;
+        if (spacious) QTRY_VERIFY(dialog.height() > compact + 40);
+        const auto expanded = dialog.height(); capture("ssh-key");
+        auto* path = field(dialog, "sshPrivatePath");
+        auto* accessible = QAccessible::queryAccessibleInterface(path); QVERIFY(accessible);
+        QVERIFY(accessible->text(QAccessible::Name).contains(QStringLiteral("приватного")));
+        auto* browse = dialog.findChild<QPushButton*>("browseSshKey"); QVERIFY(browse);
+        QVERIFY(qAbs(path->mapTo(&dialog, path->rect().center()).y() - browse->mapTo(&dialog, browse->rect().center()).y()) <= 2);
+        auto* scroll = dialog.findChild<QScrollArea*>();
+        if (spacious) QTRY_COMPARE(scroll->verticalScrollBar()->maximum(), 0);
+        type->setCurrentIndex(1); if (spacious) QTRY_VERIFY(dialog.height() < expanded); capture("credentials");
+        type->setCurrentIndex(0); QTRY_COMPARE(dialog.height(), compact);
+        QCOMPARE(field(dialog, "entryToken")->text(), QStringLiteral("synthetic-token"));
+        QCOMPARE(note->toPlainText(), QString(1000, QChar('x')));
+        auto* favorite = dialog.findChild<QCheckBox*>("entryFavorite");
+        auto* reverify = dialog.findChild<QCheckBox*>("entryReverify");
+        if (dialog.width() >= 580) QVERIFY(qAbs(favorite->mapTo(&dialog, favorite->rect().center()).y() - reverify->mapTo(&dialog, reverify->rect().center()).y()) <= 2);
+        QVERIFY(note->height() <= note->fontMetrics().lineSpacing() * 4 + 12);
+        dialog.accept();
+        QVERIFY(dialog.findChild<QLabel*>("entryError")->isVisible());
+        if (spacious) QTRY_VERIFY(dialog.height() > compact); capture("validation-error");
+    }
+    void entryEditorFitsAvailableScreen() {
+        model::VaultModel model; EntryEditDialog dialog(model, std::nullopt); dialog.show();
+        const auto area = dialog.screen()->availableGeometry();
+        for (int type = 0; type < 3; ++type) {
+            dialog.findChild<QComboBox*>("entryType")->setCurrentIndex(type); QCoreApplication::processEvents();
+            QVERIFY(dialog.frameGeometry().width() <= area.width());
+            QVERIFY(dialog.frameGeometry().height() <= area.height());
+            QTRY_COMPARE(dialog.findChild<QScrollArea*>()->horizontalScrollBar()->maximum(), 0);
+            const auto* save = dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save);
+            QVERIFY(dialog.rect().contains(save->mapTo(&dialog, save->rect().center())));
+            const auto dir = qEnvironmentVariable("TOKENBUCKET_UI_CAPTURE_DIR");
+            if (!dir.isEmpty()) QVERIFY(dialog.grab().save(QDir(dir).filePath(QStringLiteral("screen-%1.png").arg(type))));
+        }
+        if (area.height() <= 600) QVERIFY(dialog.findChild<QScrollArea*>()->verticalScrollBar()->maximum() > 0);
+    }
     void libraryRowsDoNotExposeSecrets() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
