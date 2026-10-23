@@ -7,6 +7,7 @@
 namespace tb::platform { class QuickPaste; }
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox;
 class QScrollArea; class QLabel; class QAction;
+class QPushButton;
 namespace tb::ui {
 class EntryCard;
 // Главное окно: дерево проектов/групп — список записей с фильтрами/сортировкой —
@@ -63,6 +64,14 @@ protected:
     void resizeEvent(QResizeEvent*) override;
     void closeEvent(QCloseEvent*) override;
 private:
+    enum class LibraryView { All, Favorites, Expiring, Group };
+    void setLibraryView(LibraryView view);
+    void updateLibraryCounts();
+    QString groupPath(model::Id id) const;
+    LibraryView libraryView_ = LibraryView::All;
+    QPushButton *libraryAll_{}, *libraryFavorites_{}, *libraryExpiring_{};
+    QLabel *searchScope_{}, *listSummary_{};
+    model::Id displayedEntry_;
     bool ready() const;
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
     void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);

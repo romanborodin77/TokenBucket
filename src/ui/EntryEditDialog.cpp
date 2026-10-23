@@ -185,7 +185,7 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     resize(qMin(580, available.width() - 40), qMin(sizeHint().height(), available.height() - 80)); title_->setFocus();
 }
 EntryEditDialog::~EntryEditDialog() { clearSecrets(); }
-void EntryEditDialog::setGroup(Id id) { const int index = group_->findData(id); if (index >= 0) group_->setCurrentIndex(index); }
+void EntryEditDialog::setGroup(Id id) { group_->setCurrentIndex(id.isNull() ? -1 : group_->findData(id)); }
 void EntryEditDialog::clearSecrets() {
     token_->clear(); password_->clear(); sshPass_->clear(); original_ = Entry{}; result_.reset();
 }

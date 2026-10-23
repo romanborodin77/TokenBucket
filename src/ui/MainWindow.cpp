@@ -206,9 +206,27 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     layout->addWidget(tagBar_);
     connect(typeFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     connect(sortMode_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
-    connect(expiryFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
+    connect(expiryFilter_, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (libraryView_ == LibraryView::Expiring) {
+            libraryView_ = LibraryView::All;
+            libraryAll_->setChecked(true); libraryExpiring_->setChecked(false);
+        }
+        refillList();
+    });
     auto* splitter = new QSplitter(central);
-    auto* vaultTree = new VaultTree(splitter); tree_ = vaultTree;
+    auto* library = new QWidget(splitter); auto* libraryLayout = new QVBoxLayout(library);
+    libraryLayout->setContentsMargins(0, 0, 0, 0);
+    libraryLayout->addWidget(new QLabel(QStringLiteral("Библиотека"), library));
+    libraryAll_ = new QPushButton(library); libraryAll_->setObjectName(QStringLiteral("libraryAll"));
+    libraryFavorites_ = new QPushButton(library); libraryFavorites_->setObjectName(QStringLiteral("libraryFavorites"));
+    libraryExpiring_ = new QPushButton(library); libraryExpiring_->setObjectName(QStringLiteral("libraryExpiring"));
+    for (auto* button : {libraryAll_, libraryFavorites_, libraryExpiring_}) {
+        button->setCheckable(true); libraryLayout->addWidget(button);
+    }
+    connect(libraryAll_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::All); });
+    connect(libraryFavorites_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::Favorites); });
+    connect(libraryExpiring_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::Expiring); });
+    auto* vaultTree = new VaultTree(library); tree_ = vaultTree; libraryLayout->addWidget(tree_, 1);
     vaultTree->moveRequest = [this](model::Id node, model::Id target) { return moveNodeTo(node, target); };
     vaultTree->setDragEnabled(true); vaultTree->setAcceptDrops(true);
     vaultTree->setDragDropMode(QAbstractItemView::InternalMove); vaultTree->setDefaultDropAction(Qt::MoveAction);
@@ -220,12 +238,16 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     hint->setWordWrap(true); hint->setTextFormat(Qt::PlainText); right_->addWidget(hint);
     cardScroll_ = new QScrollArea(right_); cardScroll_->setWidgetResizable(true); cardScroll_->setFrameShape(QFrame::NoFrame);
     card_ = new EntryCard(app_, cardScroll_); cardScroll_->setWidget(card_); right_->addWidget(cardScroll_);
-    splitter->addWidget(tree_); splitter->addWidget(list_); splitter->addWidget(right_); splitter->setSizes({250,300,500}); layout->addWidget(splitter, 1);
+    splitter->addWidget(library); splitter->addWidget(list_); splitter->addWidget(right_); splitter->setSizes({250,300,500});
+    searchScope_ = new QLabel(central); searchScope_->setObjectName(QStringLiteral("searchScope")); searchScope_->setTextFormat(Qt::PlainText);
+    listSummary_ = new QLabel(central); listSummary_->setObjectName(QStringLiteral("listSummary")); listSummary_->setTextFormat(Qt::PlainText);
+    layout->addWidget(searchScope_); layout->addWidget(listSummary_); layout->addWidget(splitter, 1);
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, &MainWindow::treeMenu);
     list_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(list_, &QListWidget::customContextMenuRequested, this, &MainWindow::listMenu);
     connect(new QShortcut(QKeySequence::Find, this), &QShortcut::activated, this, [this] { search_->setFocus(Qt::ShortcutFocusReason); search_->selectAll(); });
+    connect(new QShortcut(QKeySequence(QStringLiteral("Ctrl+K")), this), &QShortcut::activated, this, [this] { search_->setFocus(Qt::ShortcutFocusReason); search_->selectAll(); });
     auto* clearSearch = new QShortcut(QKeySequence(Qt::Key_Escape), search_); clearSearch->setContext(Qt::WidgetShortcut);
     connect(clearSearch, &QShortcut::activated, search_, &QLineEdit::clear);
     auto* deleteEntry = new QShortcut(QKeySequence::Delete, list_); deleteEntry->setContext(Qt::WidgetWithChildrenShortcut);
@@ -236,7 +258,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     setCentralWidget(central);
     vaultInfo_ = new QLabel(statusBar()); vaultInfo_->setTextFormat(Qt::PlainText);
     statusBar()->addPermanentWidget(vaultInfo_);
-    connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { refillList(); });
+    connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { if (tree_->currentItem()) setLibraryView(LibraryView::Group); });
     connect(search_, &QLineEdit::textChanged, this, [this] { refillList(); });
     connect(list_, &QListWidget::currentItemChanged, this, &MainWindow::showMetadata);
     connect(list_, &QListWidget::itemDoubleClicked, this, [this] { if (!narrow_) editSelected(); });
@@ -291,6 +313,40 @@ void MainWindow::selectNode(model::Id id) {
         tree_->setCurrentItem(*item); tree_->scrollToItem(*item); return;
     }
 }
+QString MainWindow::groupPath(model::Id id) const {
+    QStringList parts;
+    for (int depth = 0; !id.isNull() && depth < model::VaultModel::MaxDepth; ++depth) {
+        const auto it = app_.model()->nodes().constFind(id);
+        if (it == app_.model()->nodes().cend()) break;
+        parts.prepend(it->name); id = it->parent;
+    }
+    return parts.join(QStringLiteral(" / "));
+}
+void MainWindow::setLibraryView(LibraryView view) {
+    libraryView_ = view;
+    if (view != LibraryView::Group) { QSignalBlocker block(tree_); tree_->setCurrentItem(nullptr); tree_->clearSelection(); }
+    libraryAll_->setChecked(view == LibraryView::All);
+    libraryFavorites_->setChecked(view == LibraryView::Favorites);
+    libraryExpiring_->setChecked(view == LibraryView::Expiring);
+    { QSignalBlocker block(expiryFilter_); expiryFilter_->setCurrentIndex(view == LibraryView::Expiring ? 1 : 0); }
+    refillList();
+}
+void MainWindow::updateLibraryCounts() {
+    int all = 0, favorites = 0, expiring = 0;
+    if (app_.gate() == Application::Gate::Ready) {
+        for (const auto& entry : app_.model()->entries()) {
+            ++all; favorites += entry.favorite;
+            const auto days = QDateTime::currentDateTimeUtc().daysTo(entry.expiresAt);
+            expiring += entry.expiresAt.isValid() && days >= 0 && days <= model::VaultModel::ExpiryWarningDays;
+        }
+    }
+    libraryAll_->setText(QStringLiteral("Все записи · %1").arg(all));
+    libraryFavorites_->setText(QStringLiteral("Избранное · %1").arg(favorites));
+    libraryExpiring_->setText(QStringLiteral("Истекают · %1").arg(expiring));
+    libraryAll_->setChecked(libraryView_ == LibraryView::All);
+    libraryFavorites_->setChecked(libraryView_ == LibraryView::Favorites);
+    libraryExpiring_->setChecked(libraryView_ == LibraryView::Expiring);
+}
 void MainWindow::refreshAll() {
     const auto node = selectedNode(), entry = selectedEntry();
     QSignalBlocker block(tree_); tree_->clear();
@@ -304,13 +360,14 @@ void MainWindow::refreshAll() {
             }
         };
         add({}, nullptr); tree_->expandToDepth(0);
-        if (selection) tree_->setCurrentItem(selection);
-        else if (tree_->topLevelItemCount()) tree_->setCurrentItem(tree_->topLevelItem(0));
+        if (selection && libraryView_ == LibraryView::Group) tree_->setCurrentItem(selection);
+        else if (libraryView_ == LibraryView::Group) libraryView_ = LibraryView::All;
     }
     // Порядок важен: refillTagBar сначала обрезает «мёртвые» выбранные теги (после
     // переименования/удаления выбранного чипа) и лишь затем refillList рисует список —
     // иначе список фильтруется по устаревшему набору уже несуществующим тегом.
-    refillTagBar();
+    displayedEntry_ = {}; // Explicit model refresh may change metadata of the same UUID.
+    refillTagBar(); updateLibraryCounts();
     refillList(entry); updateEnabled(); updateSwitchActionText();
     if (app_.gate() == Application::Gate::Ready) {
         const auto mode = app_.mode() == Application::Mode::Hello ? QStringLiteral("Windows Hello") : QStringLiteral("мастер-пароль");
@@ -319,9 +376,15 @@ void MainWindow::refreshAll() {
     } else vaultInfo_->clear();
 }
 void MainWindow::refillList(model::Id selected) {
+    if (selected.isNull()) selected = selectedEntry();
     QSignalBlocker block(list_); list_->clear();
+    int baseCount = 0;
     if (app_.gate() == Application::Gate::Ready) {
-        auto ids = search_->text().isEmpty() ? app_.model()->entriesInGroup(selectedNode()) : app_.model()->search(search_->text());
+        auto ids = !search_->text().isEmpty() ? app_.model()->search(search_->text())
+            : libraryView_ == LibraryView::Group ? app_.model()->entriesInGroup(selectedNode()) : app_.model()->entries().keys();
+        if (libraryView_ == LibraryView::Favorites)
+            ids.erase(std::remove_if(ids.begin(), ids.end(), [this](model::Id id) { return !app_.model()->entry(id)->favorite; }), ids.end());
+        baseCount = ids.size();
         const int typeFilter = typeFilter_->currentIndex() - 1; // -1 — все типы
         if (typeFilter >= 0)
             ids.erase(std::remove_if(ids.begin(), ids.end(), [this, typeFilter](model::Id id) {
@@ -359,6 +422,9 @@ void MainWindow::refillList(model::Id selected) {
         for (auto id : ids) {
             const auto* entry = app_.model()->entry(id);
             QString title = entry->favorite ? QStringLiteral("★ ") + entry->title : entry->title;
+            const auto type = entry->type == model::EntryType::ApiToken ? QStringLiteral("API-токен")
+                : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("SSH-ключ");
+            title += QStringLiteral("\n%1 · %2%3").arg(type, groupPath(entry->groupId), entry->reverify ? QStringLiteral(" · Повторная проверка") : QString());
             // Пометка срока: ⏳ истекает в горизонте 30 дней, ⏰ просрочен (с датой).
             if (entry->expiresAt.isValid()) {
                 const qint64 days = QDateTime::currentDateTimeUtc().daysTo(entry->expiresAt);
@@ -373,6 +439,10 @@ void MainWindow::refillList(model::Id selected) {
         }
         if (!list_->currentItem() && list_->count()) list_->setCurrentRow(0);
     }
+    searchScope_->setText(!search_->text().isEmpty() ? QStringLiteral("Поиск по всему хранилищу")
+        : libraryView_ == LibraryView::Group ? groupPath(selectedNode()) : QStringLiteral("Библиотека"));
+    listSummary_->setText(QStringLiteral("Показано %1 из %2").arg(list_->count()).arg(baseCount));
+    list_->setAccessibleName(QStringLiteral("Список записей"));
     showMetadata();
 }
 void MainWindow::refillTagBar() {
@@ -434,8 +504,8 @@ void MainWindow::removeTag(const QString& tag) {
 }
 void MainWindow::showMetadata() {
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(selectedEntry()) : nullptr;
-    right_->setCurrentIndex(entry ? 1 : 0); if (!entry) { card_->clear(); return; }
-    card_->showEntry(entry->id);
+    right_->setCurrentIndex(entry ? 1 : 0); if (!entry) { displayedEntry_ = {}; card_->clear(); return; }
+    if (displayedEntry_ != entry->id) { displayedEntry_ = entry->id; card_->showEntry(entry->id); }
 #ifdef Q_OS_WIN
     if (envExportAction_) envExportAction_->setEnabled(canExportEnv()); // доступность зависит от выбора
 #endif
@@ -505,7 +575,8 @@ void MainWindow::addGroup() {
     if (ok && ready() && app_.generation() == generation && commit([&](auto& model) { return model.addNode(id, parent, name); })) selectNode(id);
 }
 void MainWindow::addEntry() {
-    if (!ready() || editing_) return; const auto parent = selectedNode(); if (parent.isNull()) { report(QStringLiteral("Сначала выберите проект или группу.")); return; }
+    if (!ready() || editing_) return; const auto parent = selectedNode();
+    if (app_.model()->nodes().isEmpty()) { report(QStringLiteral("Создайте проект кнопкой «Новый проект».")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     EntryEditDialog dialog(*app_.model(), std::nullopt, this); dialog.setGroup(parent);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {

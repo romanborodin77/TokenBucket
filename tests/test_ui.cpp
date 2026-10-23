@@ -55,6 +55,91 @@ class TestUi : public QObject {
         QTimer::singleShot(0, &owner, [] { if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click(); });
     }
 private slots:
+    void libraryRequiresDestination() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group, {}, "Project").isEmpty());
+        EntryEditDialog editor(*app.model(), std::nullopt);
+        editor.setGroup({});
+        QCOMPARE(editor.findChild<QComboBox*>("entryGroup")->currentIndex(), -1);
+        field(editor, "entryTitle")->setText("Test");
+        field(editor, "entryToken")->setText("synthetic");
+        editor.accept(); QVERIFY(!editor.entry());
+        editor.setGroup(group); editor.accept(); QVERIFY(editor.entry());
+        QCOMPARE(editor.entry()->groupId, group);
+        ui::MainWindow w(app);
+        QVERIFY(!w.tree()->currentItem());
+        auto* all = w.findChild<QAbstractButton*>("libraryAll");
+        QVERIFY(all); QVERIFY(all->isChecked());
+        bool asked = false;
+        QTimer::singleShot(0, &w, [&] {
+            if (auto* dialog = qobject_cast<EntryEditDialog*>(QApplication::activeModalWidget())) {
+                asked = true;
+                QCOMPARE(dialog->findChild<QComboBox*>("entryGroup")->currentIndex(), -1);
+                dialog->reject();
+            }
+        });
+        w.addEntry(); QVERIFY(asked); QVERIFY(app.model()->entries().isEmpty());
+    }
+    void libraryFiltersAndCounters() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto first = QUuid::createUuid(), second = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(first, {}, "Production").isEmpty());
+        QVERIFY(app.model()->addNode(second, {}, "Staging").isEmpty());
+        for (int i = 0; i < 5; ++i) {
+            model::Entry e; e.id = QUuid::createUuid(); e.groupId = i % 2 ? first : second;
+            e.title = "Same title"; e.token = "synthetic-secret-marker";
+            e.favorite = i % 2; e.reverify = i == 1;
+            e.tags = i % 2 ? QStringList{"one", "two"} : QStringList{"one"};
+            if (i > 0) e.expiresAt = QDateTime::currentDateTimeUtc().addDays(i == 1 ? -1 : i == 2 ? 0 : i == 3 ? 30 : 31);
+            QVERIFY(app.model()->setEntry(e).isEmpty());
+        }
+        ui::MainWindow w(app);
+        QCOMPARE(w.list()->count(), 5); QVERIFY(!w.tree()->currentItem());
+        auto* favorites = w.findChild<QAbstractButton*>("libraryFavorites");
+        auto* expiring = w.findChild<QAbstractButton*>("libraryExpiring");
+        auto* all = w.findChild<QAbstractButton*>("libraryAll");
+        QVERIFY(favorites && expiring && all);
+        QVERIFY(favorites->text().contains("2"));
+        favorites->click(); QCOMPARE(w.list()->count(), 2);
+        w.search()->setText("nothing"); QCOMPARE(w.list()->count(), 0);
+        QVERIFY(favorites->text().contains("2"));
+        w.search()->clear(); expiring->click(); QCOMPARE(w.list()->count(), 2);
+        auto* expiry = w.findChild<QComboBox*>("expiryFilter");
+        QCOMPARE(expiry->currentIndex(), 1);
+        expiry->setCurrentIndex(2); QVERIFY(all->isChecked()); QCOMPARE(w.list()->count(), 1);
+        favorites->click(); QCOMPARE(expiry->currentIndex(), 0); QCOMPARE(w.list()->count(), 2);
+        w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        QVERIFY(!favorites->isChecked());
+        w.search()->setText("Same title"); QCOMPARE(w.list()->count(), 5);
+        QVERIFY(w.findChild<QLabel*>("searchScope")->text().contains("всему"));
+        for (int i = 0; i < w.list()->count(); ++i) {
+            QVERIFY(!w.list()->item(i)->text().contains("synthetic-secret-marker"));
+            QVERIFY(w.list()->item(i)->text().contains("API"));
+            QVERIFY(w.list()->item(i)->text().contains("Production") || w.list()->item(i)->text().contains("Staging"));
+        }
+    }
+    void librarySelectionFollowsUuid() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group, {}, "Project").isEmpty());
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = group; e.title = "Same"; e.token = "first";
+        QVERIFY(app.model()->setEntry(e).isEmpty());
+        auto other = e; other.id = QUuid::createUuid(); other.token = "second";
+        QVERIFY(app.model()->setEntry(other).isEmpty());
+        ui::MainWindow w(app); w.list()->setCurrentRow(1);
+        const auto selected = w.list()->currentItem()->data(Qt::UserRole).value<model::Id>();
+        w.refreshAll(); QCOMPARE(w.list()->currentItem()->data(Qt::UserRole).value<model::Id>(), selected);
+        w.card()->revealButton()->click(); QVERIFY(w.card()->secretText() != QStringLiteral("••••••••"));
+        QVERIFY(app.model()->removeEntry(selected).isEmpty()); w.refreshAll();
+        QVERIFY(w.list()->currentItem()->data(Qt::UserRole).value<model::Id>() != selected);
+        QCOMPARE(w.card()->secretText(), QStringLiteral("••••••••"));
+        w.search()->setText("missing"); QVERIFY(!w.list()->currentItem());
+        QCOMPARE(w.card()->secretText(), QStringLiteral("••••••••"));
+    }
     void quickPanelDisambiguatesEntries() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
@@ -116,7 +201,7 @@ private slots:
         w.refreshAll();
         w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
         QCOMPARE(w.list()->count(), 1);
-        QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Логин"));
+        QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Логин"));
         // поиск
         w.search()->setText("логин");
         QCOMPARE(w.list()->count(), 1);
@@ -462,13 +547,13 @@ private slots:
         auto* sort = w.findChild<QComboBox*>(QStringLiteral("sortMode"));
         QVERIFY(filter); QVERIFY(sort);
         QCOMPARE(w.list()->count(), 2);
-        QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));          // по названию
+        QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Альфа"));          // по названию
         sort->setCurrentIndex(1);                                              // по дате: свежий первым
-        QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Бета"));
+        QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Бета"));
         filter->setCurrentIndex(2);                                            // только учётные данные
-        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Альфа"));
         filter->setCurrentIndex(0); sort->setCurrentIndex(0);
-        QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Альфа"));
     }
     void tagBarChipsFilterList() {
         Application app(dir_.path() + "/tags"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
@@ -490,9 +575,9 @@ private slots:
         }
         QVERIFY(prod); QVERIFY(web);
         prod->click();                                   // один чип: записи с тегом «Прод» (по названию)
-        QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Альфа"));
+        QCOMPARE(w.list()->count(), 2); QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Альфа"));
         web->click();                                    // второй чип: И — только запись с обоими тегами
-        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text(), QStringLiteral("Гамма"));
+        QCOMPARE(w.list()->count(), 1); QCOMPARE(w.list()->item(0)->text().section(QLatin1Char('\n'), 0, 0), QStringLiteral("Гамма"));
         auto* filter = w.findChild<QComboBox*>(QStringLiteral("typeFilter"));
         filter->setCurrentIndex(2);                      // «Учётные данные»: все три — API-токены, отсекаются — фильтры работают вместе
         QCOMPARE(w.list()->count(), 0);
