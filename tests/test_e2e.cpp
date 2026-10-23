@@ -4,6 +4,7 @@
 #include <cstdio>
 #include "../src/platform/QuickPasteWin.h"
 #include "../src/ui/MiniPanel.h"
+#include "../src/ui/Theme.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QFile>
@@ -52,6 +53,69 @@ class TestE2E : public QObject {
     QTemporaryDir dir_;
 private slots:
 #ifdef Q_OS_WIN
+    void quickPanelProtectedCopy_data() {
+        QTest::addColumn<int>("interruption");
+        QTest::newRow("confirmed") << 0;
+        QTest::newRow("rejected") << 1;
+        QTest::newRow("locked") << 2;
+        QTest::newRow("deleted") << 3;
+        QTest::newRow("canceled-and-reopened") << 4;
+    }
+    void quickPanelProtectedCopy() {
+        QFETCH(int, interruption);
+        QTemporaryDir dir; Application vault(dir.path()); QString error;
+        QVERIFY(vault.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(vault.model()->addNode(group, {}, "Demo").isEmpty());
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+        e.title = "protected"; e.token = "synthetic-protected-token"; e.reverify = true;
+        QVERIFY(vault.model()->setEntry(e).isEmpty());
+        ClipboardGuard clip; ui::MiniPanel panel(vault, clip);
+        QApplication::clipboard()->setText("marker");
+        panel.popup();
+        panel.findChild<QLineEdit*>("miniSearch")->setText("protected");
+        QTimer answer; answer.setInterval(10);
+        connect(&answer, &QTimer::timeout, &panel, [&] {
+            if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                answer.stop();
+                if (interruption == 1) { dialog->reject(); return; }
+                if (interruption == 2) { vault.lock(); return; }
+                if (interruption == 3) vault.model()->removeEntry(e.id);
+                if (interruption == 4) { panel.popup(); panel.popup(); }
+                dialog->setTextValue("test-password-123"); dialog->accept();
+            }
+        });
+        auto* copy = panel.findChild<QPushButton*>("miniCopy"); QVERIFY(copy->isEnabled());
+        answer.start(); copy->click();
+        QVERIFY2(!answer.isActive(), qPrintable(panel.findChild<QLabel*>("miniStatus")->text()));
+        if (interruption == 0) QVERIFY2(!panel.isVisible(), qPrintable(panel.findChild<QLabel*>("miniStatus")->text()));
+        QCOMPARE(QApplication::clipboard()->text(), interruption ? QStringLiteral("marker") : e.token);
+        if (interruption == 0 || interruption == 2) QVERIFY(!panel.isVisible());
+        else if (interruption != 4) QVERIFY(panel.isVisible());
+        if (interruption == 4) QVERIFY(panel.findChild<QLabel*>("miniStatus")->text().isEmpty());
+        panel.close(); clip.clearIfOurs();
+    }
+    void quickPanelCancelPublication() {
+        QTemporaryDir dir; Application vault(dir.path()); QString error;
+        QVERIFY(vault.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(vault.model()->addNode(group, {}, "Demo").isEmpty());
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+        e.title = "cancel"; e.token = "must-not-publish";
+        QVERIFY(vault.model()->setEntry(e).isEmpty());
+        ClipboardGuard clip; ui::MiniPanel panel(vault, clip);
+        QApplication::clipboard()->setText("marker"); panel.popup();
+        panel.findChild<QLineEdit*>("miniSearch")->setText("cancel");
+        const auto sequence = GetClipboardSequenceNumber();
+        QVERIFY(QTest::qWaitFor([&] { return OpenClipboard(reinterpret_cast<HWND>(panel.winId())); }, 1000));
+        QTimer::singleShot(1, &panel, [&] { panel.popup(); });
+        QTimer::singleShot(20, &panel, [] { CloseClipboard(); });
+        panel.findChild<QPushButton*>("miniCopy")->click();
+        CloseClipboard();
+        QCOMPARE(GetClipboardSequenceNumber(), sequence);
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("marker"));
+        QVERIFY(!panel.isVisible());
+    }
     void quickPasteFullRoute() {
         QTemporaryDir dir;
         Application vault(dir.path()); QString error;
@@ -82,25 +146,89 @@ private slots:
         QVERIFY(IsWindowVisible(receiver));
         DWORD actualPid = 0; GetWindowThreadProcessId(receiver, &actualPid);
         QCOMPARE(actualPid, DWORD(header[2].toULong()));
-        QTRY_VERIFY_WITH_TIMEOUT(GetForegroundWindow() == receiver || SetForegroundWindow(receiver), 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(GetForegroundWindow() == receiver || SetForegroundWindow(receiver), 60000);
         QTRY_VERIFY(GetForegroundWindow() == receiver);
         const auto parsed = paste::parseHotkey(quick.sequence()); QVERIFY(parsed);
         INPUT trigger[6] = {};
         const WORD key[6] = {VK_CONTROL, VK_MENU, WORD(parsed->key), WORD(parsed->key), VK_MENU, VK_CONTROL};
         for (int i = 0; i < 6; ++i) { trigger[i].type = INPUT_KEYBOARD; trigger[i].ki.wVk = key[i]; trigger[i].ki.dwFlags = i >= 3 ? KEYEVENTF_KEYUP : 0; }
-        QCOMPARE(SendInput(6, trigger, sizeof(INPUT)), UINT(6));
-        ui::MiniPanel* panel = nullptr;
-        QTRY_VERIFY(([&] { for (auto* w : QApplication::topLevelWidgets()) if ((panel = qobject_cast<ui::MiniPanel*>(w)) && panel->isVisible()) return true; return false; }()));
-        auto* search = panel->findChild<QLineEdit*>(); QVERIFY(search);
-        QTest::keyClicks(search, "demo");
-        QTest::keyClick(search, Qt::Key_Return);
-        const QByteArray expected = QByteArray("demo-password-777").toBase64();
-        QTRY_VERIFY_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains("TEXT " + expected), 4000);
-        QVERIFY(!output.contains("RETURN"));
-        clip.clearIfOurs();
+        for (int route = 0; route < 10; ++route) {
+            qInfo("Quick-paste route %d", route);
+            e.type = route == 2 ? model::EntryType::ApiToken : model::EntryType::Credentials;
+            e.login = "synthetic-login"; e.token = "synthetic-token";
+            e.reverify = route == 3;
+            if (e.reverify) e.password = "synthetic-verified-password";
+            QVERIFY(vault.model()->setEntry(e).isEmpty());
+            QVERIFY(vault.save(&error));
+            QTRY_VERIFY_WITH_TIMEOUT(GetForegroundWindow() == receiver || SetForegroundWindow(receiver), 5000);
+            QTRY_VERIFY(GetForegroundWindow() == receiver);
+            QTRY_VERIFY(paste::modifiersReleased());
+            QTest::qWait(100);
+            // Select only the dedicated receiver's old synthetic value.
+            INPUT select[4] = {};
+            for (int i = 0; i < 4; ++i) { select[i].type = INPUT_KEYBOARD; select[i].ki.wVk = i == 0 || i == 3 ? VK_CONTROL : 'A'; select[i].ki.dwFlags = i >= 2 ? KEYEVENTF_KEYUP : 0; }
+            const auto selected = SendInput(4, select, sizeof(INPUT));
+            if (selected == 2) SendInput(2, select + 2, sizeof(INPUT));
+            else if (selected == 1 || selected == 3) SendInput(1, select + 3, sizeof(INPUT));
+            QCOMPARE(selected, UINT(4)); QTest::qWait(50);
+            const auto triggered = SendInput(6, trigger, sizeof(INPUT));
+            if (triggered && triggered < 6) {
+                // Release only down-events not yet balanced by this partial batch.
+                INPUT release[3] = {}; UINT count = 0;
+                for (int down = 2; down >= 0; --down)
+                    if (triggered > UINT(down) && triggered <= UINT(5 - down)) release[count++] = trigger[5 - down];
+                if (count) SendInput(count, release, sizeof(INPUT));
+            }
+            QCOMPARE(triggered, UINT(6));
+            ui::MiniPanel* panel = nullptr;
+            QTRY_VERIFY(([&] { for (auto* w : QApplication::topLevelWidgets()) if ((panel = qobject_cast<ui::MiniPanel*>(w)) && panel->isVisible()) return true; return false; }()));
+            QTRY_COMPARE(GetForegroundWindow(), reinterpret_cast<HWND>(panel->winId()));
+            auto* search = panel->findChild<QLineEdit*>("miniSearch"); QVERIFY(search);
+            QTest::keyClicks(search, "demo");
+            if (route == 1) panel->findChild<QComboBox*>("miniField")->setCurrentIndex(1);
+            if (route >= 4) {
+                QApplication::clipboard()->setText("negative-route-marker");
+                const auto sequence = GetClipboardSequenceNumber();
+                output += child.readAllStandardOutput(); const auto before = output;
+                INPUT shift{}; shift.type = INPUT_KEYBOARD; shift.ki.wVk = VK_SHIFT;
+                QCOMPARE(SendInput(1, &shift, sizeof(INPUT)), UINT(1));
+                const auto releaseShift = qScopeGuard([&] { shift.ki.dwFlags = KEYEVENTF_KEYUP; SendInput(1, &shift, sizeof(INPUT)); });
+                QTest::keyClick(search, Qt::Key_Return);
+                QLineEdit other; other.setWindowTitle("TokenBucket — другой тестовый получатель");
+                if (route == 5) QVERIFY(vault.model()->removeEntry(e.id).isEmpty());
+                if (route == 6) { auto changed = *vault.model()->entry(e.id); changed.modified = changed.modified.addSecs(1); QVERIFY(vault.model()->setEntry(changed).isEmpty()); }
+                if (route == 7) { other.show(); other.activateWindow(); QTRY_COMPARE(GetForegroundWindow(), reinterpret_cast<HWND>(other.winId())); }
+                if (route == 8) vault.lock();
+                if (route == 9) { child.terminate(); QVERIFY(child.waitForFinished(1000)); }
+                QTest::qWait(1750);
+                QCOMPARE(GetClipboardSequenceNumber(), sequence);
+                QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("negative-route-marker"));
+                output += child.readAllStandardOutput(); QCOMPARE(output, before);
+                if (route == 8) { QVERIFY(!panel->isVisible()); QVERIFY(vault.unlock("test-password-123", &error)); }
+                panel->close(); other.close();
+                if (route != 9) { QVERIFY(SetForegroundWindow(receiver)); QTRY_COMPARE(GetForegroundWindow(), receiver); }
+                continue;
+            }
+            QTimer answer; answer.setInterval(10);
+            connect(&answer, &QTimer::timeout, panel, [&] {
+                if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    dialog->setTextValue("test-password-123"); dialog->accept(); answer.stop();
+                }
+            });
+            if (e.reverify) answer.start();
+            if (route == 1) panel->findChild<QPushButton*>("miniPaste")->click();
+            else if (route == 2) QTest::keyClick(panel->findChild<QListWidget*>("miniEntries"), Qt::Key_Return);
+            else QTest::keyClick(search, Qt::Key_Return);
+            const auto expected = (route == 1 ? e.login : route == 2 ? e.token : e.password).toUtf8().toBase64();
+            QTRY_VERIFY_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains("TEXT " + expected), 4000);
+            QTest::qWait(100); output += child.readAllStandardOutput();
+            QVERIFY(!output.contains("RETURN")); QVERIFY(!panel->isVisible());
+            clip.clearIfOurs();
+        }
     }
 #endif
     void initTestCase() {
+        qApp->setQuitOnLastWindowClosed(false);
 #ifdef Q_OS_WIN
         qputenv("QT_QPA_FONTDIR", qEnvironmentVariable("WINDIR").toUtf8() + "/Fonts");
 #endif
@@ -329,6 +457,32 @@ private slots:
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
 #ifdef Q_OS_WIN
+    if (app.arguments().contains(QStringLiteral("--quick-paste-demo"))) {
+        QTemporaryDir dir; Application vault(dir.path()); QString error;
+        if (!vault.createPasswordVault("test-password-123", &error)) return 2;
+        const auto group = QUuid::createUuid();
+        vault.model()->addNode(group, {}, "Demo / synthetic data only");
+        for (int type = 0; type < 2; ++type) {
+            model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+            e.type = type ? model::EntryType::Credentials : model::EntryType::ApiToken;
+            e.title = type ? "Demo login" : "Demo token";
+            e.login = "synthetic-login"; e.password = "demo-password-777"; e.token = "synthetic-token";
+            if (!vault.model()->setEntry(e).isEmpty()) return 3;
+        }
+        ui::theme::apply(app.arguments().contains("--dark") ? ui::theme::Mode::Dark : ui::theme::Mode::Light);
+        ClipboardGuard clip; platform::QuickPaste quick(vault, clip, nullptr);
+        if (!quick.start(QKeySequence("Ctrl+Alt+F10"), &error)) return 4;
+        QLabel control(QStringLiteral("Только вымышленные данные. Ctrl+Alt+F10 → Demo.\nЗакройте это окно, чтобы завершить тестовый стенд."));
+        control.setWindowTitle(QStringLiteral("TokenBucket — тестовый стенд")); control.resize(550, 100); control.show();
+        QTimer search; search.setInterval(100);
+        QObject::connect(&search, &QTimer::timeout, &control, [] {
+            for (auto* widget : QApplication::topLevelWidgets())
+                if (auto* panel = qobject_cast<ui::MiniPanel*>(widget); panel && panel->isVisible())
+                    if (auto* field = panel->findChild<QLineEdit*>("miniSearch"); field && field->text().isEmpty()) field->setText("Demo");
+        });
+        search.start();
+        return app.exec();
+    }
     if (app.arguments().contains(QStringLiteral("--paste-receiver"))) {
         QLineEdit receiver;
         receiver.setWindowTitle(QStringLiteral("TokenBucket — тестовый получатель"));

@@ -15,6 +15,7 @@ public:
     explicit ClipboardGuard(QObject* parent = nullptr);
     ~ClipboardGuard() override;
     bool copySecret(const QString& text, QString* err);
+    void cancelPendingCopy() { if (copying_) ++epoch_; }
     void clearIfOurs();
     void triggerClearNowForTest() { clearIfOurs(); }
 signals:

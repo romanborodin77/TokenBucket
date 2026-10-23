@@ -3,6 +3,7 @@
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QScopedValueRollback>
 namespace tb::ui {
 // Повторная проверка владельца для записей с флагом reverify (показ/копирование
 // секрета, редактор, выдача). Путь Hello — verifyHello по HWND родителя; путь
@@ -10,11 +11,12 @@ namespace tb::ui {
 // сверка generation ПОСЛЕ диалога и ПОСЛЕ проверки: пока вводился пароль,
 // хранилище могли заблокировать (например, по таймеру) — тогда результат
 // проверки выбрасывается. Текст password-поля затирается сразу после accept.
-bool VerifyDialog::verify(Application& app, QWidget* parent, const QString& action) {
+bool VerifyDialog::verify(Application& app, QWidget* parent, const QString& action, bool* checking) {
     if (app.gate() != Application::Gate::Ready || app.busy()) return false;
     const auto generation = app.generation(); QString error; bool verified = false;
     if (app.mode() == Application::Mode::Hello) {
 #ifdef Q_OS_WIN
+        bool unused = false; QScopedValueRollback ownCheck(checking ? *checking : unused, true);
         verified = app.verifyHello(parent ? reinterpret_cast<void*>(parent->window()->winId()) : nullptr, &error);
 #endif
     } else {
@@ -26,7 +28,9 @@ bool VerifyDialog::verify(Application& app, QWidget* parent, const QString& acti
         const bool accepted = dialog.exec() == QDialog::Accepted;
         SecureBytes password(dialog.textValue().toUtf8()); dialog.setTextValue({});
         if (!accepted || generation != app.generation()) return false;
-        verified = app.checkPassword(password.bytes(), &error); password.clear();
+        { bool unused = false; QScopedValueRollback ownCheck(checking ? *checking : unused, true);
+          verified = app.checkPassword(password.bytes(), &error); }
+        password.clear();
     }
     if (generation != app.generation() || app.gate() != Application::Gate::Ready) return false;
     if (!verified && !error.isEmpty()) QMessageBox::warning(parent, QStringLiteral("TokenBucket"), error);

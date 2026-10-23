@@ -268,7 +268,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     connect(hotkey_.get(), &platform::QuickPaste::conflictDetected, this, [this](const QString& combo) {
         QTimer::singleShot(0, this, [this, combo] {
             QMessageBox::warning(this, QStringLiteral("TokenBucket"),
-                QStringLiteral("Горячая клавиша %1 занята другим приложением. Выберите другое сочетание.").arg(combo));
+                QStringLiteral("Горячая клавиша %1 занята или не поддерживается. Выберите Ctrl/Alt/Win с буквой, цифрой, Space или F1–F11.").arg(combo));
             changeHotkey();
         });
     });

@@ -38,6 +38,12 @@ private slots:
     }
 #ifdef Q_OS_WIN
     void hotkeys() {
+        QTemporaryDir dir; Application app(dir.path()); ClipboardGuard clip;
+        platform::QuickPaste quick(app, clip, nullptr);
+        QSignalSpy rejected(&quick, &platform::QuickPaste::conflictDetected);
+        QString error;
+        QVERIFY(!quick.start(QKeySequence("Ctrl+Tab"), &error));
+        QCOMPARE(rejected.count(), 1); QVERIFY(!error.isEmpty());
         for (int key = Qt::Key_F1; key <= Qt::Key_F11; ++key) {
             const auto parsed = paste::parseHotkey(QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key(key))));
             QVERIFY(parsed); QCOMPARE(parsed->key, UINT(VK_F1 + key - Qt::Key_F1));
@@ -81,6 +87,16 @@ private slots:
         QVERIFY2(quick.changeSequence(next, good, &error), qPrintable(error));
         QCOMPARE(quick.sequence(), next);
         QCOMPARE(good.value("hotkey").toString(), next.toString(QKeySequence::PortableText));
+        QWidget owner;
+        QSignalSpy startupConflict(&quick, &platform::QuickPaste::conflictDetected);
+        const auto occupied = paste::parseHotkey(original); QVERIFY(occupied);
+        const auto hwnd = reinterpret_cast<HWND>(owner.winId());
+        QVERIFY(RegisterHotKey(hwnd, 77, occupied->modifiers, occupied->key));
+        const bool changed = quick.changeSequence(original, good, &error);
+        UnregisterHotKey(hwnd, 77);
+        QVERIFY(!changed); QCOMPARE(quick.sequence(), next);
+        QCOMPARE(startupConflict.count(), 0);
+        QCOMPARE(good.value("hotkey").toString(), next.toString(QKeySequence::PortableText));
     }
     void inputCounts() {
         for (UINT count = 0; count <= 4; ++count) {
@@ -101,6 +117,7 @@ private slots:
         QVERIFY(!paste::recipientExists(changed));
         changed = r; changed.created.dwLowDateTime ^= 1;
         QVERIFY(!paste::recipientExists(changed));
+        QVERIFY(!paste::recipientAllowed(changed, nullptr));
     }
     void recipientChangedDetected() {
         // наши собственные тестовые HWND как «получатель»; смена фокуса обязана дать false

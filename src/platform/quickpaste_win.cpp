@@ -145,7 +145,9 @@ bool QuickPaste::start(QString* err) {
 bool QuickPaste::start(const QKeySequence& sequence, QString* err) {
     if (QGuiApplication::platformName() != QLatin1String("windows")) return true;
     if (!filterInstalled_) { qApp->installNativeEventFilter(this); filterInstalled_ = true; }
-    return applySequence(sequence, nullptr, err);
+    const bool started = applySequence(sequence, nullptr, err);
+    if (!started) emit conflictDetected(sequence.toString());
+    return started;
 }
 bool QuickPaste::changeSequence(const QKeySequence& sequence, QSettings& settings, QString* err) {
     return applySequence(sequence, &settings, err);
@@ -162,7 +164,6 @@ bool QuickPaste::applySequence(const QKeySequence& sequence, QSettings* settings
     const int candidate = hotkeyId_ == 1 ? 2 : 1;
     if (!RegisterHotKey(hotkeyHwnd_, candidate, parsed->modifiers, parsed->key)) {
         if (err) *err = QStringLiteral("Не удалось зарегистрировать %1: сочетание занято или недоступно.").arg(sequence.toString());
-        emit conflictDetected(sequence.toString());
         return false;
     }
     if (settings) {

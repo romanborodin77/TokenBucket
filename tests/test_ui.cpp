@@ -25,6 +25,8 @@
 #include <QSignalSpy>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
+#include "../src/ui/MiniPanel.h"
+#include "../src/platform/ClipboardGuard.h"
 #include "../src/ui/EntryEditDialog.h"
 #include "../src/ui/EntryCard.h"
 #include "../src/ui/AboutDialog.h"
@@ -53,6 +55,45 @@ class TestUi : public QObject {
         QTimer::singleShot(0, &owner, [] { if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click(); });
     }
 private slots:
+    void quickPanelDisambiguatesEntries() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        for (const auto* name : {"Production", "Staging"}) {
+            const auto group = QUuid::createUuid();
+            QVERIFY(app.model()->addNode(group, {}, name).isEmpty());
+            model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+            e.title = "Same title"; e.token = "synthetic";
+            QVERIFY(app.model()->setEntry(e).isEmpty());
+        }
+        ClipboardGuard clipboard; ui::MiniPanel panel(app, clipboard); panel.popup();
+        panel.findChild<QLineEdit*>("miniSearch")->setText("Same title");
+        auto* list = panel.findChild<QListWidget*>("miniEntries"); QCOMPARE(list->count(), 2);
+        QVERIFY(list->item(0)->text() != list->item(1)->text());
+        for (int i = 0; i < 2; ++i) QVERIFY(list->item(i)->text().contains(QStringLiteral("Токен")));
+        panel.findChild<QLineEdit*>("miniSearch")->setText("missing");
+        QVERIFY(!panel.findChild<QLabel*>("miniStatus")->text().isEmpty());
+    }
+    void quickPanelClosesOnLock() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        ClipboardGuard clipboard; ui::MiniPanel panel(app, clipboard);
+        panel.popup(); QVERIFY(panel.isVisible());
+        app.lock(); QVERIFY(!panel.isVisible());
+        auto* list = panel.findChild<QListWidget*>(); QVERIFY(list);
+        QCOMPARE(list->count(), 0);
+    }
+    void quickPanelKeyboardManualMode() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        ClipboardGuard clipboard; ui::MiniPanel panel(app, clipboard);
+        panel.popup();
+        auto* search = panel.findChild<QLineEdit*>("miniSearch"); QVERIFY(search);
+        auto* paste = panel.findChild<QPushButton*>("miniPaste"); QVERIFY(paste);
+        QVERIFY(!paste->isEnabled());
+        QTest::keyClick(search, Qt::Key_Escape); QVERIFY(!panel.isVisible());
+        panel.popup(); QVERIFY(panel.isVisible());
+        panel.popup(); QVERIFY(!panel.isVisible());
+    }
     void initTestCase() {
         qApp->setQuitOnLastWindowClosed(false);
 #ifdef Q_OS_WIN
