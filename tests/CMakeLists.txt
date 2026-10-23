@@ -19,6 +19,9 @@ tb_add_test(test_store)
 tb_add_test(test_app)
 
 tb_add_test(test_ui)
+configure_file(offscreen-screens.json offscreen-screens.json COPYONLY)
+set_tests_properties(test_ui PROPERTIES ENVIRONMENT
+  "QT_QPA_PLATFORM=offscreen:configfile=offscreen-screens.json;QT_PLUGIN_PATH=${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins")
 tb_add_test(test_clipboard)
 tb_add_test(test_lock)
 tb_add_test(test_ssh)

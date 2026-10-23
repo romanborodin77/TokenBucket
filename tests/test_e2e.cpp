@@ -26,6 +26,7 @@
 #include <QToolButton>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
+#include "../src/app/IdleTimer.h"
 #include "../src/ui/SetupDialog.h"
 #include "../src/ui/UnlockDialog.h"
 #include "../src/ui/EntryEditDialog.h"
@@ -466,6 +467,39 @@ private slots:
 };
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    if (app.arguments().contains(QStringLiteral("--main-window-demo"))) {
+        QTemporaryDir dir; Application vault(dir.path()); QString error;
+        if (!vault.createPasswordVault("test-password-123", &error)) return 2;
+        const auto project = QUuid::createUuid(), group = QUuid::createUuid();
+        if (!vault.model()->addNode(project, {}, QStringLiteral("Разработка")).isEmpty()
+            || !vault.model()->addNode(group, project, QStringLiteral("GitVerse")).isEmpty()) return 3;
+        for (int i = 0; i < 6; ++i) {
+            model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = i < 3 ? group : project;
+            entry.title = i % 3 == 0 ? QStringLiteral("GitVerse API") : i % 3 == 1 ? QStringLiteral("Облачная консоль") : QStringLiteral("Production deploy");
+            entry.type = model::EntryType(i % 3); entry.favorite = i < 2; entry.reverify = i == 0;
+            entry.token = "synthetic-demo-token"; entry.login = "synthetic-login"; entry.password = "synthetic-password";
+            entry.sshPrivate = QByteArray("synthetic-private-key"); entry.sshPassphrase = "synthetic-phrase";
+            entry.tags = {QStringLiteral("DEV"), QStringLiteral("Рабочий")};
+            entry.note = QStringLiteral("Вымышленные данные для проверки интерфейса. Реальные секреты не загружены.");
+            entry.url = "example.test"; entry.created = entry.modified = QDateTime::currentDateTimeUtc();
+            if (i == 1) entry.expiresAt = QDateTime::currentDateTimeUtc().addDays(3);
+            if (!vault.model()->setEntry(entry).isEmpty()) return 4;
+        }
+        ui::theme::apply(app.arguments().contains("--dark") ? ui::theme::Mode::Dark : ui::theme::Mode::Light);
+        QSettings preferences(dir.filePath("demo-ui.ini"), QSettings::IniFormat);
+        ui::MainWindow window(vault, nullptr, &preferences);
+        window.setWindowTitle(QStringLiteral("TokenBucket — вымышленные данные"));
+        IdleTimer idle(300000); window.setIdleTimer(&idle);
+        QObject::connect(&idle, &IdleTimer::idleTimeout, &vault, &Application::lock);
+        QObject::connect(&window, &ui::MainWindow::closing, &app, &QCoreApplication::quit);
+        window.resize(app.arguments().contains("--compact") ? QSize(960, 700) : QSize(1240, 800)); window.show();
+        const auto captureIndex = app.arguments().indexOf("--capture");
+        if (captureIndex >= 0 && captureIndex + 1 < app.arguments().size()) {
+            const auto path = app.arguments().at(captureIndex + 1);
+            QTimer::singleShot(800, &window, [&window, path] { QCoreApplication::exit(window.grab().save(path) ? 0 : 5); });
+        }
+        return app.exec();
+    }
 #ifdef Q_OS_WIN
     if (app.arguments().contains(QStringLiteral("--quick-paste-demo"))) {
         QTemporaryDir dir; Application vault(dir.path()); QString error;

@@ -286,7 +286,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(deleteNode, &QShortcut::activated, this, &MainWindow::deleteSelectedNode);
     error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
     setCentralWidget(central);
-    auto* statuses = new QWidget(statusBar()); auto* statusLayout = new QGridLayout(statuses);
+    auto* statuses = new QWidget(central); auto* statusLayout = new QGridLayout(statuses);
     statusLayout->setContentsMargins(6, 2, 6, 2);
     vaultInfo_ = new QLabel(statuses); vaultInfo_->setObjectName(QStringLiteral("vaultState"));
     idleStatus_ = new QLabel(statuses); idleStatus_->setObjectName(QStringLiteral("idleStatus"));
@@ -295,11 +295,10 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     int statusIndex = 0;
     for (auto* label : {vaultInfo_, idleStatus_, clipboardStatus_, hotkeyStatus_}) {
         label->setTextFormat(Qt::PlainText); label->setWordWrap(true); label->setMinimumWidth(0);
-        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         statusLayout->addWidget(label, statusIndex / 2, statusIndex % 2); ++statusIndex;
     }
     statusLayout->setColumnStretch(0, 1); statusLayout->setColumnStretch(1, 1);
-    statusBar()->addWidget(statuses, 1);
+    layout->addWidget(statuses);
     auto* statusTimer = new QTimer(this); statusTimer->setObjectName(QStringLiteral("statusRefreshTimer")); statusTimer->setInterval(1000);
     connect(statusTimer, &QTimer::timeout, this, &MainWindow::refreshStatus); statusTimer->start();
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { if (tree_->currentItem()) setLibraryView(LibraryView::Group); });
@@ -309,7 +308,10 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(list_, &QListWidget::itemClicked, this, &MainWindow::openCardDialog);
     connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
     connect(card_, &EntryCard::editRequested, this, &MainWindow::editSelected);
-    connect(card_, &EntryCard::moreRequested, this, [this] { showEntryMenu(card_->mapToGlobal(QPoint(0, card_->height()))); });
+    connect(card_, &EntryCard::moreRequested, this, [this] {
+        const auto* more = card_->findChild<QPushButton*>(QStringLiteral("cardMore"));
+        showEntryMenu(more->mapToGlobal(QPoint(0, more->height())));
+    });
     connect(card_, &EntryCard::copyRequested, this, [this](const QString& text) {
         if (!ready()) return; QString error;
         if (!clipboard_.copySecret(text, &error)) { if (app_.gate() == Application::Gate::Ready) report(error); }
@@ -369,10 +371,10 @@ void MainWindow::refreshStatus() {
     if (date != statusDate_) { statusDate_ = date; updateLibraryCounts(); refillList(); }
 }
 void MainWindow::restoreUiState() {
-    const auto area = screen()->availableGeometry().adjusted(8, 32, -8, -8);
-    resize(QSize(1240, 800).boundedTo(area.size()));
+    resize(QSize(1240, 800).boundedTo(screen()->availableGeometry().size()));
     const auto geometry = preferences_->value(QStringLiteral("ui/mainGeometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);
+    const auto area = screen()->availableGeometry().adjusted(8, 32, -8, -8);
     const auto state = preferences_->value(QStringLiteral("ui/mainSplitter")).toByteArray();
     if (state.isEmpty() || !splitter_->restoreState(state)) splitter_->setSizes({250,350,640});
     resize(size().boundedTo(area.size()));
@@ -693,7 +695,7 @@ void MainWindow::editSelected() {
     }
 }
 void MainWindow::renameSelectedNode() {
-    if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) return;
+    if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) { report(QStringLiteral("Выберите проект или группу.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation(); bool ok = false;
     const auto name = QInputDialog::getText(this, QStringLiteral("Переименование"), QStringLiteral("Новое имя:"), QLineEdit::Normal, app_.model()->nodes().value(id).name, &ok);
     if (ok && ready() && app_.generation() == generation) commit([&](auto& model) { return model.renameNode(id, name); });
@@ -715,7 +717,7 @@ void MainWindow::deleteSelected() {
         && ready() && app_.generation() == generation) commitEntry([&](auto& model) { return model.removeEntry(id); }, id);
 }
 void MainWindow::deleteSelectedNode() {
-    if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) return;
+    if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) { report(QStringLiteral("Выберите проект или группу.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     if (QMessageBox::question(this, QStringLiteral("Удаление проекта/группы"), QStringLiteral("Удалить выбранный проект или группу?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes
         && ready() && app_.generation() == generation) commit([&](auto& model) { return model.removeNode(id); });

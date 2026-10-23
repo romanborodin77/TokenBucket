@@ -24,6 +24,7 @@
 #include <QSettings>
 #include <QSplitter>
 #include <QSignalSpy>
+#include <QMenu>
 #include "../src/app/Application.h"
 #include "../src/app/IdleTimer.h"
 #include "../src/ui/MainWindow.h"
@@ -59,6 +60,29 @@ class TestUi : public QObject {
     }
 private slots:
     void init() { uiPreferences_.clear(); }
+    void libraryRowsDoNotExposeSecrets() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "Project").isEmpty());
+        const QString marker = QStringLiteral("synthetic-secret-marker");
+        for (int i = 0; i < model::VaultModel::MaxEntries; ++i) {
+            model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group;
+            entry.title = QStringLiteral("Record %1").arg(i); entry.type = model::EntryType(i % 3);
+            entry.token = marker; entry.login = marker; entry.password = marker;
+            entry.sshPrivate = marker.toUtf8(); entry.sshPassphrase = marker;
+            QVERIFY(app.model()->setEntry(entry).isEmpty());
+        }
+        ui::MainWindow w(app, nullptr, &uiPreferences_);
+        QCOMPARE(w.list()->count(), model::VaultModel::MaxEntries);
+        for (int i = 0; i < w.list()->count(); ++i) {
+            auto* item = w.list()->item(i);
+            QVERIFY(!item->data(Qt::UserRole).value<QUuid>().isNull());
+            QVERIFY(!w.list()->itemWidget(item));
+            for (const int role : {Qt::DisplayRole, Qt::ToolTipRole, Qt::StatusTipRole,
+                                  Qt::WhatsThisRole, Qt::AccessibleTextRole, Qt::AccessibleDescriptionRole})
+                QVERIFY(!item->data(role).toString().contains(marker));
+        }
+    }
     void statusTickKeepsReveal() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
@@ -129,6 +153,36 @@ private slots:
         QVERIFY(w.findChild<QLabel*>("operationError")->text().contains(QStringLiteral("не сохранено")));
         QCOMPARE(app.model()->toCbor(), original);
     }
+    void mainGeometryKeepsSecondScreen() {
+        if (QGuiApplication::screens().size() < 2) QSKIP("Run with the two-screen offscreen configuration");
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto area = QGuiApplication::screens().at(1)->availableGeometry();
+        QWidget previous; previous.resize(800, 600); previous.move(area.topLeft() + QPoint(60, 60)); previous.show();
+        QCoreApplication::processEvents();
+        QVERIFY(area.contains(previous.frameGeometry().center()));
+        uiPreferences_.setValue("ui/mainGeometry", previous.saveGeometry());
+        ui::MainWindow restored(app, nullptr, &uiPreferences_); restored.show();
+        QCoreApplication::processEvents();
+        QVERIFY(area.contains(restored.frameGeometry().center()));
+    }
+    void mainStatusAndMenuStayCompact() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "Project").isEmpty());
+        model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group; entry.title = "Demo"; entry.token = "synthetic";
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); QCoreApplication::processEvents();
+        QVERIFY(w.findChild<QLabel*>("idleStatus")->parentWidget()->height() <= w.fontMetrics().lineSpacing() * 3 + 16);
+        auto* more = w.card()->findChild<QPushButton*>("cardMore"); QVERIFY(more);
+        const auto anchor = more->mapToGlobal(QPoint(0, more->height()));
+        bool opened = false;
+        QTimer::singleShot(0, &w, [&] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (menu) { opened = true; const auto position = menu->pos(); menu->close(); QCOMPARE(position, anchor); }
+        });
+        more->click(); QVERIFY(opened);
+    }
     void libraryRequiresDestination() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
@@ -146,6 +200,11 @@ private slots:
         QVERIFY(!w.tree()->currentItem());
         auto* all = w.findChild<QAbstractButton*>("libraryAll");
         QVERIFY(all); QVERIFY(all->isChecked());
+        w.renameSelectedNode();
+        QVERIFY(w.findChild<QLabel*>("operationError")->text().contains(QStringLiteral("Выберите")));
+        w.findChild<QLabel*>("operationError")->clear();
+        w.deleteSelectedNode();
+        QVERIFY(w.findChild<QLabel*>("operationError")->text().contains(QStringLiteral("Выберите")));
         bool asked = false;
         QTimer::singleShot(0, &w, [&] {
             if (auto* dialog = qobject_cast<EntryEditDialog*>(QApplication::activeModalWidget())) {
