@@ -1,5 +1,7 @@
 # Рабочая быстрая вставка — Implementation Plan
 
+Уточнение исполнения 2026-10-23: F12 зарезервирована Windows; примеры F12 ниже заменены в коде/тестах на F11. Подготовка foreground fixture получила бюджет 60 с для Computer Use; рабочий бюджет продукта остаётся 1500 мс. Это ограничение платформы и тестового стенда, новые функции не добавлены.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Исправить полный маршрут горячая клавиша → панель → выбранное поле записи → исходное поле внешнего Windows-приложения, с безопасной отменой и проверяемой приёмкой.
