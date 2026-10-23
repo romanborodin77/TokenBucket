@@ -1,4 +1,9 @@
 #include <QtTest>
+#include <QProcess>
+#include <QScopeGuard>
+#include <cstdio>
+#include "../src/platform/QuickPasteWin.h"
+#include "../src/ui/MiniPanel.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QFile>
@@ -46,6 +51,55 @@ class TestE2E : public QObject {
     Q_OBJECT
     QTemporaryDir dir_;
 private slots:
+#ifdef Q_OS_WIN
+    void quickPasteFullRoute() {
+        QTemporaryDir dir;
+        Application vault(dir.path()); QString error;
+        QVERIFY(vault.createPasswordVault("test-password-123", &error));
+        const auto project = QUuid::createUuid(), group = QUuid::createUuid();
+        QVERIFY(vault.model()->addNode(project, {}, "Demo").isEmpty());
+        QVERIFY(vault.model()->addNode(group, project, "Group").isEmpty());
+        model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
+        e.type = model::EntryType::Credentials; e.title = "demo"; e.password = "demo-password-777";
+        QVERIFY(vault.model()->setEntry(e).isEmpty());
+        ClipboardGuard clip;
+        platform::QuickPaste quick(vault, clip, nullptr);
+        bool registered = false;
+        for (const auto* candidate : {"Ctrl+Alt+F8", "Ctrl+Alt+F9", "Ctrl+Alt+F10", "Ctrl+Alt+Space"})
+            if (quick.start(QKeySequence(QString::fromLatin1(candidate)), &error)) { registered = true; break; }
+        QVERIFY2(registered, qPrintable(error));
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {"--paste-receiver"});
+        QVERIFY(child.waitForStarted());
+        const auto cleanup = qScopeGuard([&] { child.terminate(); if (!child.waitForFinished(1000)) { child.kill(); child.waitForFinished(1000); } });
+        QByteArray output;
+        QTRY_VERIFY_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains('\n'), 5000);
+        const auto header = output.left(output.indexOf('\n')).simplified().split(' ');
+        QCOMPARE(header.size(), 3); QCOMPARE(header[0], QByteArray("READY"));
+        HWND receiver = reinterpret_cast<HWND>(quintptr(header[1].toULongLong()));
+        QVERIFY(header[2].toULong() != GetCurrentProcessId());
+        QVERIFY(IsWindow(receiver));
+        QVERIFY(IsWindowVisible(receiver));
+        DWORD actualPid = 0; GetWindowThreadProcessId(receiver, &actualPid);
+        QCOMPARE(actualPid, DWORD(header[2].toULong()));
+        QTRY_VERIFY_WITH_TIMEOUT(GetForegroundWindow() == receiver || SetForegroundWindow(receiver), 15000);
+        QTRY_VERIFY(GetForegroundWindow() == receiver);
+        const auto parsed = paste::parseHotkey(quick.sequence()); QVERIFY(parsed);
+        INPUT trigger[6] = {};
+        const WORD key[6] = {VK_CONTROL, VK_MENU, WORD(parsed->key), WORD(parsed->key), VK_MENU, VK_CONTROL};
+        for (int i = 0; i < 6; ++i) { trigger[i].type = INPUT_KEYBOARD; trigger[i].ki.wVk = key[i]; trigger[i].ki.dwFlags = i >= 3 ? KEYEVENTF_KEYUP : 0; }
+        QCOMPARE(SendInput(6, trigger, sizeof(INPUT)), UINT(6));
+        ui::MiniPanel* panel = nullptr;
+        QTRY_VERIFY(([&] { for (auto* w : QApplication::topLevelWidgets()) if ((panel = qobject_cast<ui::MiniPanel*>(w)) && panel->isVisible()) return true; return false; }()));
+        auto* search = panel->findChild<QLineEdit*>(); QVERIFY(search);
+        QTest::keyClicks(search, "demo");
+        QTest::keyClick(search, Qt::Key_Return);
+        const QByteArray expected = QByteArray("demo-password-777").toBase64();
+        QTRY_VERIFY_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains("TEXT " + expected), 4000);
+        QVERIFY(!output.contains("RETURN"));
+        clip.clearIfOurs();
+    }
+#endif
     void initTestCase() {
 #ifdef Q_OS_WIN
         qputenv("QT_QPA_FONTDIR", qEnvironmentVariable("WINDIR").toUtf8() + "/Fonts");
@@ -272,5 +326,22 @@ private slots:
     }
 #endif
 };
-QTEST_MAIN(TestE2E)
+int main(int argc, char** argv) {
+    QApplication app(argc, argv);
+#ifdef Q_OS_WIN
+    if (app.arguments().contains(QStringLiteral("--paste-receiver"))) {
+        QLineEdit receiver;
+        receiver.setWindowTitle(QStringLiteral("TokenBucket — тестовый получатель"));
+        receiver.resize(440, 60); receiver.show(); receiver.raise(); receiver.activateWindow();
+        QObject::connect(&receiver, &QLineEdit::textChanged, &receiver, [](const QString& value) {
+            std::printf("TEXT %s\n", value.toUtf8().toBase64().constData()); std::fflush(stdout);
+        });
+        QObject::connect(&receiver, &QLineEdit::returnPressed, &receiver, [] { std::printf("RETURN\n"); std::fflush(stdout); });
+        std::printf("READY %llu %lu\n", static_cast<unsigned long long>(receiver.winId()), GetCurrentProcessId()); std::fflush(stdout);
+        return app.exec();
+    }
+#endif
+    TestE2E test;
+    return QTest::qExec(&test, argc, argv);
+}
 #include "test_e2e.moc"
