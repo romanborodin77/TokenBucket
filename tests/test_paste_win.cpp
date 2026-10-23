@@ -2,6 +2,10 @@
 #include <QApplication>
 #include <QWidget>
 #include <QKeySequence>
+#include <QSettings>
+#include <QTemporaryDir>
+#include "../src/platform/QuickPasteWin.h"
+#include "../src/platform/ClipboardGuard.h"
 #include "../src/app/Application.h"
 #include "../src/platform/QuickPaste.h"
 using namespace tb;
@@ -62,6 +66,22 @@ private slots:
         QVERIFY(!paste::eligibleForAutoPaste(multiPw));
     }
 #ifdef Q_OS_WIN
+    void sequenceFailureKeepsRegistration() {
+        QTemporaryDir dir;
+        Application app(dir.path()); ClipboardGuard clip;
+        platform::QuickPaste quick(app, clip, nullptr);
+        QString error;
+        const QKeySequence original(QStringLiteral("Ctrl+Alt+Shift+F8"));
+        QVERIFY2(quick.start(original, &error), qPrintable(error));
+        QSettings broken(dir.path(), QSettings::IniFormat);
+        QVERIFY(!quick.changeSequence(QKeySequence(QStringLiteral("Ctrl+Alt+Shift+F9")), broken, &error));
+        QCOMPARE(quick.sequence(), original);
+        QSettings good(dir.filePath("settings.ini"), QSettings::IniFormat);
+        const QKeySequence next(QStringLiteral("Ctrl+Alt+Shift+F10"));
+        QVERIFY2(quick.changeSequence(next, good, &error), qPrintable(error));
+        QCOMPARE(quick.sequence(), next);
+        QCOMPARE(good.value("hotkey").toString(), next.toString(QKeySequence::PortableText));
+    }
     void inputCounts() {
         for (UINT count = 0; count <= 4; ++count) {
             accepted = count; sent.clear();

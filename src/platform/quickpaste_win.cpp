@@ -139,43 +139,59 @@ QuickPaste::~QuickPaste() {
     delete panel_; // панель parentless: скрытое окно-владелец горячей клавиши уходит вместе с ней
 }
 bool QuickPaste::start(QString* err) {
-    // offscreen/нет оконного HWND: глобальная горячая клавиша не регистрируется
-    if (QGuiApplication::platformName() != QLatin1String("windows")) return true;
-    qApp->installNativeEventFilter(this);
-    return reRegister(err);
-}
-bool QuickPaste::reRegister(QString* err) {
-    if (err) err->clear();
-    if (hotkeyId_) { UnregisterHotKey(hotkeyHwnd_, hotkeyId_); hotkeyId_ = 0; }
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    const QKeySequence ks(settings.value(QStringLiteral("hotkey"), QStringLiteral("Ctrl+Alt+Space")).toString());
-    const auto [mods, vk] = splitSequence(ks);
-    hotkeyHwnd_ = reinterpret_cast<HWND>(hidden_->winId());
-    if (!RegisterHotKey(hotkeyHwnd_, 1, mods, vk)) {
-        if (err) *err = QStringLiteral("Сочетание %1 занято другим приложением.").arg(ks.toString());
-        emit conflictDetected(ks.toString());
+    return start(QKeySequence(settings.value(QStringLiteral("hotkey"), QStringLiteral("Ctrl+Alt+Space")).toString()), err);
+}
+bool QuickPaste::start(const QKeySequence& sequence, QString* err) {
+    if (QGuiApplication::platformName() != QLatin1String("windows")) return true;
+    if (!filterInstalled_) { qApp->installNativeEventFilter(this); filterInstalled_ = true; }
+    return applySequence(sequence, nullptr, err);
+}
+bool QuickPaste::changeSequence(const QKeySequence& sequence, QSettings& settings, QString* err) {
+    return applySequence(sequence, &settings, err);
+}
+bool QuickPaste::applySequence(const QKeySequence& sequence, QSettings* settings, QString* err) {
+    if (err) err->clear();
+    const auto parsed = paste::parseHotkey(sequence);
+    if (!parsed) {
+        if (err) *err = QStringLiteral("Нужно одно сочетание Ctrl/Alt/Win с буквой, цифрой, Space или F1–F11. F12 зарезервирована Windows.");
         return false;
     }
-    hotkeyId_ = 1;
+    if (hotkeyId_ && sequence == sequence_) return true;
+    hotkeyHwnd_ = reinterpret_cast<HWND>(hidden_->winId());
+    const int candidate = hotkeyId_ == 1 ? 2 : 1;
+    if (!RegisterHotKey(hotkeyHwnd_, candidate, parsed->modifiers, parsed->key)) {
+        if (err) *err = QStringLiteral("Не удалось зарегистрировать %1: сочетание занято или недоступно.").arg(sequence.toString());
+        emit conflictDetected(sequence.toString());
+        return false;
+    }
+    if (settings) {
+        const auto previous = settings->value(QStringLiteral("hotkey"));
+        settings->setValue(QStringLiteral("hotkey"), sequence.toString(QKeySequence::PortableText));
+        settings->sync();
+        if (settings->status() != QSettings::NoError) {
+            UnregisterHotKey(hotkeyHwnd_, candidate);
+            if (previous.isValid()) settings->setValue(QStringLiteral("hotkey"), previous);
+            else settings->remove(QStringLiteral("hotkey"));
+            settings->sync();
+            if (err) *err = QStringLiteral("Настройки не сохранены. Прежнее сочетание остаётся активным; состояние файла настроек нужно проверить.");
+            return false;
+        }
+    }
+    if (hotkeyId_) UnregisterHotKey(hotkeyHwnd_, hotkeyId_);
+    hotkeyId_ = candidate; sequence_ = sequence;
     return true;
 }
-bool QuickPaste::nativeEventFilter(const QByteArray& type, void* message, qintptr*) {
-    if (type != "windows_generic_MSG") return false;
+bool QuickPaste::nativeEventFilter(const QByteArray& type, void* message, qintptr* result) {
+    if (type != "windows_generic_MSG" && type != "windows_dispatcher_MSG") return false;
     auto* msg = static_cast<MSG*>(message);
-    if (msg->message == WM_HOTKEY && msg->hwnd == hotkeyHwnd_ && msg->wParam == 1) panel_->popup();
+    if (hotkeyId_ && msg->message == WM_HOTKEY && msg->hwnd == hotkeyHwnd_ && msg->wParam == WPARAM(hotkeyId_)) {
+        panel_->popup();
+        if (result) *result = 0;
+        return true;
+    }
     return false;
 }
 void QuickPaste::popupPanel() { panel_->popup(); }
-std::pair<UINT, UINT> QuickPaste::splitSequence(const QKeySequence& ks) {
-    UINT mods = 0, vk = 0;
-    if (!ks.count()) return {0, 0};
-    const QKeyCombination c = ks[0];
-    if (c.keyboardModifiers() & Qt::CTRL) mods |= MOD_CONTROL;
-    if (c.keyboardModifiers() & Qt::ALT) mods |= MOD_ALT;
-    if (c.keyboardModifiers() & Qt::SHIFT) mods |= MOD_SHIFT;
-    if (c.keyboardModifiers() & Qt::META) mods |= MOD_WIN;
-    vk = UINT(c.key());
-    return {mods, vk};
-}
 }
 }

@@ -2,6 +2,8 @@
 #include <QAbstractNativeEventFilter>
 #include <QObject>
 #include <QString>
+#include <QKeySequence>
+#include <QSettings>
 #include <QWidget>
 #include <windows.h>
 namespace tb {
@@ -19,13 +21,17 @@ public:
     QuickPaste(Application& app, ClipboardGuard& clip, QWidget* panelParent, QObject* parent = nullptr);
     ~QuickPaste() override;
     bool start(QString* err);
-    bool reRegister(QString* err);
+    bool start(const QKeySequence& sequence, QString* err);
+    bool changeSequence(const QKeySequence& sequence, QSettings& settings, QString* err);
+    QKeySequence sequence() const { return sequence_; }
     void popupPanel();
     bool nativeEventFilter(const QByteArray& type, void* message, qintptr* result) override;
 signals:
     void conflictDetected(const QString& combo);
 private:
-    static std::pair<UINT, UINT> splitSequence(const class QKeySequence& ks);
+    bool applySequence(const QKeySequence& sequence, QSettings* settings, QString* err);
+    QKeySequence sequence_;
+    bool filterInstalled_ = false;
     Application& app_;
     ClipboardGuard& clip_;
     ui::MiniPanel* panel_;   // parentless-панель: живёт и при свёрнутом в трей окне; удаляем сами

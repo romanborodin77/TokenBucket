@@ -803,9 +803,8 @@ void MainWindow::changeHotkey() {
     if (dialog.exec() != QDialog::Accepted) return;
     const QKeySequence chosen = edit->keySequence();
     if (chosen.isEmpty()) { QMessageBox::warning(this, QStringLiteral("TokenBucket"), QStringLiteral("Сочетание не задано.")); return; }
-    settings.setValue(QStringLiteral("hotkey"), chosen.toString());
     QString error;
-    if (!hotkey_->reRegister(&error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+    if (!hotkey_->changeSequence(chosen, settings, &error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
 }
 bool MainWindow::canExportEnv() const {
     if (!ready()) return false;
