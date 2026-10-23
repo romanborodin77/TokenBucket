@@ -53,7 +53,7 @@ void apply(Mode mode) {
         p.setColor(QPalette::BrightText, Qt::red);
         p.setColor(QPalette::Link, QColor(0x6e, 0xa1, 0xe0));
         p.setColor(QPalette::LinkVisited, QColor(0x9a, 0x7a, 0xc8));
-        p.setColor(QPalette::Highlight, QColor(0x3d, 0x6a, 0x98));
+        p.setColor(QPalette::Highlight, QColor(0x20, 0x7c, 0x59));
         p.setColor(QPalette::Disabled, QPalette::Highlight, QColor(0x45, 0x45, 0x45));
         p.setColor(QPalette::HighlightedText, Qt::white);
         p.setColor(QPalette::Disabled, QPalette::HighlightedText, disabled);
@@ -62,7 +62,10 @@ void apply(Mode mode) {
         p.setColor(QPalette::PlaceholderText, QColor(0x8a, 0x8a, 0x8a));
         QApplication::setPalette(p);
     } else {
-        QApplication::setPalette(QApplication::style()->standardPalette());
+        auto p = QApplication::style()->standardPalette();
+        p.setColor(QPalette::Highlight, QColor(0x20, 0x7c, 0x59));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        QApplication::setPalette(p);
     }
 }
 }

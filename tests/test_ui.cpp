@@ -25,6 +25,7 @@
 #include <QSplitter>
 #include <QSignalSpy>
 #include "../src/app/Application.h"
+#include "../src/app/IdleTimer.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/MiniPanel.h"
 #include "../src/platform/ClipboardGuard.h"
@@ -58,6 +59,46 @@ class TestUi : public QObject {
     }
 private slots:
     void init() { uiPreferences_.clear(); }
+    void statusTickKeepsReveal() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        const auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "Project").isEmpty());
+        model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group;
+        entry.title = "<b>Plain title</b>"; entry.token = "synthetic-status-secret"; entry.note = "<img src='https://example.test/'>";
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); QCoreApplication::processEvents();
+        auto* copy = w.card()->findChild<QPushButton*>("copySecretButton"); QVERIFY(copy);
+        QCOMPARE(copy->palette().color(QPalette::Button), qApp->palette().color(QPalette::Highlight));
+        QVERIFY(w.findChild<QLabel*>("idleStatus"));
+        QVERIFY(w.findChild<QLabel*>("idleStatus")->text().contains(QStringLiteral("нет данных")));
+        const auto selected = w.list()->currentItem()->data(Qt::UserRole);
+        w.card()->revealButton()->click(); QCOMPARE(w.card()->secretText(), entry.token);
+        QVERIFY(QMetaObject::invokeMethod(&w, "refreshStatus", Qt::DirectConnection));
+        QCOMPARE(w.card()->secretText(), entry.token); QCOMPARE(w.list()->currentItem()->data(Qt::UserRole), selected);
+        QTest::qWait(1100); QCOMPARE(w.card()->secretText(), entry.token);
+        auto* timer = w.card()->findChild<QTimer*>("secretHideTimer"); QVERIFY(timer); QCOMPARE(timer->interval(), 15000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.card()->secretText(), QStringLiteral("••••••••"), 16000);
+        auto* idle = new IdleTimer(5000); w.setIdleTimer(idle);
+        delete idle; QVERIFY(QMetaObject::invokeMethod(&w, "refreshStatus", Qt::DirectConnection));
+        QVERIFY(w.findChild<QLabel*>("idleStatus")->text().contains(QStringLiteral("нет данных")));
+        auto* title = w.card()->findChild<QLabel*>("cardTitle"); QVERIFY(title);
+        QCOMPARE(title->textFormat(), Qt::PlainText); QCOMPARE(title->text(), entry.title);
+        auto* identity = w.card()->findChild<QLabel*>("cardIdentity"); QVERIFY(identity); QVERIFY(identity->text().contains("Project"));
+    }
+    void statusTickDoesNotExtendHiddenSession() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); QCoreApplication::processEvents();
+        IdleTimer idle(200); w.setIdleTimer(&idle);
+        connect(&idle, &IdleTimer::idleTimeout, &app, &Application::lock);
+        w.hide();
+        for (int i = 0; i < 5; ++i) {
+            QVERIFY(QMetaObject::invokeMethod(&w, "refreshStatus", Qt::DirectConnection));
+            QTest::qWait(20);
+        }
+        QTRY_COMPARE(app.gate(), Application::Gate::NeedUnlock);
+        QVERIFY(w.findChild<QLabel*>("vaultState")->text().contains(QStringLiteral("Заблокировано")));
+    }
     void mainGeometryFallbackAndWriteFailure() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
@@ -694,8 +735,10 @@ private slots:
     }
     void themeModesApplyAndLoad() {
         ui::theme::apply(ui::theme::Mode::Dark);
+        QVERIFY(qApp->palette().color(QPalette::Highlight).green() > qApp->palette().color(QPalette::Highlight).blue());
         QVERIFY(qApp->palette().color(QPalette::Base).lightness() < 64);   // тёмный Base из рецепта
         ui::theme::apply(ui::theme::Mode::Light);
+        QVERIFY(qApp->palette().color(QPalette::Highlight).green() > qApp->palette().color(QPalette::Highlight).blue());
         QVERIFY(qApp->palette().color(QPalette::Base).lightness() > 192);  // светлее тёмного
         QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
         const auto previous = settings.value(QStringLiteral("theme"));

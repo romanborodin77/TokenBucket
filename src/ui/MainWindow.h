@@ -1,11 +1,14 @@
 #pragma once
 #include <QMainWindow>
 #include <QSettings>
+#include <QPointer>
+#include <QDate>
 #include <optional>
 #include "../app/Application.h"
 #include "../platform/ClipboardGuard.h"
 #include <memory>
 namespace tb::platform { class QuickPaste; }
+namespace tb { class IdleTimer; }
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox;
 class QScrollArea; class QLabel; class QAction;
 class QPushButton;
@@ -32,6 +35,7 @@ public:
     void requestExit();
     void applyIdleTimeout(int minutes);
     void popupQuickPanel();
+    void setIdleTimer(IdleTimer* timer);
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
     QLineEdit* search() const { return search_; }
@@ -65,6 +69,8 @@ public slots:
 protected:
     void resizeEvent(QResizeEvent*) override;
     void closeEvent(QCloseEvent*) override;
+private slots:
+    void refreshStatus();
 private:
     enum class LibraryView { All, Favorites, Expiring, Group };
     void setLibraryView(LibraryView view);
@@ -82,6 +88,9 @@ private:
     QBoxLayout *headerLayout_{}, *filterLayout_{};
     QLabel* emptyHint_{};
     bool geometryErrorReported_ = false;
+    QPointer<IdleTimer> idleTimer_;
+    QLabel *idleStatus_{}, *clipboardStatus_{}, *hotkeyStatus_{};
+    QDate statusDate_ = QDateTime::currentDateTimeUtc().date();
     bool ready() const;
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
     void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);
@@ -96,6 +105,7 @@ private:
     void selectNode(model::Id id);
     void treeMenu(const QPoint& pos);
     void listMenu(const QPoint& pos);
+    void showEntryMenu(const QPoint& globalPos);
     void toggleFavorite();
     void updateSwitchActionText();
     int applyImport(const QByteArray& bytes, bool keepassXml, QString* err); // возвращает число добавленных

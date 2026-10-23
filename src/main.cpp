@@ -114,6 +114,7 @@ int runApp() {
             if (!ok) { QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"), error); continue; }
         } else {
             QEventLoop loop; tb::ui::MainWindow window(core); bool closed = false;
+            window.setIdleTimer(&idle);
             QObject::connect(&window, &tb::ui::MainWindow::notifyRequested, &tray, &tb::ui::TrayController::notify);
             mainWindow = &window;
             QObject::connect(&window, &tb::ui::MainWindow::closing, &loop, [&] { closed = true; loop.quit(); });

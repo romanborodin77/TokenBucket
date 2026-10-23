@@ -10,22 +10,33 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include "../platform/FileOps.h"
 namespace tb::ui {
 EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(app) {
     auto* layout = new QVBoxLayout(this);
-    title_ = new QLabel(this); metadata_ = new QLabel(this); error_ = new QLabel(this);
-    for (auto* label : {title_, metadata_, error_}) { label->setTextFormat(Qt::PlainText); label->setWordWrap(true); }
-    layout->addWidget(title_); layout->addWidget(metadata_);
+    layout->setContentsMargins(18, 16, 18, 16); layout->setSpacing(12);
+    title_ = new QLabel(this); title_->setObjectName(QStringLiteral("cardTitle"));
+    identity_ = new QLabel(this); identity_->setObjectName(QStringLiteral("cardIdentity"));
+    flags_ = new QLabel(this); flags_->setObjectName(QStringLiteral("cardFlags"));
+    metadata_ = new QLabel(this); metadata_->setObjectName(QStringLiteral("cardMetadata")); error_ = new QLabel(this);
+    for (auto* label : {title_, identity_, flags_, metadata_, error_}) { label->setTextFormat(Qt::PlainText); label->setWordWrap(true); }
+    auto titleFont = title_->font(); titleFont.setPointSize(titleFont.pointSize() + 5); titleFont.setBold(true); title_->setFont(titleFont);
+    auto* heading = new QHBoxLayout; heading->addWidget(title_, 1);
+    edit_ = new QPushButton(QStringLiteral("Изменить"), this); edit_->setObjectName(QStringLiteral("cardEdit")); heading->addWidget(edit_);
+    layout->addLayout(heading); layout->addWidget(identity_); layout->addWidget(flags_);
+    layout->addWidget(new QLabel(QStringLiteral("СЕКРЕТ"), this));
     value_ = new QPlainTextEdit(this); value_->setObjectName(QStringLiteral("entryDetails")); value_->setReadOnly(true);
     value_->setTextInteractionFlags(Qt::NoTextInteraction); value_->setFocusPolicy(Qt::NoFocus); value_->setContextMenuPolicy(Qt::NoContextMenu);
-    value_->setAccessibleName(QStringLiteral("Секретное значение")); layout->addWidget(value_, 1);
+    value_->setAccessibleName(QStringLiteral("Секретное значение")); value_->setMinimumHeight(80); value_->setMaximumHeight(140); layout->addWidget(value_);
     reveal_ = new QPushButton(QStringLiteral("Показать на 15 секунд"), this);
     copySecret_ = new QPushButton(QStringLiteral("Копировать секрет"), this); copySecret_->setObjectName(QStringLiteral("copySecretButton"));
     copyLogin_ = new QPushButton(QStringLiteral("Копировать логин"), this);
     copyPhrase_ = new QPushButton(QStringLiteral("Копировать фразу ключа"), this);
     sshToFile_ = new QPushButton(QStringLiteral("Сохранить ключ в файл…"), this); sshToFile_->setObjectName(QStringLiteral("sshToFileButton"));
+    more_ = new QPushButton(QStringLiteral("Дополнительно…"), this); more_->setObjectName(QStringLiteral("cardMore"));
     for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) layout->addWidget(button);
+    layout->addWidget(more_); layout->addSpacing(10); layout->addWidget(metadata_); layout->addStretch(1);
     layout->addWidget(error_);
     hideTimer_.setParent(this); hideTimer_.setObjectName(QStringLiteral("secretHideTimer")); hideTimer_.setSingleShot(true); hideTimer_.setInterval(15000);
     connect(&hideTimer_, &QTimer::timeout, this, &EntryCard::hideNowForTest);
@@ -38,18 +49,20 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(copyLogin_, &QPushButton::clicked, this, [this] { copyField(1); });
     connect(copyPhrase_, &QPushButton::clicked, this, [this] { copyField(2); });
     connect(sshToFile_, &QPushButton::clicked, this, &EntryCard::saveSshToFile);
+    connect(edit_, &QPushButton::clicked, this, &EntryCard::editRequested);
+    connect(more_, &QPushButton::clicked, this, &EntryCard::moreRequested);
     connect(&app_, &Application::busyChanged, this, &EntryCard::updateEnabled);
     // Инвариант: модель может быть очищена из QtConcurrent-потока (lock) — указатели на Entry
     // не живут через диалоги/циклы событий.
     connect(&app_, &Application::stateChanged, this, [this] { if (app_.gate() != Application::Gate::Ready) clear(); else updateEnabled(); });
-    qApp->installEventFilter(this); clear();
+    applyAccent(); qApp->installEventFilter(this); clear();
 }
 void EntryCard::updateEnabled() {
     const bool allowed = app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id_);
-    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) button->setEnabled(allowed);
+    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_}) button->setEnabled(allowed);
 }
 void EntryCard::hideNowForTest() { hideTimer_.stop(); value_->setPlainText(QStringLiteral("••••••••")); }
-void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); metadata_->clear(); error_->clear(); updateEnabled(); }
+void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); identity_->clear(); flags_->clear(); metadata_->clear(); error_->clear(); updateEnabled(); }
 void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(id) : nullptr;
@@ -59,17 +72,40 @@ void EntryCard::showEntry(model::Id id) {
               entry->expiresAt.toLocalTime().toString(QStringLiteral("dd.MM.yyyy")),
               QDateTime::currentDateTimeUtc() > entry->expiresAt ? QStringLiteral(" (просрочен)") : QString())
         : QString();
-    title_->setText(entry->title); metadata_->setText(QStringLiteral("%1 · изменено: %2%3\n%4\n%5\n%6").arg(
-        entry->type == model::EntryType::ApiToken ? QStringLiteral("API-токен")
-        : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("SSH-ключ"),
-        entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")),
-        expiryNote, entry->url, entry->note, entry->sshComment));
+    title_->setText(entry->title); metadata_->setText(QStringLiteral("Заметки: %1\n\nАдрес: %2\n\nИзменено: %3%4\n%5").arg(
+        entry->note, entry->url, entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")), expiryNote, entry->sshComment));
     const bool ssh = entry->type == model::EntryType::SshKey;
+    QStringList path;
+    auto node = entry->groupId;
+    for (int depth = 0; !node.isNull() && depth < model::VaultModel::MaxDepth; ++depth) {
+        const auto it = app_.model()->nodes().constFind(node);
+        if (it == app_.model()->nodes().cend()) break;
+        path.prepend(it->name); node = it->parent;
+    }
+    identity_->setText(QStringLiteral("%1 · %2").arg(ssh ? QStringLiteral("SSH-ключ")
+        : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("API-токен"), path.join(QStringLiteral(" / "))));
+    QStringList flags;
+    if (entry->favorite) flags << QStringLiteral("★ Избранное");
+    if (entry->reverify) flags << QStringLiteral("Повторная проверка");
+    if (!entry->tags.isEmpty()) flags << entry->tags.join(QStringLiteral(", "));
+    flags_->setText(flags.join(QStringLiteral(" · ")));
     reveal_->setVisible(!ssh); copySecret_->setText(ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
     copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty());
     sshToFile_->setVisible(ssh && !entry->sshPrivate.isEmpty()); updateEnabled();
 }
 QString EntryCard::secretText() const { return value_->toPlainText(); }
+void EntryCard::changeEvent(QEvent* event) {
+    QFrame::changeEvent(event);
+    if (copySecret_ && (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange)) applyAccent();
+}
+void EntryCard::applyAccent() {
+    auto p = qApp->palette();
+    p.setColor(QPalette::Active, QPalette::Button, p.color(QPalette::Highlight));
+    p.setColor(QPalette::Inactive, QPalette::Button, p.color(QPalette::Highlight));
+    p.setColor(QPalette::Active, QPalette::ButtonText, p.color(QPalette::HighlightedText));
+    p.setColor(QPalette::Inactive, QPalette::ButtonText, p.color(QPalette::HighlightedText));
+    copySecret_->setPalette(p);
+}
 bool EntryCard::authorize() {
     if (app_.gate() != Application::Gate::Ready || app_.busy()) return false;
     const auto* entry = app_.model()->entry(id_); if (!entry) return false;

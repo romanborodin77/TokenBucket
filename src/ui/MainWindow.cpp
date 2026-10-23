@@ -7,6 +7,9 @@
 #include "ExportDialog.h"
 #include "Theme.h"
 #include "VerifyDialog.h"
+#include "../app/IdleTimer.h"
+#include <QGridLayout>
+#include <QTimer>
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
@@ -283,14 +286,30 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(deleteNode, &QShortcut::activated, this, &MainWindow::deleteSelectedNode);
     error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
     setCentralWidget(central);
-    vaultInfo_ = new QLabel(statusBar()); vaultInfo_->setTextFormat(Qt::PlainText);
-    statusBar()->addPermanentWidget(vaultInfo_);
+    auto* statuses = new QWidget(statusBar()); auto* statusLayout = new QGridLayout(statuses);
+    statusLayout->setContentsMargins(6, 2, 6, 2);
+    vaultInfo_ = new QLabel(statuses); vaultInfo_->setObjectName(QStringLiteral("vaultState"));
+    idleStatus_ = new QLabel(statuses); idleStatus_->setObjectName(QStringLiteral("idleStatus"));
+    clipboardStatus_ = new QLabel(statuses); clipboardStatus_->setObjectName(QStringLiteral("clipboardStatus"));
+    hotkeyStatus_ = new QLabel(statuses); hotkeyStatus_->setObjectName(QStringLiteral("hotkeyStatus"));
+    int statusIndex = 0;
+    for (auto* label : {vaultInfo_, idleStatus_, clipboardStatus_, hotkeyStatus_}) {
+        label->setTextFormat(Qt::PlainText); label->setWordWrap(true); label->setMinimumWidth(0);
+        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        statusLayout->addWidget(label, statusIndex / 2, statusIndex % 2); ++statusIndex;
+    }
+    statusLayout->setColumnStretch(0, 1); statusLayout->setColumnStretch(1, 1);
+    statusBar()->addWidget(statuses, 1);
+    auto* statusTimer = new QTimer(this); statusTimer->setObjectName(QStringLiteral("statusRefreshTimer")); statusTimer->setInterval(1000);
+    connect(statusTimer, &QTimer::timeout, this, &MainWindow::refreshStatus); statusTimer->start();
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { if (tree_->currentItem()) setLibraryView(LibraryView::Group); });
     connect(search_, &QLineEdit::textChanged, this, [this] { refillList(); });
     connect(list_, &QListWidget::currentItemChanged, this, &MainWindow::showMetadata);
     connect(list_, &QListWidget::itemDoubleClicked, this, [this] { if (!narrow_) editSelected(); });
     connect(list_, &QListWidget::itemClicked, this, &MainWindow::openCardDialog);
     connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
+    connect(card_, &EntryCard::editRequested, this, &MainWindow::editSelected);
+    connect(card_, &EntryCard::moreRequested, this, [this] { showEntryMenu(card_->mapToGlobal(QPoint(0, card_->height()))); });
     connect(card_, &EntryCard::copyRequested, this, [this](const QString& text) {
         if (!ready()) return; QString error;
         if (!clipboard_.copySecret(text, &error)) { if (app_.gate() == Application::Gate::Ready) report(error); }
@@ -300,7 +319,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
         }
     });
     connect(&clipboard_, &ClipboardGuard::cleared, this, [this] { emit notifyRequested(QStringLiteral("Буфер обмена очищен")); });
-    connect(&app_, &Application::busyChanged, this, [this](bool busy) { updateEnabled(); statusBar()->showMessage(busy ? QStringLiteral("Выполняется операция…") : QString()); });
+    connect(&app_, &Application::busyChanged, this, [this](bool busy) { updateEnabled(); refreshStatus(); statusBar()->showMessage(busy ? QStringLiteral("Выполняется операция…") : QString()); });
     connect(&app_, &Application::stateChanged, this, [this] {
         if (app_.gate() != Application::Gate::Ready) {
             clipboard_.clearIfOurs(); card_->clear();
@@ -326,6 +345,29 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     refreshAll(); restoreUiState();
 }
 MainWindow::~MainWindow() { saveUiState(); }
+void MainWindow::setIdleTimer(IdleTimer* timer) { idleTimer_ = timer; refreshStatus(); }
+void MainWindow::refreshStatus() {
+    vaultInfo_->setText(app_.gate() != Application::Gate::Ready ? QStringLiteral("Заблокировано")
+        : app_.busy() ? QStringLiteral("Выполняется операция…") : QStringLiteral("Разблокировано"));
+    const int remaining = idleTimer_ ? idleTimer_->remainingMs() : -1;
+    idleStatus_->setText(!idleTimer_ ? QStringLiteral("Автоблокировка: нет данных")
+        : remaining < 0 ? QStringLiteral("Автоблокировка: неактивна")
+        : QStringLiteral("Автоблокировка через %1:%2").arg((remaining + 999) / 1000 / 60)
+            .arg((remaining + 999) / 1000 % 60, 2, 10, QLatin1Char('0')));
+    const auto clip = clipboard_.snapshot();
+    clipboardStatus_->setText(!clip.owned ? QStringLiteral("Буфер: нет своей публикации")
+        : clip.clearPending ? QStringLiteral("Буфер: очистка ожидает освобождения")
+        : QStringLiteral("Очистка своего буфера через %1 с").arg(qMax(0, (clip.remainingMs + 999) / 1000)));
+#ifdef Q_OS_WIN
+    const auto sequence = hotkey_ ? hotkey_->sequence() : QKeySequence();
+    hotkeyStatus_->setText(sequence.isEmpty() ? QStringLiteral("Быстрая вставка: не зарегистрировано")
+        : QStringLiteral("Быстрая вставка: %1").arg(sequence.toString(QKeySequence::NativeText)));
+#else
+    hotkeyStatus_->setText(QStringLiteral("Глобальная вставка недоступна на этой платформе"));
+#endif
+    const auto date = QDateTime::currentDateTimeUtc().date();
+    if (date != statusDate_) { statusDate_ = date; updateLibraryCounts(); refillList(); }
+}
 void MainWindow::restoreUiState() {
     const auto area = screen()->availableGeometry().adjusted(8, 32, -8, -8);
     resize(QSize(1240, 800).boundedTo(area.size()));
@@ -421,6 +463,7 @@ void MainWindow::refreshAll() {
         vaultInfo_->setText(QStringLiteral("Записей: %1 · Проектов и групп: %2 · Разблокировка: %3")
             .arg(app_.model()->entries().size()).arg(app_.model()->nodes().size()).arg(mode));
     } else vaultInfo_->clear();
+    refreshStatus();
 }
 void MainWindow::refillList(model::Id selected) {
     if (selected.isNull()) selected = selectedEntry();
@@ -872,6 +915,10 @@ void MainWindow::listMenu(const QPoint& pos) {
     const auto item = list_->itemAt(pos);
     if (!item || !ready()) return;
     list_->setCurrentItem(item);
+    showEntryMenu(list_->viewport()->mapToGlobal(pos));
+}
+void MainWindow::showEntryMenu(const QPoint& globalPos) {
+    if (!ready() || selectedEntry().isNull()) return;
     const auto id = selectedEntry();
     QMenu menu(this);
     menu.addAction(QStringLiteral("Изменить…\tF2"), this, &MainWindow::editSelected);
@@ -888,7 +935,7 @@ void MainWindow::listMenu(const QPoint& pos) {
     connect(favorite, &QAction::toggled, this, &MainWindow::toggleFavorite);
     menu.addSeparator();
     menu.addAction(QStringLiteral("Удалить\tDel"), this, &MainWindow::deleteSelected);
-    menu.exec(list_->viewport()->mapToGlobal(pos));
+    menu.exec(globalPos);
 }
 void MainWindow::toggleFavorite() {
     const auto id = selectedEntry();
@@ -931,6 +978,7 @@ void MainWindow::changeHotkey() {
     if (chosen.isEmpty()) { QMessageBox::warning(this, QStringLiteral("TokenBucket"), QStringLiteral("Сочетание не задано.")); return; }
     QString error;
     if (!hotkey_->changeSequence(chosen, settings, &error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+    refreshStatus();
 }
 bool MainWindow::canExportEnv() const {
     if (!ready()) return false;
