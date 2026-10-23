@@ -1,5 +1,6 @@
 #pragma once
 #include <QMainWindow>
+#include <QSettings>
 #include <optional>
 #include "../app/Application.h"
 #include "../platform/ClipboardGuard.h"
@@ -8,6 +9,7 @@ namespace tb::platform { class QuickPaste; }
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox;
 class QScrollArea; class QLabel; class QAction;
 class QPushButton;
+class QSplitter; class QBoxLayout;
 namespace tb::ui {
 class EntryCard;
 // Главное окно: дерево проектов/групп — список записей с фильтрами/сортировкой —
@@ -20,7 +22,7 @@ class EntryCard;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(Application& app, QWidget* parent = nullptr);
+    explicit MainWindow(Application& app, QWidget* parent = nullptr, QSettings* uiPreferences = nullptr);
     ~MainWindow() override;
     void refreshAll();
     bool moveNodeTo(model::Id node, model::Id newParent);
@@ -72,6 +74,14 @@ private:
     QPushButton *libraryAll_{}, *libraryFavorites_{}, *libraryExpiring_{};
     QLabel *searchScope_{}, *listSummary_{};
     model::Id displayedEntry_;
+    void restoreUiState();
+    void saveUiState();
+    QSettings uiSettings_{QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket")};
+    QSettings* preferences_{};
+    QSplitter* splitter_{};
+    QBoxLayout *headerLayout_{}, *filterLayout_{};
+    QLabel* emptyHint_{};
+    bool geometryErrorReported_ = false;
     bool ready() const;
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
     void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);

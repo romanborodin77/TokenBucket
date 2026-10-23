@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QTemporaryDir>
+#include <QSettings>
 #include <QTimer>
 #include <QCheckBox>
 #include <QComboBox>
@@ -265,7 +266,8 @@ private slots:
         QVERIFY(app.model()->addNode(group, project, "Сервисы").isEmpty());
 
         // 3. Три записи через РЕАЛЬНЫЙ редактор: токен с тегами, креды с генератором, SSH из файла.
-        ui::MainWindow w(app); w.show();
+        QSettings uiPreferences(dir_.filePath("main-window.ini"), QSettings::IniFormat);
+        ui::MainWindow w(app, nullptr, &uiPreferences); w.show();
         {
             ::EntryEditDialog tokenDialog(*app.model(), std::nullopt, &w);
             tokenDialog.setGroup(group);

@@ -22,6 +22,7 @@
 #include <QDateEdit>
 #include <QAccessible>
 #include <QSettings>
+#include <QSplitter>
 #include <QSignalSpy>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
@@ -36,6 +37,7 @@ using namespace tb;
 class TestUi : public QObject {
     Q_OBJECT
     QTemporaryDir dir_;
+    QSettings uiPreferences_{dir_.filePath("window-test.ini"), QSettings::IniFormat};
     static void answerText(QWidget& owner, const QString& text) {
         QTimer::singleShot(0, &owner, [text] {
             if (auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) { dialog->setTextValue(text); dialog->accept(); }
@@ -55,6 +57,37 @@ class TestUi : public QObject {
         QTimer::singleShot(0, &owner, [] { if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click(); });
     }
 private slots:
+    void init() { uiPreferences_.clear(); }
+    void mainGeometryFallbackAndWriteFailure() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        QSettings prefs(dir.filePath("geometry.ini"), QSettings::IniFormat);
+        prefs.setValue("legacy", "unchanged");
+        prefs.setValue("ui/mainGeometry", QByteArray("broken"));
+        prefs.setValue("ui/mainSplitter", QByteArray("broken"));
+        {
+            ui::MainWindow w(app, nullptr, &prefs); w.show();
+            QVERIFY(w.findChild<QSplitter*>("mainSplitter"));
+            QVERIFY(!w.findChild<QSplitter*>("mainSplitter")->childrenCollapsible());
+            QVERIFY(w.screen()->availableGeometry().intersects(w.frameGeometry()));
+            w.move(30000, 30000); w.close();
+        }
+        {
+            ui::MainWindow restored(app, nullptr, &prefs); restored.show();
+            QVERIFY(restored.screen()->availableGeometry().contains(restored.frameGeometry().center()));
+            restored.resize(650, 550); QCoreApplication::processEvents();
+            QVERIFY(restored.findChild<QStackedWidget*>("entryPanel")->isHidden());
+            restored.close();
+        }
+        prefs.sync(); QCOMPARE(prefs.status(), QSettings::NoError);
+        QCOMPARE(prefs.value("legacy").toString(), QStringLiteral("unchanged"));
+        QCOMPARE(prefs.allKeys(), QStringList({"legacy", "ui/mainGeometry", "ui/mainSplitter"}));
+        QSettings denied(dir.path(), QSettings::IniFormat);
+        const auto original = app.model()->toCbor();
+        ui::MainWindow w(app, nullptr, &denied); w.show(); w.close();
+        QVERIFY(w.findChild<QLabel*>("operationError")->text().contains(QStringLiteral("не сохранено")));
+        QCOMPARE(app.model()->toCbor(), original);
+    }
     void libraryRequiresDestination() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
@@ -68,7 +101,7 @@ private slots:
         editor.accept(); QVERIFY(!editor.entry());
         editor.setGroup(group); editor.accept(); QVERIFY(editor.entry());
         QCOMPARE(editor.entry()->groupId, group);
-        ui::MainWindow w(app);
+        ui::MainWindow w(app, nullptr, &uiPreferences_);
         QVERIFY(!w.tree()->currentItem());
         auto* all = w.findChild<QAbstractButton*>("libraryAll");
         QVERIFY(all); QVERIFY(all->isChecked());
@@ -96,7 +129,7 @@ private slots:
             if (i > 0) e.expiresAt = QDateTime::currentDateTimeUtc().addDays(i == 1 ? -1 : i == 2 ? 0 : i == 3 ? 30 : 31);
             QVERIFY(app.model()->setEntry(e).isEmpty());
         }
-        ui::MainWindow w(app);
+        ui::MainWindow w(app, nullptr, &uiPreferences_);
         QCOMPARE(w.list()->count(), 5); QVERIFY(!w.tree()->currentItem());
         auto* favorites = w.findChild<QAbstractButton*>("libraryFavorites");
         auto* expiring = w.findChild<QAbstractButton*>("libraryExpiring");
@@ -130,7 +163,7 @@ private slots:
         QVERIFY(app.model()->setEntry(e).isEmpty());
         auto other = e; other.id = QUuid::createUuid(); other.token = "second";
         QVERIFY(app.model()->setEntry(other).isEmpty());
-        ui::MainWindow w(app); w.list()->setCurrentRow(1);
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.list()->setCurrentRow(1);
         const auto selected = w.list()->currentItem()->data(Qt::UserRole).value<model::Id>();
         w.refreshAll(); QCOMPARE(w.list()->currentItem()->data(Qt::UserRole).value<model::Id>(), selected);
         w.card()->revealButton()->click(); QVERIFY(w.card()->secretText() != QStringLiteral("••••••••"));
@@ -188,7 +221,7 @@ private slots:
     void crudThroughModelAndRefresh() {
         Application app(dir_.path());
         QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
-        ui::MainWindow w(app);
+        ui::MainWindow w(app, nullptr, &uiPreferences_);
         w.show();
         model::Id p{QUuid::createUuid()};
         QVERIFY(app.model()->addNode(p, model::Id(), "Проект UI").isEmpty());
@@ -212,7 +245,7 @@ private slots:
     void allTypesThroughDialogsAndReopen() {
         const auto path = dir_.path() + "/dialog-flow";
         Application app(path); QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         answerText(w, QStringLiteral("Проект UI")); w.addProject(); QCOMPARE(w.tree()->topLevelItemCount(), 1);
         answerText(w, QStringLiteral("Группа")); w.addGroup(); QCOMPARE(w.tree()->topLevelItem(0)->childCount(), 1);
         w.tree()->setCurrentItem(w.tree()->topLevelItem(0)->child(0));
@@ -269,13 +302,13 @@ private slots:
         Application reopened(path); QVERIFY(reopened.unlock("пароль-теста-123", &err));
         QCOMPARE(reopened.model()->entries().size(), 3); QCOMPARE(reopened.model()->entry(ssh)->sshPrivate, key);
         QCOMPARE(reopened.model()->entry(credential)->groupId, other);
-        ui::MainWindow again(reopened); again.show(); again.search()->setText(QStringLiteral("Запись 0"));
+        ui::MainWindow again(reopened, nullptr, &uiPreferences_); again.show(); again.search()->setText(QStringLiteral("Запись 0"));
         QCOMPARE(again.list()->count(), 1); confirm(again); again.deleteSelected(); QCOMPARE(reopened.model()->entries().size(), 2);
         again.requestExit(); QVERIFY(reopened.unlock("пароль-теста-123", &err)); QCOMPARE(reopened.model()->entries().size(), 2);
     }
     void renameMoveAndDeleteNodes() {
         Application app(dir_.path() + "/nodes"); QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         answerText(w, QStringLiteral("А")); w.addProject(); answerText(w, QStringLiteral("Б")); w.addProject();
         QCOMPARE(w.tree()->topLevelItemCount(), 2);
         const auto destination = w.tree()->topLevelItem(1)->data(0,Qt::UserRole).value<model::Id>();
@@ -297,7 +330,7 @@ private slots:
     }
     void failedSaveRollsBackUiAndModel() {
         Application app(dir_.path() + "/failed-save"); QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         QFile main(app.storePathForTest()); QVERIFY(main.open(QIODevice::ReadOnly)); const auto original = main.readAll(); main.close();
         const auto blockedTmp = app.storePathForTest() + ".tmp"; QVERIFY(QDir().mkdir(blockedTmp));
         answerText(w, QStringLiteral("Не сохранится")); w.addProject();
@@ -310,7 +343,7 @@ private slots:
     }
     void lockDuringSaveDoesNotRestoreSnapshot() {
         Application app(dir_.path() + "/save-lock"); QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
-        ui::MainWindow w(app); w.show(); bool disabled = false;
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); bool disabled = false;
         auto connection = connect(&app, &Application::busyChanged, &w, [&](bool busy) {
             if (busy) { disabled = !w.centralWidget()->isEnabled(); app.lock(); }
         });
@@ -323,7 +356,7 @@ private slots:
         const auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "Проект").isEmpty());
         model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group; entry.type = model::EntryType::Credentials; entry.title = "Учётная запись"; entry.password = "TEST_PASSWORD_123456";
         QVERIFY(app.model()->setEntry(entry).isEmpty()); QVERIFY(app.save(&err));
-        ui::MainWindow w(app); w.show(); bool cleared = false;
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); bool cleared = false;
         QTimer::singleShot(0, &w, [&] {
             auto* dialog = qobject_cast<EntryEditDialog*>(QApplication::activeModalWidget());
             if (dialog) { auto* password = field(*dialog, "entryPassword"); app.lock(); cleared = password->text().isEmpty() && !dialog->entry(); }
@@ -387,7 +420,7 @@ private slots:
         model::Entry e; e.id = QUuid::createUuid(); e.groupId = group;
         e.type = model::EntryType::ApiToken; e.title = "Защищённая"; e.token = "very-secret"; e.reverify = true;
         QVERIFY(app.model()->setEntry(e).isEmpty());
-        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
         QVERIFY(w.list()->count() == 1);
         // Неверный пароль в повторной проверке — редактор не открывается вовсе.
         QString lastAnswer(QStringLiteral("wrong-password-xx"));
@@ -417,7 +450,7 @@ private slots:
         // главное окно скрыто в трей — раньше Qt::Tool прятался вместе с родителем.
         Application app(dir_.path() + "/qp-hidden"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
         auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
-        ui::MainWindow w(app); // окно не показываем вовсе
+        ui::MainWindow w(app, nullptr, &uiPreferences_); // окно не показываем вовсе
         w.popupQuickPanel();
         QWidget* panel = nullptr;
         for (auto* top : QApplication::topLevelWidgets())
@@ -439,7 +472,7 @@ private slots:
         make(QStringLiteral("Истекающая"), QDate::currentDate().addDays(10));
         make(QStringLiteral("Просроченная"), QDate::currentDate().addDays(-3));
         QVERIFY(app.save(&error));
-        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
         QCOMPARE(w.list()->count(), 3);
         // Редактор: чекбокс и календарная дата переживают круг через запись.
         ::EntryEditDialog dialog(*app.model(), std::nullopt);
@@ -511,7 +544,7 @@ private slots:
         bystander.type = model::EntryType::ApiToken; bystander.title = "Свидетель"; bystander.token = "tok-neighbor";
         QVERIFY(app.model()->setEntry(victim).isEmpty()); QVERIFY(app.model()->setEntry(bystander).isEmpty());
         QVERIFY(app.save(&error));
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         // Ошибка мутации: точечный откат возвращает запись, сосед не тронут.
         QVERIFY(!w.commitEntry([&](auto& model) {
             auto broken = *model.entry(victim.id);
@@ -542,7 +575,7 @@ private slots:
         newer.created = newer.modified = QDateTime::currentDateTimeUtc();
         QVERIFY(app.model()->setEntry(older).isEmpty()); QVERIFY(app.model()->setEntry(newer).isEmpty());
         QVERIFY(app.save(&error));
-        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
         auto* filter = w.findChild<QComboBox*>(QStringLiteral("typeFilter"));
         auto* sort = w.findChild<QComboBox*>(QStringLiteral("sortMode"));
         QVERIFY(filter); QVERIFY(sort);
@@ -565,7 +598,7 @@ private slots:
         QVERIFY(app.model()->setEntry(alpha).isEmpty()); QVERIFY(app.model()->setEntry(beta).isEmpty());
         QVERIFY(app.model()->setEntry(gamma).isEmpty());
         QVERIFY(app.save(&error));
-        ui::MainWindow w(app); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.tree()->setCurrentItem(w.tree()->topLevelItem(0));
         auto* tagBar = w.findChild<QWidget*>(QStringLiteral("tagBar")); QVERIFY(tagBar);
         QCOMPARE(w.list()->count(), 3);
         QToolButton *prod = nullptr, *web = nullptr;
@@ -593,7 +626,7 @@ private slots:
         QVERIFY(app.model()->addNode(project, {}, "P").isEmpty());
         QVERIFY(app.model()->addNode(first, project, "G1").isEmpty());
         QVERIFY(app.model()->addNode(second, first, "G2").isEmpty());
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         QVERIFY(w.moveNodeTo(first, project));                       // вверх — допустимо
         QCOMPARE(app.model()->nodes().value(first).parent, project);
         QVERIFY(!w.moveNodeTo(project, first));                      // проект нельзя
@@ -636,7 +669,7 @@ private slots:
     }
     void closeToTrayAndExit() {
         Application app(dir_.path() + "/close-tray"); QString err; QVERIFY(app.createPasswordVault("valid-password", &err));
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         w.close();                                                       // крестик: скрыть в трей, без блокировки
         QVERIFY(w.isHidden()); QCOMPARE(app.gate(), Application::Gate::Ready);
         QSignalSpy closing(&w, &ui::MainWindow::closing);
@@ -645,7 +678,7 @@ private slots:
     }
     void idleTimeoutClampAndPersist() {
         Application app(dir_.path() + "/idle"); QString err; QVERIFY(app.createPasswordVault("valid-password", &err));
-        ui::MainWindow w(app); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
         QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
         const auto previous = settings.value(QStringLiteral("idleTimeoutMinutes"));
         QSignalSpy changed(&w, &ui::MainWindow::idleTimeoutChanged);

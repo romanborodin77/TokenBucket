@@ -84,8 +84,9 @@ protected:
     }
 };
 }
-MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent), app_(app) {
-    setWindowTitle(QStringLiteral("TokenBucket"));    const auto available = screen()->availableGeometry(); resize(qMin(1080, available.width() - 40), qMin(660, available.height() - 80));
+MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferences)
+    : QMainWindow(parent), preferences_(uiPreferences ? uiPreferences : &uiSettings_), app_(app) {
+    setWindowTitle(QStringLiteral("TokenBucket"));
     auto* vault = menuBar()->addMenu(QStringLiteral("&Хранилище"));
     auto* projects = menuBar()->addMenu(QStringLiteral("&Проекты и группы"));
     auto* entries = menuBar()->addMenu(QStringLiteral("&Записи"));
@@ -177,18 +178,30 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     // Настоящий выход из приложения: requestExit ставит exiting_ — closeEvent блокирует
     // хранилище и завершает работу. Крестик окна по-прежнему лишь сворачивает в трей.
     vault->addAction(QStringLiteral("Выход"), this, &MainWindow::requestExit, QKeySequence::Quit);
-    auto* toolbar = addToolBar(QStringLiteral("Действия")); toolbar->setMovable(false); toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    toolbar->addAction(addProjectAction); toolbar->addAction(addEntryAction); toolbar->addAction(edit); toolbar->addSeparator(); toolbar->addAction(lock);
     addProjectAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogNewFolder));
     addEntryAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     edit->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
     lock->setIcon(style()->standardIcon(QStyle::SP_VistaShield));
     auto* central = new QWidget(this); auto* layout = new QVBoxLayout(central);
+    // The wide splitter's size hint must not prevent entering the narrow dialog mode.
+    central->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    layout->setSizeConstraint(QLayout::SetNoConstraint); setMinimumSize(480, 400);
+    layout->setContentsMargins(18, 16, 18, 12); layout->setSpacing(14);
+    auto* header = new QWidget(central); header->setObjectName(QStringLiteral("mainHeader"));
+    headerLayout_ = new QBoxLayout(QBoxLayout::LeftToRight, header); headerLayout_->setContentsMargins(0, 0, 0, 0); headerLayout_->setSpacing(14);
+    auto* heading = new QLabel(QStringLiteral("Личное хранилище"), header);
+    auto headingFont = heading->font(); headingFont.setPointSize(headingFont.pointSize() + 5); headingFont.setBold(true); heading->setFont(headingFont);
+    headerLayout_->addWidget(heading, 1);
     auto* controls = new QWidget(central); auto* controlsLayout = new QHBoxLayout(controls);
     controlsLayout->setContentsMargins(0, 0, 0, 0);
     search_ = new QLineEdit(controls); search_->setObjectName(QStringLiteral("vaultSearch")); search_->setAccessibleName(QStringLiteral("Поиск по хранилищу"));
     search_->setPlaceholderText(QStringLiteral("Поиск по названиям, логинам, проектам и заметкам — во всём хранилище"));
-    controlsLayout->addWidget(search_, 1);
+    search_->setPlaceholderText(QStringLiteral("Поиск по хранилищу…  Ctrl+K")); search_->setClearButtonEnabled(true);
+    search_->setMinimumWidth(180); headerLayout_->addWidget(search_, 2);
+    auto* newEntry = new QToolButton(header); newEntry->setDefaultAction(addEntryAction); newEntry->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    newEntry->setAccessibleName(QStringLiteral("Новая запись")); headerLayout_->addWidget(newEntry);
+    layout->addWidget(header);
+    filterLayout_ = controlsLayout;
     typeFilter_ = new QComboBox(controls); typeFilter_->setObjectName(QStringLiteral("typeFilter"));
     typeFilter_->setAccessibleName(QStringLiteral("Фильтр по типу записи"));
     typeFilter_->addItems({QStringLiteral("Все типы"), QStringLiteral("API-токены"), QStringLiteral("Учётные данные"), QStringLiteral("SSH-ключи")});
@@ -199,11 +212,9 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     expiryFilter_->setAccessibleName(QStringLiteral("Фильтр по сроку действия"));
     expiryFilter_->addItems({QStringLiteral("Любой срок"), QStringLiteral("Истекают (30 дн.)"), QStringLiteral("Просрочены")});
     controlsLayout->addWidget(typeFilter_); controlsLayout->addWidget(sortMode_); controlsLayout->addWidget(expiryFilter_);
-    layout->addWidget(controls);
     tagBar_ = new QWidget(central); tagBar_->setObjectName(QStringLiteral("tagBar"));
     auto* tagLayout = new QHBoxLayout(tagBar_); tagLayout->setContentsMargins(0, 0, 0, 0);
     tagLayout->addStretch(1);
-    layout->addWidget(tagBar_);
     connect(typeFilter_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     connect(sortMode_, &QComboBox::currentIndexChanged, this, [this](int) { refillList(); });
     connect(expiryFilter_, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -213,7 +224,9 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
         }
         refillList();
     });
-    auto* splitter = new QSplitter(central);
+    auto* splitter = new QSplitter(central); splitter_ = splitter;
+    splitter->setObjectName(QStringLiteral("mainSplitter")); splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(10);
     auto* library = new QWidget(splitter); auto* libraryLayout = new QVBoxLayout(library);
     libraryLayout->setContentsMargins(0, 0, 0, 0);
     libraryLayout->addWidget(new QLabel(QStringLiteral("Библиотека"), library));
@@ -227,21 +240,35 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     connect(libraryFavorites_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::Favorites); });
     connect(libraryExpiring_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::Expiring); });
     auto* vaultTree = new VaultTree(library); tree_ = vaultTree; libraryLayout->addWidget(tree_, 1);
+    library->setMinimumWidth(170); tree_->setMinimumWidth(150);
+    auto* newProject = new QToolButton(library); newProject->setDefaultAction(addProjectAction); newProject->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    newProject->setAccessibleName(QStringLiteral("Новый проект")); libraryLayout->addWidget(newProject);
     vaultTree->moveRequest = [this](model::Id node, model::Id target) { return moveNodeTo(node, target); };
     vaultTree->setDragEnabled(true); vaultTree->setAcceptDrops(true);
     vaultTree->setDragDropMode(QAbstractItemView::InternalMove); vaultTree->setDefaultDropAction(Qt::MoveAction);
     vaultTree->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setHeaderLabel(QStringLiteral("Проекты и группы")); tree_->setAccessibleName(QStringLiteral("Проекты и группы"));
-    list_ = new QListWidget(splitter); list_->setAccessibleName(QStringLiteral("Записи выбранной группы")); list_->setMinimumWidth(160);
+    auto* results = new QWidget(splitter); results->setMinimumWidth(260);
+    auto* resultsLayout = new QVBoxLayout(results); resultsLayout->setContentsMargins(0, 0, 0, 0); resultsLayout->setSpacing(10);
+    list_ = new QListWidget(results); list_->setAccessibleName(QStringLiteral("Список записей")); list_->setMinimumWidth(160); list_->setSpacing(4);
+    list_->setWordWrap(true); list_->setUniformItemSizes(true);
     right_ = new QStackedWidget(splitter); right_->setObjectName(QStringLiteral("entryPanel"));
     auto* hint = new QLabel(QStringLiteral("Создайте проект и добавьте запись или выберите существующую запись."), right_);
+    emptyHint_ = hint;
     hint->setWordWrap(true); hint->setTextFormat(Qt::PlainText); right_->addWidget(hint);
     cardScroll_ = new QScrollArea(right_); cardScroll_->setWidgetResizable(true); cardScroll_->setFrameShape(QFrame::NoFrame);
     card_ = new EntryCard(app_, cardScroll_); cardScroll_->setWidget(card_); right_->addWidget(cardScroll_);
-    splitter->addWidget(library); splitter->addWidget(list_); splitter->addWidget(right_); splitter->setSizes({250,300,500});
+    right_->setMinimumWidth(260);
+    splitter->addWidget(library); splitter->addWidget(results); splitter->addWidget(right_); splitter->setSizes({250,350,640});
     searchScope_ = new QLabel(central); searchScope_->setObjectName(QStringLiteral("searchScope")); searchScope_->setTextFormat(Qt::PlainText);
     listSummary_ = new QLabel(central); listSummary_->setObjectName(QStringLiteral("listSummary")); listSummary_->setTextFormat(Qt::PlainText);
-    layout->addWidget(searchScope_); layout->addWidget(listSummary_); layout->addWidget(splitter, 1);
+    searchScope_->setWordWrap(true); listSummary_->setWordWrap(true);
+    resultsLayout->addWidget(searchScope_); resultsLayout->addWidget(listSummary_); resultsLayout->addWidget(controls);
+    auto* tagsScroll = new QScrollArea(results); tagsScroll->setWidgetResizable(true); tagsScroll->setFrameShape(QFrame::NoFrame);
+    tagsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); tagsScroll->setFixedHeight(44); tagsScroll->setWidget(tagBar_);
+    resultsLayout->addWidget(tagsScroll); resultsLayout->addWidget(list_, 1);
+    layout->addWidget(splitter, 1);
+    for (auto* combo : {typeFilter_, sortMode_, expiryFilter_}) { combo->setMinimumContentsLength(7); combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); }
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, &MainWindow::treeMenu);
     list_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -281,7 +308,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
                 if (auto* editDialog = qobject_cast<EntryEditDialog*>(dialog)) editDialog->clearSecrets();
                 dialog->reject();
             }
-            search_->clear(); error_->clear(); hide();
+            search_->clear(); error_->clear(); saveUiState(); hide();
         }
         refreshAll();
     });
@@ -296,9 +323,29 @@ MainWindow::MainWindow(Application& app, QWidget* parent) : QMainWindow(parent),
     });
     hotkey_->start(nullptr);
 #endif
-    refreshAll();
+    refreshAll(); restoreUiState();
 }
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() { saveUiState(); }
+void MainWindow::restoreUiState() {
+    const auto area = screen()->availableGeometry().adjusted(8, 32, -8, -8);
+    resize(QSize(1240, 800).boundedTo(area.size()));
+    const auto geometry = preferences_->value(QStringLiteral("ui/mainGeometry")).toByteArray();
+    if (!geometry.isEmpty()) restoreGeometry(geometry);
+    const auto state = preferences_->value(QStringLiteral("ui/mainSplitter")).toByteArray();
+    if (state.isEmpty() || !splitter_->restoreState(state)) splitter_->setSizes({250,350,640});
+    resize(size().boundedTo(area.size()));
+    move(qBound(area.left(), x(), area.right() - width() + 1), qBound(area.top(), y(), area.bottom() - height() + 1));
+}
+void MainWindow::saveUiState() {
+    preferences_->setValue(QStringLiteral("ui/mainGeometry"), saveGeometry());
+    preferences_->setValue(QStringLiteral("ui/mainSplitter"), splitter_->saveState());
+    preferences_->sync();
+    if (preferences_->status() != QSettings::NoError && !geometryErrorReported_) {
+        geometryErrorReported_ = true;
+        report(QStringLiteral("Положение окна не сохранено."));
+        emit notifyRequested(QStringLiteral("Положение окна не сохранено."));
+    }
+}
 bool MainWindow::ready() const { return app_.gate() == Application::Gate::Ready && !app_.busy(); }
 void MainWindow::updateEnabled() {
     centralWidget()->setEnabled(ready()); for (auto* action : mutations_) action->setEnabled(ready());
@@ -442,6 +489,14 @@ void MainWindow::refillList(model::Id selected) {
     searchScope_->setText(!search_->text().isEmpty() ? QStringLiteral("Поиск по всему хранилищу")
         : libraryView_ == LibraryView::Group ? groupPath(selectedNode()) : QStringLiteral("Библиотека"));
     listSummary_->setText(QStringLiteral("Показано %1 из %2").arg(list_->count()).arg(baseCount));
+    if (!list_->count()) {
+        const auto message = app_.model()->nodes().isEmpty() ? QStringLiteral("Создайте проект кнопкой «Новый проект», затем добавьте запись.")
+            : !search_->text().isEmpty() || typeFilter_->currentIndex() || expiryFilter_->currentIndex() || !selectedTags_.isEmpty()
+                ? QStringLiteral("Нет записей с выбранными фильтрами.")
+            : libraryView_ == LibraryView::Favorites ? QStringLiteral("Избранных записей пока нет.")
+            : libraryView_ == LibraryView::Group ? QStringLiteral("В этой группе пока нет записей.") : QStringLiteral("Добавьте первую запись.");
+        emptyHint_->setText(message);
+    }
     list_->setAccessibleName(QStringLiteral("Список записей"));
     showMetadata();
 }
@@ -945,9 +1000,15 @@ void MainWindow::removeExportedVariables() {
     statusBar()->showMessage(QStringLiteral("Переменная %1 удалена.").arg(name), 5000);
 }
 #endif
-void MainWindow::resizeEvent(QResizeEvent* event) { QMainWindow::resizeEvent(event); narrow_ = width() < 720; right_->setVisible(!narrow_); }
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event); narrow_ = width() < 720;
+    if (right_) right_->setVisible(!narrow_);
+    if (headerLayout_) headerLayout_->setDirection(width() < 960 ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+    if (filterLayout_) filterLayout_->setDirection(width() < 1240 ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+}
 void MainWindow::requestExit() { exiting_ = true; close(); }
 void MainWindow::closeEvent(QCloseEvent* event) {
+    saveUiState();
     if (!exiting_) {
         // Крестик лишь сворачивает окно в трей: событие игнорируем, окно прячем.
         // Хранилище НЕ блокируем — автоблокировка (IdleTimer) продолжает тикать,
