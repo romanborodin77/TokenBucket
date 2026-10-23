@@ -1,12 +1,40 @@
 #include <QtTest>
 #include <QApplication>
 #include <QWidget>
+#include <QKeySequence>
 #include "../src/app/Application.h"
 #include "../src/platform/QuickPaste.h"
 using namespace tb;
 class TestPaste : public QObject {
     Q_OBJECT
 private slots:
+    void nullIsNotAutoPasted() {
+        model::Entry e; e.type = model::EntryType::ApiToken;
+        e.token = QStringLiteral("before") + QChar::Null + QStringLiteral("after");
+        QVERIFY(!paste::eligibleForAutoPaste(e));
+    }
+    void chosenField() {
+        model::Entry e; e.type = model::EntryType::Credentials;
+        e.login = "demo"; e.password = "line1\nline2";
+        QVERIFY(paste::eligibleForAutoPaste(e, paste::Field::Login));
+        QVERIFY(!paste::eligibleForAutoPaste(e, paste::Field::Secret));
+        e.type = model::EntryType::ApiToken; e.token = "demo";
+        QVERIFY(!paste::eligibleForAutoPaste(e, paste::Field::Login));
+        QVERIFY(paste::eligibleForAutoPaste(e, paste::Field::Secret));
+    }
+#ifdef Q_OS_WIN
+    void hotkeys() {
+        for (int key = Qt::Key_F1; key <= Qt::Key_F11; ++key) {
+            const auto parsed = paste::parseHotkey(QKeySequence(QKeyCombination(Qt::ControlModifier, Qt::Key(key))));
+            QVERIFY(parsed); QCOMPARE(parsed->key, UINT(VK_F1 + key - Qt::Key_F1));
+            QCOMPARE(parsed->modifiers, UINT(MOD_CONTROL | MOD_NOREPEAT));
+        }
+        for (const auto* value : {"Ctrl+A", "Alt+Z", "Ctrl+0", "Meta+9", "Ctrl+Alt+Space"})
+            QVERIFY2(paste::parseHotkey(QKeySequence(QString::fromLatin1(value))).has_value(), value);
+        for (const auto* value : {"", "A", "Shift+F1", "Ctrl+Tab", "Ctrl+F12", "Ctrl+K, Ctrl+C"})
+            QVERIFY(!paste::parseHotkey(QKeySequence(QString::fromLatin1(value))));
+    }
+#endif
     void eligibility() {
         model::Entry ok; ok.type = model::EntryType::ApiToken; ok.token = "single-line-token";
         QVERIFY(paste::eligibleForAutoPaste(ok));

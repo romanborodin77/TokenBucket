@@ -9,6 +9,26 @@
 #include <QSettings>
 namespace tb {
 namespace paste {
+std::optional<Hotkey> parseHotkey(const QKeySequence& sequence) {
+    if (sequence.count() != 1) return std::nullopt;
+    const auto combination = sequence[0];
+    const auto modifiers = combination.keyboardModifiers();
+    const auto allowed = Qt::ControlModifier | Qt::AltModifier | Qt::ShiftModifier | Qt::MetaModifier;
+    if ((modifiers & ~allowed) || !(modifiers & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)))
+        return std::nullopt;
+    UINT flags = MOD_NOREPEAT, key = 0;
+    if (modifiers & Qt::ControlModifier) flags |= MOD_CONTROL;
+    if (modifiers & Qt::AltModifier) flags |= MOD_ALT;
+    if (modifiers & Qt::ShiftModifier) flags |= MOD_SHIFT;
+    if (modifiers & Qt::MetaModifier) flags |= MOD_WIN;
+    const auto k = combination.key();
+    if (k >= Qt::Key_A && k <= Qt::Key_Z) key = UINT('A' + k - Qt::Key_A);
+    else if (k >= Qt::Key_0 && k <= Qt::Key_9) key = UINT('0' + k - Qt::Key_0);
+    else if (k >= Qt::Key_F1 && k <= Qt::Key_F11) key = UINT(VK_F1 + k - Qt::Key_F1);
+    else if (k == Qt::Key_Space) key = VK_SPACE;
+    else return std::nullopt;
+    return Hotkey{flags, key};
+}
 Recipient captureRecipient() {
     Recipient r;
     HWND fg = GetForegroundWindow();
