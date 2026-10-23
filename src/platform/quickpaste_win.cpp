@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QKeySequence>
 #include <QSettings>
+#include <QScopeGuard>
 namespace tb {
 namespace paste {
 std::optional<Hotkey> parseHotkey(const QKeySequence& sequence) {
@@ -38,8 +39,13 @@ Recipient captureRecipient() {
     GetWindowTextW(fg, title, 512);
     r.windowTitle = QString::fromWCharArray(title);
     DWORD pid = 0; GetWindowThreadProcessId(fg, &pid);
+    GUITHREADINFO gui{sizeof(GUITHREADINFO)};
+    if (GetGUIThreadInfo(GetWindowThreadProcessId(fg, nullptr), &gui)) r.focusHwnd = gui.hwndFocus;
+    r.pid = pid;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (h) {
+        FILETIME exit{}, kernel{}, user{};
+        GetProcessTimes(h, &r.created, &exit, &kernel, &user);
         wchar_t path[MAX_PATH] = {};
         DWORD sz = MAX_PATH;
         if (QueryFullProcessImageNameW(h, 0, path, &sz)) r.processName = QFileInfo(QString::fromWCharArray(path)).fileName();
@@ -48,18 +54,73 @@ Recipient captureRecipient() {
     if (r.processName.isEmpty()) r.processName = QStringLiteral("(нет доступа к процессу — возможно, повышенные права)");
     return r;
 }
-bool recipientStillValid(const Recipient& r) {
-    return r.hwnd && GetForegroundWindow() == r.hwnd && IsWindow(static_cast<HWND>(r.hwnd));
+bool recipientExists(const Recipient& r) {
+    if (!r.hwnd || !IsWindow(r.hwnd) || !r.pid) return false;
+    DWORD pid = 0; GetWindowThreadProcessId(r.hwnd, &pid);
+    if (pid != r.pid) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    const auto close = qScopeGuard([&] { CloseHandle(process); });
+    FILETIME created{}, exit{}, kernel{}, user{};
+    if (!GetProcessTimes(process, &created, &exit, &kernel, &user)
+        || CompareFileTime(&created, &r.created) != 0) return false;
+    return !r.focusHwnd || (IsWindow(r.focusHwnd) && GetAncestor(r.focusHwnd, GA_ROOT) == r.hwnd);
 }
-bool sendCtrlV() {
+bool recipientActive(const Recipient& r) {
+    if (!recipientExists(r) || GetForegroundWindow() != r.hwnd) return false;
+    GUITHREADINFO gui{sizeof(GUITHREADINFO)};
+    return !r.focusHwnd || (GetGUIThreadInfo(GetWindowThreadProcessId(r.hwnd, nullptr), &gui)
+        && gui.hwndFocus == r.focusHwnd);
+}
+bool recipientStillValid(const Recipient& r) { return recipientActive(r); }
+bool recipientAllowed(const Recipient& r, QString* err) {
+    const auto fail = [&] { if (err) *err = QStringLiteral("Не удалось подтвердить права получателя или окно повышено. Автовставка запрещена."); return false; };
+    if (!recipientExists(r)) return fail();
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, r.pid);
+    if (!process) return fail();
+    const auto closeProcess = qScopeGuard([&] { CloseHandle(process); });
+    const auto level = [](HANDLE process, DWORD& integrity, bool& elevated) {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(process, TOKEN_QUERY, &token)) return false;
+        const auto close = qScopeGuard([&] { CloseHandle(token); });
+        TOKEN_ELEVATION elevation{}; DWORD size = 0;
+        if (!GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)) return false;
+        elevated = elevation.TokenIsElevated != 0;
+        GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &size);
+        if (!size) return false;
+        QByteArray bytes(qsizetype(size), char(0));
+        if (!GetTokenInformation(token, TokenIntegrityLevel, bytes.data(), size, &size)) return false;
+        const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(bytes.constData());
+        if (!IsValidSid(label->Label.Sid)) return false;
+        const auto count = *GetSidSubAuthorityCount(label->Label.Sid);
+        if (!count) return false;
+        integrity = *GetSidSubAuthority(label->Label.Sid, count - 1);
+        return true;
+    };
+    DWORD own = 0, target = 0; bool ownElevated = false, elevated = false;
+    if (!level(GetCurrentProcess(), own, ownElevated) || !level(process, target, elevated)
+        || elevated || target > own || target >= SECURITY_MANDATORY_HIGH_RID) return fail();
+    return true;
+}
+bool activateRecipient(const Recipient& r) { return recipientExists(r) && SetForegroundWindow(r.hwnd); }
+bool modifiersReleased() {
+    for (int key : {VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN})
+        if (GetAsyncKeyState(key) & 0x8000) return false;
+    return true;
+}
+UINT sendCtrlV(InputSender sender) {
     INPUT in[4] = {};
     in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_CONTROL;
     in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = 'V';
     in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = 'V'; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
     in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_CONTROL; in[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    // SendInput атомарен не полностью: отказ мог прийти после части событий —
-    // сообщаем неудачу, секрет остаётся защищён 20-секундным таймером буфера.
-    return SendInput(4, in, sizeof(INPUT)) == 4;
+    const UINT count = sender(4, in, sizeof(INPUT));
+    if (count > 0 && count < 4) {
+        INPUT release[2] = {in[2], in[3]};
+        if (count == 2) sender(2, release, sizeof(INPUT));
+        else sender(1, release + 1, sizeof(INPUT));
+    }
+    return count;
 }
 }
 namespace platform {

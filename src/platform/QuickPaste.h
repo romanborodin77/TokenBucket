@@ -20,13 +20,23 @@ inline bool eligibleForAutoPaste(const model::Entry& e, Field field = Field::Sec
         && !s->contains(QLatin1Char('\r')) && !s->contains(QChar::Null);
 }
 #ifdef Q_OS_WIN
-// Получатель вставки: фиксируется до переключения окна и перепроверяется ПОСЛЕ —
-// между подтверждением и Ctrl+V активное окно могло смениться (устранение TOCTOU).
+// Идентичность и foreground проверяются отдельно; SendInput не даёт атомарной адресности.
 struct Hotkey { UINT modifiers; UINT key; };
 std::optional<Hotkey> parseHotkey(const QKeySequence& sequence);
-struct Recipient { void* hwnd = nullptr; QString processName, windowTitle; };
+struct Recipient {
+    HWND hwnd = nullptr, focusHwnd = nullptr;
+    DWORD pid = 0;
+    FILETIME created{};
+    QString processName, windowTitle;
+};
 Recipient captureRecipient();
 bool recipientStillValid(const Recipient& r);
-bool sendCtrlV();
+bool recipientExists(const Recipient& r);
+bool recipientActive(const Recipient& r);
+bool recipientAllowed(const Recipient& r, QString* err);
+bool activateRecipient(const Recipient& r);
+bool modifiersReleased();
+using InputSender = decltype(&::SendInput);
+UINT sendCtrlV(InputSender sender = ::SendInput);
 #endif
 }

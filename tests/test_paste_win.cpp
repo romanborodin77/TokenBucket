@@ -5,6 +5,16 @@
 #include "../src/app/Application.h"
 #include "../src/platform/QuickPaste.h"
 using namespace tb;
+#ifdef Q_OS_WIN
+namespace {
+UINT accepted = 0;
+QList<QList<INPUT>> sent;
+UINT WINAPI fakeInput(UINT count, LPINPUT input, int) {
+    sent.append(QList<INPUT>(input, input + count));
+    return accepted < count ? accepted : count;
+}
+}
+#endif
 class TestPaste : public QObject {
     Q_OBJECT
 private slots:
@@ -52,6 +62,26 @@ private slots:
         QVERIFY(!paste::eligibleForAutoPaste(multiPw));
     }
 #ifdef Q_OS_WIN
+    void inputCounts() {
+        for (UINT count = 0; count <= 4; ++count) {
+            accepted = count; sent.clear();
+            QCOMPARE(paste::sendCtrlV(&fakeInput), count);
+            QCOMPARE(sent.first().size(), 4);
+            for (qsizetype call = 1; call < sent.size(); ++call)
+                for (const auto& input : sent[call])
+                    QVERIFY(input.ki.dwFlags & KEYEVENTF_KEYUP);
+        }
+    }
+    void recipientIdentity() {
+        QWidget window; window.show(); window.raise(); window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&window));
+        const auto r = paste::captureRecipient();
+        QVERIFY(paste::recipientExists(r));
+        auto changed = r; changed.pid ^= 1;
+        QVERIFY(!paste::recipientExists(changed));
+        changed = r; changed.created.dwLowDateTime ^= 1;
+        QVERIFY(!paste::recipientExists(changed));
+    }
     void recipientChangedDetected() {
         // наши собственные тестовые HWND как «получатель»; смена фокуса обязана дать false
         QWidget w; w.show(); w.raise(); w.activateWindow();
@@ -64,15 +94,15 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&other));
         QTest::qWait(200);
         const auto now = paste::captureRecipient();
-        if (now.hwnd == (void*)other.winId()) {
+        if (now.hwnd == reinterpret_cast<HWND>(other.winId())) {
             // фокус удалось перевести на другое окно: исходный получатель недействителен
-            QVERIFY(!paste::recipientStillValid(r) || r.hwnd == (void*)other.winId());
+            QVERIFY(!paste::recipientStillValid(r) || r.hwnd == reinterpret_cast<HWND>(other.winId()));
         } else {
             // стороннее окно удерживает фокус (неинтерактивный запуск): то же правило
             // проверяем на синтетическом получателе, не владеющем фокусом
-            paste::Recipient stale; stale.hwnd = (void*)other.winId();
+            paste::Recipient stale; stale.hwnd = reinterpret_cast<HWND>(other.winId());
             QVERIFY(!paste::recipientStillValid(stale));
-            QVERIFY(r.hwnd != (void*)other.winId());
+            QVERIFY(r.hwnd != reinterpret_cast<HWND>(other.winId()));
         }
     }
 #endif

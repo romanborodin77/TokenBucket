@@ -95,7 +95,7 @@ void MiniPanel::send() {
     }
     // Только Ctrl+V, без Enter. Секрет уже защищён 20-секундным таймером буфера —
     // при отказе отправки сообщаем об этом, не выбрасывая молчание.
-    if (!paste::sendCtrlV())
+    if (paste::sendCtrlV() != 4)
         QMessageBox::information(this, QStringLiteral("TokenBucket"),
             QStringLiteral("Не удалось отправить нажатия в окно получателя. Секрет скопирован в буфер и будет очищён через 20 секунд."));
 #else
