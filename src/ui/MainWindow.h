@@ -61,6 +61,7 @@ public slots:
     void changeMasterPassword();
     void configureIdleTimeout();
     void showAbout();
+    void showSettings();
 #ifdef Q_OS_WIN
     void changeHotkey();
     void exportToEnvironment();

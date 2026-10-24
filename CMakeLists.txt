@@ -31,6 +31,7 @@ add_library(tokenbucket_core STATIC
   src/ui/UnlockDialog.cpp
   src/ui/EntryEditDialog.cpp
   src/ui/MainWindow.cpp
+  src/ui/SettingsDialog.cpp
   src/ui/MiniPanel.cpp
   src/platform/ClipboardGuard.cpp
   src/ui/EntryCard.cpp

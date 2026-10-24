@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "SettingsDialog.h"
 #include "../app/Preferences.h"
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
@@ -116,6 +117,8 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     action(vault, QStringLiteral("Импорт из CSV / KeePass XML…"), &MainWindow::importFromCsvKeePass);
     vault->addSeparator();
     auto* settings = menuBar()->addMenu(QStringLiteral("&Настройки"));
+    auto* openSettings=settings->addAction(QStringLiteral("Настройки…"),this,&MainWindow::showSettings);
+    openSettings->setObjectName("openSettings"); openSettings->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
 #ifdef Q_OS_WIN
     switchAction_ = action(settings, QString(), &MainWindow::switchUnlockMode);
     {
@@ -352,6 +355,26 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     refreshAll(); restoreUiState();
 }
 MainWindow::~MainWindow() { saveUiState(); }
+void MainWindow::showSettings() {
+    if(!ready()) return;
+    card_->hideNowForTest();
+    SettingsDialog dialog(prefs::read(*preferences_),app_.backupInfo(),
+#ifdef Q_OS_WIN
+        hotkey_->sequence().toString(QKeySequence::NativeText),
+#else
+        QString(),
+#endif
+        this);
+    dialog.setUnlockMode(app_.mode(),helloAvailable_);
+    connect(&dialog,&SettingsDialog::changePasswordRequested,this,&MainWindow::changeMasterPassword);
+    connect(&dialog,&SettingsDialog::changeUnlockModeRequested,this,&MainWindow::switchUnlockMode);
+#ifdef Q_OS_WIN
+    const bool suspended=hotkey_->suspended(); hotkey_->setSuspended(true);
+    const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+    connect(&dialog,&SettingsDialog::clearEnvironmentRequested,this,&MainWindow::removeExportedVariables);
+#endif
+    dialog.exec();
+}
 void MainWindow::setIdleTimer(IdleTimer* timer) { idleTimer_ = timer; refreshStatus(); }
 void MainWindow::refreshStatus() {
     vaultInfo_->setText(app_.gate() != Application::Gate::Ready ? QStringLiteral("Заблокировано")

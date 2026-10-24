@@ -10,6 +10,7 @@ endfunction()
 
 tb_add_test(test_smoke)
 tb_add_test(test_preferences)
+tb_add_test(test_settings)
 tb_add_test(test_crypto)
 tb_add_test(test_container)
 
@@ -31,6 +32,7 @@ tb_add_test(test_pwchange)
 tb_add_test(test_e2e)
 tb_add_test(test_import)
 if(WIN32)
+  set_property(TEST test_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_FONTDIR=$ENV{SystemRoot}/Fonts")
   tb_add_test(test_env_win)
   add_test(NAME test_theme_win COMMAND test_ui themeModesApplyAndLoad -o "${CMAKE_CURRENT_BINARY_DIR}/test_theme_win.txt,txt")
   set_tests_properties(test_theme_win PROPERTIES ENVIRONMENT

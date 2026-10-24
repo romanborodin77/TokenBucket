@@ -23,6 +23,14 @@ class Application : public QObject {
 public:
     enum class Gate { NeedSetup, NeedUnlock, Ready };
     enum class Mode { None, Password, Hello };
+    struct BackupInfo {
+        enum class State { Missing, Available, Unavailable };
+        State state=State::Missing;
+        QString mainPath,backupPath;
+        qint64 size=0;
+        QDateTime modified;
+    };
+    BackupInfo backupInfo() const;
 #ifdef Q_OS_WIN
     using HelloRequest = std::function<platform::hello::Result(void*, const QString&)>;
     explicit Application(const QString& dataDir, QObject* parent = nullptr,

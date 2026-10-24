@@ -4,8 +4,19 @@
 #include <QEventLoop>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
+#include <QFileInfo>
 #include <stdexcept>
 namespace tb {
+Application::BackupInfo Application::backupInfo() const {
+    BackupInfo result; result.mainPath=store_.mainPath(); result.backupPath=store_.backupPath();
+    const QFileInfo info(result.backupPath);
+    if(info.isSymLink() || (info.exists() && (!info.isFile() || !info.isReadable() || info.size()>container::MaxFileBytes)))
+        result.state=BackupInfo::State::Unavailable;
+    else if(info.exists()) {
+        result.state=BackupInfo::State::Available; result.size=info.size(); result.modified=info.lastModified();
+    }
+    return result;
+}
 namespace {
 template<class T> T waitFor(QFuture<T> future) {
     QEventLoop loop;
