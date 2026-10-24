@@ -1,6 +1,8 @@
 #pragma once
 #include <QMainWindow>
 #include <QSettings>
+#include <QSystemTrayIcon>
+#include <functional>
 #include <QPointer>
 #include <QDate>
 #include <optional>
@@ -18,16 +20,16 @@ namespace tb::ui {
 class EntryCard;
 // Главное окно: дерево проектов/групп — список записей с фильтрами/сортировкой —
 // карточка записи. Все изменения модели идут через commit()/commitEntry()
-// (сохранение + откат при отказе). Крестик СВОРАЧИВАЕТ в трей без блокировки
-// (closeEvent → hide); настоящий выход — requestExit() («Выход» из трея/меню):
-// тогда closeEvent вызывает Application::lock и разрешает закрытие. Живёт один
+// (сохранение + откат при отказе). Крестик следует сохранённой политике закрытия;
+// настоящий выход — requestExit() («Выход» из трея/меню) всегда блокирует. Живёт один
 // цикл Ready (пересоздаётся после разблокировки) — поэтому трей и таймеры
 // принадлежат main, а не окну.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(Application& app, QWidget* parent = nullptr, QSettings* uiPreferences = nullptr,
-                        QSettings* runPreferences = nullptr);
+                        QSettings* runPreferences = nullptr,
+                        std::function<bool()> trayAvailable=QSystemTrayIcon::isSystemTrayAvailable);
     ~MainWindow() override;
     void refreshAll();
     bool moveNodeTo(model::Id node, model::Id newParent);
@@ -44,6 +46,7 @@ public:
     EntryCard* card() const { return card_; }
 signals:
     void closing();
+    void lockedHiddenRequested();
     // Короткие события для области уведомлений (без секретов): main связывает с треем.
     void notifyRequested(const QString& text);
     void idleTimeoutChanged(int minutes);
@@ -86,6 +89,7 @@ private:
     QSettings uiSettings_{QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket")};
     QSettings* preferences_{};
     prefs::Values appliedPreferences_;
+    std::function<bool()> trayAvailable_;
 #ifdef Q_OS_WIN
     QSettings runSettings_{QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"),QSettings::NativeFormat};
     QSettings* runPreferences_{};

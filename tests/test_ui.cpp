@@ -228,14 +228,14 @@ private slots:
         prefs.setValue("ui/mainGeometry", QByteArray("broken"));
         prefs.setValue("ui/mainSplitter", QByteArray("broken"));
         {
-            ui::MainWindow w(app, nullptr, &prefs); w.show();
+            ui::MainWindow w(app, nullptr, &prefs,nullptr,[] {return true;}); w.show();
             QVERIFY(w.findChild<QSplitter*>("mainSplitter"));
             QVERIFY(!w.findChild<QSplitter*>("mainSplitter")->childrenCollapsible());
             QVERIFY(w.screen()->availableGeometry().intersects(w.frameGeometry()));
             w.move(30000, 30000); w.close();
         }
         {
-            ui::MainWindow restored(app, nullptr, &prefs); restored.show();
+            ui::MainWindow restored(app, nullptr, &prefs,nullptr,[] {return true;}); restored.show();
             QVERIFY(restored.screen()->availableGeometry().contains(restored.frameGeometry().center()));
             restored.resize(650, 550); QCoreApplication::processEvents();
             QVERIFY(restored.findChild<QStackedWidget*>("entryPanel")->isHidden());
@@ -246,7 +246,7 @@ private slots:
         QCOMPARE(prefs.allKeys(), QStringList({"legacy", "ui/mainGeometry", "ui/mainSplitter"}));
         QSettings denied(dir.path(), QSettings::IniFormat);
         const auto original = app.model()->toCbor();
-        ui::MainWindow w(app, nullptr, &denied); w.show(); w.close();
+        ui::MainWindow w(app, nullptr, &denied,nullptr,[] {return true;}); w.show(); w.close();
         QVERIFY(w.findChild<QLabel*>("operationError")->text().contains(QStringLiteral("не сохранено")));
         QCOMPARE(app.model()->toCbor(), original);
     }
@@ -866,7 +866,7 @@ private slots:
     }
     void closeToTrayAndExit() {
         Application app(dir_.path() + "/close-tray"); QString err; QVERIFY(app.createPasswordVault("valid-password", &err));
-        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences_,nullptr,[] {return true;}); w.show();
         w.close();                                                       // крестик: скрыть в трей, без блокировки
         QVERIFY(w.isHidden()); QCOMPARE(app.gate(), Application::Gate::Ready);
         QSignalSpy closing(&w, &ui::MainWindow::closing);

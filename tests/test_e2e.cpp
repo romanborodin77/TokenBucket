@@ -289,7 +289,7 @@ private slots:
 
         // 3. Три записи через РЕАЛЬНЫЙ редактор: токен с тегами, креды с генератором, SSH из файла.
         QSettings uiPreferences(dir_.filePath("main-window.ini"), QSettings::IniFormat);
-        ui::MainWindow w(app, nullptr, &uiPreferences); w.show();
+        ui::MainWindow w(app, nullptr, &uiPreferences,nullptr,[] {return true;}); w.show();
         {
             ::EntryEditDialog tokenDialog(*app.model(), std::nullopt, &w);
             tokenDialog.setGroup(group);
@@ -409,6 +409,7 @@ private slots:
         QVERIFY(app.save(&error));
         w.close(); // сворачивание в трей не блокирует (окно скрыто, но приложение живёт)
         QVERIFY(w.isHidden());
+        QCOMPARE(app.gate(),Application::Gate::Ready);
         app.lock();
         QCOMPARE(app.gate(), Application::Gate::NeedUnlock);
         ::UnlockDialog unlock(::UnlockDialog::Kind::Password);

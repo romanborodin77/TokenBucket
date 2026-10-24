@@ -86,8 +86,9 @@ protected:
     }
 };
 }
-MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferences,QSettings* runPreferences)
-    : QMainWindow(parent), preferences_(uiPreferences ? uiPreferences : &uiSettings_), app_(app) {
+MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferences,QSettings* runPreferences,
+                       std::function<bool()> trayAvailable)
+    : QMainWindow(parent), preferences_(uiPreferences ? uiPreferences : &uiSettings_),trayAvailable_(std::move(trayAvailable)), app_(app) {
     appliedPreferences_=prefs::read(*preferences_);
 #ifdef Q_OS_WIN
     runPreferences_=runPreferences?runPreferences:&runSettings_;
@@ -1076,13 +1077,13 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 void MainWindow::requestExit() { exiting_ = true; close(); }
 void MainWindow::closeEvent(QCloseEvent* event) {
     saveUiState();
-    if (!exiting_) {
-        // Крестик лишь сворачивает окно в трей: событие игнорируем, окно прячем.
-        // Хранилище НЕ блокируем — автоблокировка (IdleTimer) продолжает тикать,
-        // и оставленное без присмотра скрытое окно блокируется по интервалу как открытое.
-        hide(); event->ignore(); return;
+    if (exiting_ || !trayAvailable_() || appliedPreferences_.closeBehavior==prefs::CloseBehavior::Exit) {
+        app_.lock(); QMainWindow::closeEvent(event); emit closing(); return;
     }
-    app_.lock(); QMainWindow::closeEvent(event); emit closing();
+    const bool lockHidden=appliedPreferences_.closeBehavior==prefs::CloseBehavior::LockHide;
+    if(lockHidden) emit lockedHiddenRequested();
+    hide(); event->ignore();
+    if(lockHidden) app_.lock();
 }
 void MainWindow::popupQuickPanel() {
 #ifdef Q_OS_WIN

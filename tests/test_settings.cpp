@@ -40,6 +40,60 @@ class TestSettings : public QObject {
     }
 #endif
 private slots:
+    void savingExitPolicyWaitsForMainWindowClose() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&preferences,&run,[] {return true;});
+        QSignalSpy closing(&window,&ui::MainWindow::closing);
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            auto* mode=dialog->findChild<QComboBox*>("closeBehavior"); mode->setCurrentIndex(mode->findData(int(prefs::CloseBehavior::Exit)));
+            dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+        });
+        window.showSettings(); QCOMPARE(app.gate(),Application::Gate::Ready); QCOMPARE(closing.size(),0);
+        QTimer::singleShot(0,&window,[] {
+            if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->close();
+        });
+        window.showSettings(); QCOMPARE(app.gate(),Application::Gate::Ready); QCOMPARE(closing.size(),0);
+        window.show(); window.close(); QCOMPARE(app.gate(),Application::Gate::NeedUnlock); QCOMPARE(closing.size(),1);
+    }
+    void closePolicy_data() {
+        QTest::addColumn<QString>("mode"); QTest::addColumn<bool>("tray"); QTest::addColumn<bool>("explicitExit");
+        for(const auto* mode:{"hide","lock-hide","exit"}) for(bool tray:{false,true}) for(bool explicitExit:{false,true})
+            QTest::newRow(qPrintable(QStringLiteral("%1-tray%2-explicit%3").arg(mode).arg(tray).arg(explicitExit)))
+                <<QString::fromLatin1(mode)<<tray<<explicitExit;
+    }
+    void closePolicy() {
+        QFETCH(QString,mode); QFETCH(bool,tray); QFETCH(bool,explicitExit);
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        preferences.setValue("closeBehavior",mode);
+        ui::MainWindow window(app,nullptr,&preferences,&run,[tray] {return tray;});
+        QStringList order;
+        connect(&window,&ui::MainWindow::lockedHiddenRequested,&window,[&] {order<<"hidden";});
+        connect(&app,&Application::stateChanged,&window,[&] {order<<"locked";});
+        connect(&window,&ui::MainWindow::closing,&window,[&] {order<<"closing";});
+        window.show();
+        if(explicitExit) window.requestExit(); else window.close();
+        const bool exiting=explicitExit || !tray || mode=="exit";
+        const bool lockHidden=!exiting && mode=="lock-hide";
+        QVERIFY(!window.isVisible());
+        QCOMPARE(app.gate(),exiting || lockHidden?Application::Gate::NeedUnlock:Application::Gate::Ready);
+        QCOMPARE(order,exiting?QStringList({"locked","closing"}):lockHidden?QStringList({"hidden","locked"}):QStringList());
+    }
+    void storedExitPreferenceLocksOnClose() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        preferences.setValue("closeBehavior","exit");
+        ui::MainWindow window(app,nullptr,&preferences,&run);
+        QSignalSpy closing(&window,&ui::MainWindow::closing);
+        window.show(); window.close();
+        QCOMPARE(app.gate(),Application::Gate::NeedUnlock); QCOMPARE(closing.size(),1);
+        QVERIFY(!window.isVisible());
+    }
 #ifdef Q_OS_WIN
     void orderedFailuresAndRetry_data() {
         QTest::addColumn<int>("fault");
