@@ -1,5 +1,7 @@
 #include "EntryCard.h"
-#include "VerifyDialog.h"
+#include "EntryLabels.h"
+#include "EntryAccess.h"
+#include "../model/TextFile.h"
 #include <QApplication>
 #include <QEvent>
 #include <QFile>
@@ -25,7 +27,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     auto* heading = new QHBoxLayout; heading->addWidget(title_, 1);
     edit_ = new QPushButton(QStringLiteral("Изменить"), this); edit_->setObjectName(QStringLiteral("cardEdit")); heading->addWidget(edit_);
     layout->addLayout(heading); layout->addWidget(identity_); layout->addWidget(flags_);
-    layout->addWidget(new QLabel(QStringLiteral("СЕКРЕТ"), this));
+    valueLabel_=new QLabel(QStringLiteral("СЕКРЕТ"),this); valueLabel_->setObjectName("cardValueLabel"); layout->addWidget(valueLabel_);
     value_ = new QPlainTextEdit(this); value_->setObjectName(QStringLiteral("entryDetails")); value_->setReadOnly(true);
     value_->setTextInteractionFlags(Qt::NoTextInteraction); value_->setFocusPolicy(Qt::NoFocus); value_->setContextMenuPolicy(Qt::NoContextMenu);
     value_->setAccessibleName(QStringLiteral("Секретное значение")); value_->setMinimumHeight(80); value_->setMaximumHeight(140); layout->addWidget(value_);
@@ -42,8 +44,13 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(&hideTimer_, &QTimer::timeout, this, &EntryCard::hideNowForTest);
     connect(reveal_, &QPushButton::clicked, this, [this] {
         if (!authorize()) return; const auto* entry = app_.model()->entry(id_); if (!entry) return;
-        value_->setPlainText(entry->type == model::EntryType::Credentials ? QStringLiteral("Логин: %1\nПароль: %2").arg(entry->login, entry->password) : entry->token);
-        hideTimer_.start();
+        switch(entry->type) {
+        case model::EntryType::ApiToken: value_->setPlainText(entry->token); break;
+        case model::EntryType::Credentials: value_->setPlainText(QStringLiteral("Логин: %1\nПароль: %2").arg(entry->login,entry->password)); break;
+        case model::EntryType::PlainValue: value_->setPlainText(entry->plainValue.isEmpty()?QStringLiteral("Пусто"):entry->plainValue); break;
+        default: return;
+        }
+        if(entry->type!=model::EntryType::PlainValue || entry->reverify) hideTimer_.start();
     });
     connect(copySecret_, &QPushButton::clicked, this, [this] { copyField(0); });
     connect(copyLogin_, &QPushButton::clicked, this, [this] { copyField(1); });
@@ -61,7 +68,11 @@ void EntryCard::updateEnabled() {
     const bool allowed = app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id_);
     for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_}) button->setEnabled(allowed);
 }
-void EntryCard::hideNowForTest() { hideTimer_.stop(); value_->setPlainText(QStringLiteral("••••••••")); }
+void EntryCard::hideNowForTest() {
+    hideTimer_.stop(); const auto* entry=app_.gate()==Application::Gate::Ready?app_.model()->entry(id_):nullptr;
+    value_->setPlainText(entry && entry->type==model::EntryType::PlainValue && !entry->reverify
+        ?entry->plainValue.isEmpty()?QStringLiteral("Пусто"):entry->plainValue:QStringLiteral("••••••••"));
+}
 void EntryCard::setRevealSeconds(int seconds) {
     if(seconds!=5 && seconds!=10 && seconds!=15 && seconds!=30) seconds=15;
     if(hideTimer_.interval()!=seconds*1000) hideNowForTest();
@@ -88,14 +99,25 @@ void EntryCard::showEntry(model::Id id) {
         if (it == app_.model()->nodes().cend()) break;
         path.prepend(it->name); node = it->parent;
     }
-    identity_->setText(QStringLiteral("%1 · %2").arg(ssh ? QStringLiteral("SSH-ключ")
-        : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("API-токен"), path.join(QStringLiteral(" / "))));
+    identity_->setText(QStringLiteral("%1 · %2").arg(entryTypeLabel(entry->type),path.join(QStringLiteral(" / "))));
     QStringList flags;
     if (entry->favorite) flags << QStringLiteral("★ Избранное");
     if (entry->reverify) flags << QStringLiteral("Повторная проверка");
     if (!entry->tags.isEmpty()) flags << entry->tags.join(QStringLiteral(", "));
     flags_->setText(flags.join(QStringLiteral(" · ")));
-    reveal_->setVisible(!ssh); copySecret_->setText(ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
+    const bool plain=entry->type==model::EntryType::PlainValue,file=entry->type==model::EntryType::TextFile;
+    valueLabel_->setText(plain?QStringLiteral("ЗНАЧЕНИЕ"):file?QStringLiteral("ДОКУМЕНТ"):QStringLiteral("СЕКРЕТ"));
+    value_->setAccessibleName(plain?QStringLiteral("Значение"):file?QStringLiteral("Сведения о документе"):QStringLiteral("Секретное значение"));
+    value_->setFocusPolicy(plain && !entry->reverify?Qt::StrongFocus:Qt::NoFocus);
+    value_->setTextInteractionFlags(plain && !entry->reverify?Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard:Qt::NoTextInteraction);
+    if(plain && !entry->parameterName.isEmpty()) metadata_->setText(QStringLiteral("Параметр: %1\n\n").arg(entry->parameterName)+metadata_->text());
+    reveal_->setVisible(!ssh && !file && (!plain || entry->reverify)); copySecret_->setVisible(!file);
+    copySecret_->setText(plain?QStringLiteral("Копировать значение"):ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
+    if(plain) hideNowForTest();
+    if(file) value_->setPlainText(QStringLiteral("%1\n%2 строк · видимых: %3").arg(entry->textFile.fileName)
+        .arg(model::textfile::lineRanges(entry->textFile.bytes).size()).arg(entry->textFile.visibleLines.size()));
+    if(!entry->sourceEntryId.isNull()) metadata_->setText(metadata_->text()+QStringLiteral("\n\n%1\nИсточник — снимок импорта; рабочее значение могло быть изменено.")
+        .arg(app_.model()->entry(entry->sourceEntryId)?QStringLiteral("Источник, строка %1").arg(entry->sourceLine+1):QStringLiteral("Источник недоступен")));
     copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty());
     sshToFile_->setVisible(ssh && !entry->sshPrivate.isEmpty()); updateEnabled();
 }
@@ -116,18 +138,23 @@ bool EntryCard::authorize() {
     if (app_.gate() != Application::Gate::Ready || app_.busy()) return false;
     const auto* entry = app_.model()->entry(id_); if (!entry) return false;
     const auto generation = app_.generation(), selection = selection_; const auto id = id_;
-    if (entry->reverify && !VerifyDialog::verify(app_, this)) return false;
+    if (!authorizeEntry(app_,id,this)) return false;
     return generation == app_.generation() && selection == selection_ && id == id_ && app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id_);
 }
 void EntryCard::copyField(int field) {
     if (!authorize()) return; const auto* entry = app_.model()->entry(id_); if (!entry) return;
     QString text;
-    if (field == 1) text = entry->login;
-    else if (field == 2) text = entry->sshPassphrase;
-    else if (entry->type == model::EntryType::SshKey) {
+    if (field==1) {if(entry->type!=model::EntryType::Credentials) return; text=entry->login;}
+    else if(field==2) {if(entry->type!=model::EntryType::SshKey) return; text=entry->sshPassphrase;}
+    else if (field==0 && entry->type == model::EntryType::SshKey) {
         if (!entry->sshPrivate.isValidUtf8()) { error_->setText(QStringLiteral("Ключ не является UTF-8. Для точной выдачи нужен файл.")); return; }
         text = QString::fromUtf8(entry->sshPrivate);
-    } else text = entry->type == model::EntryType::ApiToken ? entry->token : entry->password;
+    } else if(field==0) switch(entry->type) {
+        case model::EntryType::ApiToken: text=entry->token; break;
+        case model::EntryType::Credentials: text=entry->password; break;
+        case model::EntryType::PlainValue: text=entry->plainValue; break;
+        default: return;
+    }
     if (text.isEmpty()) { error_->setText(QStringLiteral("Пустое значение не копируется.")); return; }
     emit copyRequested(text);
 }

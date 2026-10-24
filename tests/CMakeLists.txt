@@ -17,6 +17,7 @@ tb_add_test(test_container)
 
 tb_add_test(test_model)
 tb_add_test(test_textfile)
+tb_add_test(test_storage_ui)
 
 tb_add_test(test_store)
 
@@ -34,6 +35,7 @@ tb_add_test(test_pwchange)
 tb_add_test(test_e2e)
 tb_add_test(test_import)
 if(WIN32)
+  set_property(TEST test_storage_ui APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=windows")
   set_property(TEST test_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=windows")
   set_property(TEST test_session APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=windows")
   set_property(TEST test_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_FONTDIR=$ENV{SystemRoot}/Fonts")

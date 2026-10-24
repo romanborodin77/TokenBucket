@@ -4,6 +4,8 @@
 #include "UnlockDialog.h"
 #include "../app/Preferences.h"
 #include "EntryEditDialog.h"
+#include "EntryAccess.h"
+#include "EntryLabels.h"
 #include "EntryCard.h"
 #include "AboutDialog.h"
 #include "../io/Import.h"
@@ -172,7 +174,8 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     filterLayout_ = controlsLayout;
     typeFilter_ = new QComboBox(controls); typeFilter_->setObjectName(QStringLiteral("typeFilter"));
     typeFilter_->setAccessibleName(QStringLiteral("Фильтр по типу записи"));
-    typeFilter_->addItems({QStringLiteral("Все типы"), QStringLiteral("API-токены"), QStringLiteral("Учётные данные"), QStringLiteral("SSH-ключи")});
+    typeFilter_->addItem(QStringLiteral("Все типы"),-1);
+    for(int i=0;i<=int(model::EntryType::TextFile);++i) typeFilter_->addItem(entryTypeLabel(model::EntryType(i)),i);
     sortMode_ = new QComboBox(controls); sortMode_->setObjectName(QStringLiteral("sortMode"));
     sortMode_->setAccessibleName(QStringLiteral("Сортировка записей"));
     sortMode_->addItems({QStringLiteral("По названию"), QStringLiteral("По дате изменения")});
@@ -218,7 +221,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     tree_->setHeaderLabel(QStringLiteral("Проекты и группы")); tree_->setAccessibleName(QStringLiteral("Проекты и группы"));
     auto* results = new QWidget(splitter); results->setMinimumWidth(260);
     auto* resultsLayout = new QVBoxLayout(results); resultsLayout->setContentsMargins(0, 0, 0, 0); resultsLayout->setSpacing(10);
-    list_ = new QListWidget(results); list_->setAccessibleName(QStringLiteral("Список записей")); list_->setMinimumWidth(160); list_->setSpacing(4);
+    list_ = new QListWidget(results); list_->setObjectName("entriesList"); list_->setAccessibleName(QStringLiteral("Список записей")); list_->setMinimumWidth(160); list_->setSpacing(4);
     list_->setWordWrap(true); list_->setUniformItemSizes(true);
     right_ = new QStackedWidget(splitter); right_->setObjectName(QStringLiteral("entryPanel"));
     auto* hint = new QLabel(QStringLiteral("Создайте проект и добавьте запись или выберите существующую запись."), right_);
@@ -585,7 +588,7 @@ void MainWindow::refillList(model::Id selected) {
         if (libraryView_ == LibraryView::Favorites)
             ids.erase(std::remove_if(ids.begin(), ids.end(), [this](model::Id id) { return !app_.model()->entry(id)->favorite; }), ids.end());
         baseCount = ids.size();
-        const int typeFilter = typeFilter_->currentIndex() - 1; // -1 — все типы
+        const int typeFilter = typeFilter_->currentData().toInt();
         if (typeFilter >= 0)
             ids.erase(std::remove_if(ids.begin(), ids.end(), [this, typeFilter](model::Id id) {
                 const auto* entry = app_.model()->entry(id);
@@ -622,8 +625,7 @@ void MainWindow::refillList(model::Id selected) {
         for (auto id : ids) {
             const auto* entry = app_.model()->entry(id);
             QString title = entry->favorite ? QStringLiteral("★ ") + entry->title : entry->title;
-            const auto type = entry->type == model::EntryType::ApiToken ? QStringLiteral("API-токен")
-                : entry->type == model::EntryType::Credentials ? QStringLiteral("Учётные данные") : QStringLiteral("SSH-ключ");
+            const auto type=entryTypeLabel(entry->type);
             title += QStringLiteral("\n%1 · %2%3").arg(type, groupPath(entry->groupId), entry->reverify ? QStringLiteral(" · Повторная проверка") : QString());
             // Пометка срока: ⏳ истекает в горизонте 30 дней, ⏰ просрочен (с датой).
             if (entry->expiresAt.isValid()) {
@@ -745,6 +747,7 @@ bool MainWindow::commit(const std::function<QString(model::VaultModel&)>& mutati
 }
 bool MainWindow::commitEntry(const std::function<QString(model::VaultModel&)>& mutation, model::Id entryId) {
     if (!ready()) return false;
+    if(const auto* existing=app_.model()->entry(entryId);existing && existing->type==model::EntryType::TextFile) return commit(mutation);
     std::optional<model::Entry> backup;
     if (const auto* existing = app_.model()->entry(entryId)) backup = *existing;
     const auto generation = app_.generation();
@@ -792,13 +795,16 @@ void MainWindow::addEntry() {
     }
 }
 void MainWindow::editSelected() {
-    if (!ready() || editing_) return; const auto* entry = app_.model()->entry(selectedEntry()); if (!entry) { report(QStringLiteral("Выберите запись.")); return; }
+    if (!ready() || editing_) return; const auto id=selectedEntry(); if (!app_.model()->entry(id)) { report(QStringLiteral("Выберите запись.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     // Редактор показывает секреты записи — для записей с повторной проверкой сначала
     // подтверждаем владельца, как при показе/копировании (audit M-1).
-    if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("изменение записи"))) return;
+    if (!authorizeEntry(app_,id,this) || selectedEntry()!=id || !ready() || generation!=app_.generation()) return;
+    const auto* entry=app_.model()->entry(id); if(!entry) return; const auto before=*entry;
     EntryEditDialog dialog(*app_.model(), *entry, this);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
+        const auto* current=app_.model()->entry(id);
+        if(!current || *current!=before) {report(QStringLiteral("Запись изменилась. Откройте редактор заново.")); return;}
         const auto changed = dialog.entry(); if (changed) commitEntry([&](auto& model) { return model.setEntry(*changed); }, changed->id);
     }
 }

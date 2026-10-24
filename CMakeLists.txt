@@ -37,6 +37,7 @@ add_library(tokenbucket_core STATIC
   src/ui/MiniPanel.cpp
   src/platform/ClipboardGuard.cpp
   src/ui/EntryCard.cpp
+  src/ui/EntryAccess.cpp
   src/ui/ExportDialog.cpp
   src/ui/VerifyDialog.cpp
   src/app/IdleTimer.cpp

@@ -1,5 +1,7 @@
 #include "EntryEditDialog.h"
+#include "EntryLabels.h"
 #include "../vault/Crypto.h"
+#include "../model/TextFile.h"
 #include <QCheckBox>
 #include <QDateEdit>
 #include <QComboBox>
@@ -13,10 +15,14 @@
 #include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
+#include <QKeyEvent>
+#include <QMimeData>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScopedValueRollback>
+#include <QSignalBlocker>
 #include <QScrollArea>
 #include <QScreen>
 #include <QTextDocument>
@@ -26,6 +32,12 @@
 #include <algorithm>
 using namespace tb::model;
 namespace {
+class FileBodyEditor : public QPlainTextEdit {
+public:
+    using QPlainTextEdit::QPlainTextEdit;
+protected:
+    QMimeData* createMimeDataFromSelection() const override {return new QMimeData;}
+};
 // Автодополнение последнего незавершённого тега после запятой.
 class TagCompleter : public QCompleter {
 public:
@@ -95,6 +107,15 @@ QLineEdit* line(QWidget* parent, const char* name, bool secret = false) {
     }
     return field;
 }
+bool confirmChange(QWidget* parent,const QString& title,const QString& message) {
+    QMessageBox dialog(QMessageBox::Warning,title,message,QMessageBox::Yes|QMessageBox::No,parent);
+    dialog.setTextFormat(Qt::PlainText); dialog.setDefaultButton(QMessageBox::No); dialog.setEscapeButton(QMessageBox::No);
+    return dialog.exec()==QMessageBox::Yes;
+}
+int payloadCount(const Entry& e) {
+    return !e.token.isEmpty()+!e.password.isEmpty()+!e.login.isEmpty()+!e.sshPrivate.isEmpty()+!e.sshPublic.isEmpty()
+        +!e.sshPassphrase.isEmpty()+!e.sshComment.isEmpty()+!e.plainValue.isEmpty()+!e.textFile.bytes.isEmpty();
+}
 }
 EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> existing, QWidget* parent)
     : QDialog(parent), model_(model), original_(existing.value_or(Entry{})) {
@@ -105,8 +126,8 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     fields->setSizeConstraint(QLayout::SetMinAndMaxSize);
     auto* form = new QFormLayout;
     type_ = new QComboBox(fields_); type_->setObjectName(QStringLiteral("entryType"));
-    type_->addItems({QStringLiteral("API-токен"), QStringLiteral("Учётные данные"), QStringLiteral("SSH-ключ")});
-    type_->setEnabled(!existing.has_value());
+    for(int i=0;i<=int(EntryType::TextFile);++i) type_->addItem(tb::ui::entryTypeLabel(EntryType(i)),i);
+    type_->setEnabled(!original_.textFile.sourceSnapshot);
     group_ = new QComboBox(fields_); group_->setObjectName(QStringLiteral("entryGroup")); tb::ui::populateGroups(*group_, model);
     title_ = line(fields_, "entryTitle"); url_ = line(fields_, "entryUrl"); note_ = new QPlainTextEdit(fields_);
     note_->setObjectName(QStringLiteral("entryNote")); note_->setFixedHeight(note_->fontMetrics().lineSpacing() * 3 + 12);
@@ -154,13 +175,36 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     qobject_cast<QLabel*>(sshForm->labelForField(keyRow))->setBuddy(sshPath_);
     sshForm->addRow(QStringLiteral("Публичный ключ:"), sshPublic_);
     sshForm->addRow(QStringLiteral("Парольная фраза:"), sshPass_); sshForm->addRow(QStringLiteral("Описание ключа:"), sshComment_);
-    pageLayout->addWidget(ssh); fields->addWidget(pages);
+    pageLayout->addWidget(ssh);
+    auto* plain=new QWidget(pages); auto* plainForm=new QFormLayout(plain);
+    parameter_=line(plain,"entryParameterName"); parameter_->setMaxLength(128); parameter_->setAccessibleName(QStringLiteral("Имя параметра"));
+    plainValue_=line(plain,"entryPlainValue"); plainValue_->setMaxLength(int(VaultModel::MaxSecretBytes)); plainValue_->setAccessibleName(QStringLiteral("Простое значение"));
+    valueFormat_=new QComboBox(plain); valueFormat_->setObjectName("entryValueFormat"); valueFormat_->setAccessibleName(QStringLiteral("Формат значения"));
+    valueFormat_->addItem(QStringLiteral("Текст"),int(ValueFormat::Text)); valueFormat_->addItem(QStringLiteral("IP-адрес"),int(ValueFormat::Ip)); valueFormat_->addItem(QStringLiteral("URL"),int(ValueFormat::Url));
+    plainForm->addRow(QStringLiteral("Имя параметра:"),parameter_); plainForm->addRow(QStringLiteral("Значение:"),plainValue_); plainForm->addRow(QStringLiteral("Формат:"),valueFormat_);
+    pageLayout->addWidget(plain);
+    auto* file=new QWidget(pages); auto* fileForm=new QFormLayout(file);
+    fileName_=line(file,"entryTextFileName"); fileName_->setMaxLength(255); fileName_->setAccessibleName(QStringLiteral("Имя текстового файла"));
+    fileBody_=new FileBodyEditor(file); fileBody_->setObjectName("entryTextFileBody"); fileBody_->setAccessibleName(QStringLiteral("Содержимое текстового файла"));
+    fileBody_->installEventFilter(this); fileBody_->setContextMenuPolicy(Qt::NoContextMenu);
+    fileBody_->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText|Qt::ImhNoAutoUppercase);
+    fileBody_->setFixedHeight(fileBody_->fontMetrics().lineSpacing()*4+12);
+    editBody_=new QPushButton(original_.textFile.sourceSnapshot?QStringLiteral("Редактировать копию…"):QStringLiteral("Открыть тело для изменения…"),file);
+    editBody_->setObjectName("editTextFileBody");
+    auto* fileInfo=new QLabel(QStringLiteral("UTF-8; до правки байты сохраняются точно. После правки — LF, BOM сохраняется, видимость сбрасывается. Вставка: Ctrl+V; копирование — из просмотра строк."),file);
+    fileInfo->setTextFormat(Qt::PlainText); fileInfo->setWordWrap(true);
+    fileForm->addRow(QStringLiteral("Имя файла:"),fileName_); fileForm->addRow(QStringLiteral("Тело файла:"),fileBody_); fileForm->addRow(editBody_); fileForm->addRow(fileInfo);
+    pageLayout->addWidget(file); fields->addWidget(pages);
     auto* options = new QFormLayout;
-    for (auto* layout : {form, tokenForm, credentialsForm, sshForm, options}) {
+    for (auto* layout : {form, tokenForm, credentialsForm, sshForm, plainForm,fileForm,options}) {
         layout->setRowWrapPolicy(QFormLayout::WrapLongRows); layout->setContentsMargins(0,0,0,0); layout->setVerticalSpacing(6);
     }
     favorite_ = new QCheckBox(QStringLiteral("Избранное"), fields_); favorite_->setObjectName(QStringLiteral("entryFavorite"));
     reverify_ = new QCheckBox(QStringLiteral("Повторная проверка при показе и копировании"), fields_); reverify_->setObjectName(QStringLiteral("entryReverify"));
+    connect(reverify_,&QCheckBox::toggled,this,[this](bool protectedValue) {
+        plainValue_->setEchoMode(protectedValue?QLineEdit::Password:QLineEdit::Normal);
+        plainValue_->setInputMethodHints(protectedValue?Qt::ImhSensitiveData|Qt::ImhNoPredictiveText|Qt::ImhNoAutoUppercase:Qt::ImhNone);
+    });
     options->addRow(favorite_, reverify_); fields->addLayout(options);
     auto* scroll = new QScrollArea(this); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(fields_); layout->addWidget(scroll, 1);
     error_ = new QLabel(this); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); error_->setObjectName(QStringLiteral("entryError")); error_->hide(); layout->addWidget(error_);
@@ -168,12 +212,45 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     buttons_->button(QDialogButtonBox::Save)->setText(QStringLiteral("Сохранить")); buttons_->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена")); layout->addWidget(buttons_);
     connect(buttons_, &QDialogButtonBox::accepted, this, &EntryEditDialog::accept);
     connect(buttons_, &QDialogButtonBox::rejected, this, &EntryEditDialog::reject);
-    const auto showType = [this, pages, tokenPage, credentials, ssh](int type) {
-        tokenPage->setVisible(type == 0); credentials->setVisible(type == 1); ssh->setVisible(type == 2);
+    const auto showType = [this, pages, tokenPage, credentials, ssh,plain,file](int) {
+        if(canceled_ || !type_->currentData().isValid()) return;
+        const auto type=EntryType(type_->currentData().toInt());
+        const auto revert=[&] {const QSignalBlocker block(type_); type_->setCurrentIndex(type_->findData(int(shownType_)));};
+        if(type!=original_.type && !original_.id.isNull()
+            && (payloadCount(original_)>1 || original_.type==EntryType::TextFile || type==EntryType::TextFile)) {
+            showError(QStringLiteral("Эта смена типа потеряет полезные поля. Создайте отдельную запись; исходная останется без изменений.")); revert(); return;
+        }
+        QString source;
+        if(shownType_==EntryType::ApiToken) source=token_->text();
+        else if(shownType_==EntryType::Credentials) source=password_->text().isEmpty()?login_->text():password_->text();
+        else if(shownType_==EntryType::PlainValue) source=plainValue_->text();
+        if(type==EntryType::PlainValue && shownType_!=type && (!original_.id.isNull() || !source.isEmpty())) {
+            if(source.contains('\r') || source.contains('\n') || source.contains(QChar(0)) || source.contains(QChar(0x2028)) || source.contains(QChar(0x2029))) {
+                showError(QStringLiteral("Многострочные данные сохраняйте текстовым файлом; автоматического сокращения нет.")); revert(); return;
+            }
+            if(!confirmChange(this,QStringLiteral("Сделать значение видимым"),QStringLiteral("Значение станет видимым после разблокировки и доступным поиску. Если включена повторная проверка, она продолжит скрывать значение. Продолжить?"))) {revert(); return;}
+        }
+        if(canceled_) return;
+        if(type==EntryType::PlainValue && plainValue_->text().isEmpty()) plainValue_->setText(source);
+        if(type==EntryType::ApiToken && token_->text().isEmpty()) token_->setText(source);
+        if(type==EntryType::Credentials && password_->text().isEmpty()) password_->setText(source);
+        shownType_=type;
+        tokenPage->setVisible(type==EntryType::ApiToken); credentials->setVisible(type==EntryType::Credentials); ssh->setVisible(type==EntryType::SshKey);
+        plain->setVisible(type==EntryType::PlainValue); file->setVisible(type==EntryType::TextFile);
         pages->layout()->activate(); pages->updateGeometry();
         fitToContents();
     };
     connect(type_, &QComboBox::currentIndexChanged, this, showType);
+    connect(editBody_,&QPushButton::clicked,this,[this] {
+        const auto message=original_.textFile.sourceSnapshot
+            ?QStringLiteral("Открыть всё содержимое, включая скрытые строки, и редактировать отдельную копию с новым UUID? Исходный снимок не изменится.")
+            :QStringLiteral("Открыть всё содержимое, включая скрытые строки, в редакторе? При изменении тела окончания строк станут LF, а разрешённая видимость строк будет сброшена.");
+        if(!confirmChange(this,QStringLiteral("Редактирование текстового файла"),message) || canceled_) return;
+        editingCopy_=original_.textFile.sourceSnapshot;
+        if(editingCopy_) title_->setText(original_.title+QStringLiteral(" — копия"));
+        fileBody_->setPlainText(QString::fromUtf8(original_.textFile.bytes)); bodyBaseline_=fileBody_->document()->toRawText().replace(QChar(0x2029),'\n');
+        fileBody_->document()->setModified(false); fileBody_->setReadOnly(false); bodyLoaded_=true; editBody_->hide(); fitToContents();
+    });
     connect(browse, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Приватный ключ SSH"));
         if (!path.isEmpty()) sshPath_->setText(path);
@@ -186,13 +263,17 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
         for (int i = 0; i < 24; ++i) password += alphabet.at(int(randombytes_uniform(uint(alphabet.size()))));
         password_->setText(password);
     });
-    type_->setCurrentIndex(int(original_.type));
+    shownType_=original_.type; type_->setCurrentIndex(type_->findData(int(original_.type)));
     if (existing) setGroup(original_.groupId);
     title_->setText(original_.title); url_->setText(original_.url); note_->setPlainText(original_.note);
     tags_->setText(original_.tags.join(QStringLiteral(", ")));
     token_->setText(original_.token); login_->setText(original_.login); password_->setText(original_.password);
     sshPass_->setText(original_.sshPassphrase); sshComment_->setText(original_.sshComment);
     sshPublic_->setPlainText(QString::fromUtf8(original_.sshPublic)); sshPublic_->document()->setModified(false);
+    parameter_->setText(original_.parameterName); plainValue_->setText(original_.plainValue); valueFormat_->setCurrentIndex(valueFormat_->findData(int(original_.valueFormat)));
+    fileName_->setText(original_.textFile.fileName.isEmpty()?QStringLiteral("document.txt"):original_.textFile.fileName);
+    const bool storedFile=existing && original_.type==EntryType::TextFile;
+    fileBody_->setReadOnly(storedFile); fileBody_->setPlaceholderText(storedFile?QStringLiteral("Содержимое скрыто. Откройте тело отдельно для изменения."):QString()); editBody_->setVisible(storedFile);
     favorite_->setChecked(original_.favorite); reverify_->setChecked(original_.reverify);
     if (original_.expiresAt.isValid()) { expiry_->setChecked(true); expiryDate_->setDate(original_.expiresAt.date()); }
     showType(type_->currentIndex()); title_->setFocus();
@@ -216,15 +297,31 @@ void EntryEditDialog::fitToContents() {
 }
 void EntryEditDialog::showError(const QString& message) { error_->setText(message); error_->show(); fitToContents(); }
 EntryEditDialog::~EntryEditDialog() { clearSecrets(); }
+bool EntryEditDialog::eventFilter(QObject* object,QEvent* event) {
+    if(object==fileBody_ && (event->type()==QEvent::KeyPress || event->type()==QEvent::ShortcutOverride)) {
+        const auto* key=static_cast<QKeyEvent*>(event);
+        if(key->matches(QKeySequence::Copy) || key->matches(QKeySequence::Cut)) {
+            event->accept();
+            if(event->type()==QEvent::KeyPress) showError(QStringLiteral("Для выдачи строк или целого файла используйте просмотр документа. В редакторе работают вставка и удаление."));
+            return true;
+        }
+    }
+    return QDialog::eventFilter(object,event);
+}
 void EntryEditDialog::setGroup(Id id) { group_->setCurrentIndex(id.isNull() ? -1 : group_->findData(id)); }
 void EntryEditDialog::clearSecrets() {
-    token_->clear(); password_->clear(); sshPass_->clear(); original_ = Entry{}; result_.reset();
+    token_->clear(); password_->clear(); sshPass_->clear(); plainValue_->clear(); fileBody_->clear(); bodyBaseline_.clear();
+    login_->clear(); note_->clear(); sshPublic_->clear(); original_ = Entry{}; result_.reset();
 }
 void EntryEditDialog::reject() { canceled_ = true; clearSecrets(); QDialog::reject(); }
 void EntryEditDialog::accept() {
     if (reading_ || canceled_) return;
-    Entry e; e.id = original_.id.isNull() ? QUuid::createUuid() : original_.id; e.created = original_.created;
-    e.type = EntryType(type_->currentIndex()); e.groupId = group_->currentData().value<Id>();
+    if(!type_->currentData().isValid()) {showError(QStringLiteral("Выберите тип записи.")); return;}
+    const auto type=EntryType(type_->currentData().toInt());
+    Entry e=type==original_.type?original_:Entry{};
+    e.id = original_.id.isNull() || editingCopy_ ? QUuid::createUuid() : original_.id; e.created = editingCopy_?QDateTime():original_.created;
+    e.sourceEntryId=original_.sourceEntryId; e.sourceLine=original_.sourceLine;
+    e.type=type; e.groupId = group_->currentData().value<Id>();
     e.title = title_->text(); e.url = url_->text(); e.note = note_->toPlainText();
     e.favorite = favorite_->isChecked(); e.reverify = reverify_->isChecked();
     e.expiresAt = expiry_->isChecked()
@@ -236,7 +333,7 @@ void EntryEditDialog::accept() {
     if (e.title.isEmpty()) { showError(QStringLiteral("Название обязательно.")); return; }
     if (e.type == EntryType::ApiToken) e.token = token_->text();
     else if (e.type == EntryType::Credentials) { e.login = login_->text(); e.password = password_->text(); }
-    else {
+    else if(e.type==EntryType::SshKey) {
         e.sshPrivate = original_.sshPrivate;
         e.sshPublic = sshPublic_->document()->isModified() ? sshPublic_->toPlainText().toUtf8() : original_.sshPublic;
         e.sshPassphrase = sshPass_->text(); e.sshComment = sshComment_->text();
@@ -254,6 +351,21 @@ void EntryEditDialog::accept() {
             e.sshPrivate = read.bytes;
         }
         if (e.sshPrivate.isEmpty()) { showError(QStringLiteral("Выберите файл приватного ключа.")); return; }
+    } else if(e.type==EntryType::PlainValue) {
+        e.parameterName=parameter_->text(); e.plainValue=plainValue_->text(); e.valueFormat=ValueFormat(valueFormat_->currentData().toInt());
+    } else if(e.type==EntryType::TextFile) {
+        e.textFile.fileName=fileName_->text();
+        const auto edited=fileBody_->document()->toRawText().replace(QChar(0x2029),'\n');
+        if(original_.id.isNull() || (bodyLoaded_ && edited!=bodyBaseline_)) {
+            if(!original_.textFile.visibleLines.isEmpty() && !confirmChange(this,QStringLiteral("Сбросить видимость строк"),
+                QStringLiteral("Тело изменилось. Окончания строк станут LF, все строки будут скрыты до новой классификации. Сохранить изменение?"))) return;
+            if(canceled_) return;
+            e.textFile.bytes=edited.toUtf8();
+            if(original_.textFile.bytes.startsWith("\xef\xbb\xbf")) e.textFile.bytes.prepend("\xef\xbb\xbf");
+            e.textFile.visibleLines.clear();
+        }
+        if(editingCopy_) e.textFile.sourceSnapshot=false;
+    } else {showError(QStringLiteral("Неизвестный тип записи.")); return;
     }
     auto validation = model_; const auto error = validation.setEntry(e);
     if (!error.isEmpty()) { showError(error); return; }

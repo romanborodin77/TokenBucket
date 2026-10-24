@@ -184,7 +184,7 @@ return store_.save(candidate,error);
 
 **Produces:** прежние entry()/showEntry()/copySecret() сохраняются; редактор получает пять явных типов и редактор текстовых байтов; общий bool ui::authorizeEntry(Application&, model::Id, QWidget*) для новых выдающих UI. Старые дополнительные проверки selection/action/generation в вызывающих не удалять.
 
-- [ ] **1. RED:** в test_storage_ui реальная форма на временном Application с PlainValue и TextFile; поля objectName: entryParameterName, entryPlainValue, entryValueFormat, entryTextFileName, entryTextFileBody. Кнопка Save:
+- [x] **1. RED:** в test_storage_ui реальная форма на временном Application с PlainValue и TextFile; поля objectName: entryParameterName, entryPlainValue, entryValueFormat, entryTextFileName, entryTextFileBody. Кнопка Save:
 
 ```cpp
 EntryEditDialog dialog(*app.model(),std::nullopt);
@@ -198,8 +198,8 @@ QVERIFY(dialog.entry()->token.isEmpty());
 ```
 
 Для snapshot исходника изменение тела создаёт новый UUID через явное Save As, а не setEntry прежнего ID. При метаданных неизменённого TextFile байты сравнить точно.
-- [ ] **2. Run:** test_storage_ui/test_ui. Expected: отсутствуют нужные контролы/видимый PlainValue. Добавить отмену смены секрет→plain, reverify до показа/редактора, lock во время VerifyDialog и сброс visibility после изменения тела.
-- [ ] **3. Реализация:** QComboBox хранит enum в itemData, не зависит от индекса фильтра. Поля скрываются вместе с подписями, прежний autosize/рабочая область/скролл сохраняются. PlainValue без reverify показан сразу и без таймера; при reverify — маска и действующая проверка. Общее authorizeEntry проверяет Ready/!busy, снимает generation/modified/type/reverify, вызывает прежний VerifyDialog при необходимости, затем заново проверяет запись; не кэширует успех между действиями.
+- [x] **2. Run:** test_storage_ui/test_ui. Expected: отсутствуют нужные контролы/видимый PlainValue. Добавить отмену смены секрет→plain, reverify до показа/редактора, lock во время VerifyDialog и сброс visibility после изменения тела.
+- [x] **3. Реализация:** QComboBox хранит enum в itemData, не зависит от индекса фильтра. Поля скрываются вместе с подписями, прежний autosize/рабочая область/скролл сохраняются. PlainValue без reverify показан сразу и без таймера; при reverify — маска и действующая проверка. Общее authorizeEntry проверяет Ready/!busy, снимает generation/modified/type/reverify, вызывает прежний VerifyDialog при необходимости, затем заново проверяет запись; не кэширует успех между действиями.
 
 ```cpp
 if (original.type!=EntryType::PlainValue && target==EntryType::PlainValue) {
@@ -212,8 +212,8 @@ if (textBodyChanged) {
 ```
 
 confirmVisibleValue — локальный QMessageBox с PlainText и Yes/No, по умолчанию No; остальные настройки не подавляют его. editedUtf8WithLf сохраняет прежний BOM. Перед очисткой списка видимых строк показать причину и возможность отмены. Не копировать секрет в note/tooltip/accessibility.
-- [ ] **4. GREEN:** test_storage_ui/test_ui; все прежние API/credentials/SSH/reverify/cancel случаи, обе темы и 420×480, 100/200% синтетический DPI. Динамические подписи сроков совпадают с A2. Полный набор перед коммитом.
-- [ ] **5. Commit:** Add compact editors and guarded views for new storage types.
+- [x] **4. GREEN:** test_storage_ui/test_ui; все прежние API/credentials/SSH/reverify/cancel случаи, обе темы и 420×480, 100/200% синтетический DPI. Динамические подписи сроков совпадают с A2. Полный набор перед коммитом.
+- [x] **5. Commit:** Add compact editors and guarded views for new storage types.
 
 ### Task 4: Просмотр строк, выдача файла и простая строка в быстрой вставке
 
