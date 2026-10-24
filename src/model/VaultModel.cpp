@@ -292,13 +292,14 @@ void VaultModel::encodeTo(cbor::CborWriter& w) const {
         }
     }
 }
+std::size_t VaultModel::encodedSize() const {
+    cbor::CborWriter counter; encodeTo(counter); return counter.position();
+}
 cbor::SecureBuffer VaultModel::toCborSecure() const {
     // Проход 1 — сухой подсчёт точного размера; проход 2 — запись в буфер ровно того
     // размера. Оба прохода исполняют одну и ту же encodeTo, поэтому размеры совпадают,
     // а секреты нигде не попадают в QByteArray/обычную кучу.
-    cbor::CborWriter counter;
-    encodeTo(counter);
-    cbor::SecureBuffer buffer(counter.position());
+    cbor::SecureBuffer buffer(encodedSize());
     cbor::CborWriter writer;
     writer.setOutput(buffer.data(), buffer.size());
     encodeTo(writer);

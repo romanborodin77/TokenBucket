@@ -8,6 +8,7 @@
 #include "EntryLabels.h"
 #include "EntryCard.h"
 #include "TextFileDialog.h"
+#include "TextImportDialog.h"
 #include "AboutDialog.h"
 #include "../io/Import.h"
 #include "TrayController.h"
@@ -125,6 +126,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     action(vault, QStringLiteral("Защищённый экспорт…"), &MainWindow::exportVault);
     action(vault, QStringLiteral("Импорт из файла…"), &MainWindow::importVault);
     action(vault, QStringLiteral("Импорт из CSV / KeePass XML…"), &MainWindow::importFromCsvKeePass);
+    action(vault,QStringLiteral("TXT → предпросмотр и реестр…"),&MainWindow::importTextFile)->setObjectName("importTextFile");
     vault->addSeparator();
     auto* settings = menuBar()->addMenu(QStringLiteral("&Настройки"));
     auto* openSettings=settings->addAction(QStringLiteral("Настройки…"),this,&MainWindow::showSettings);
@@ -1085,6 +1087,9 @@ void MainWindow::openDocument(model::Id id) {
     const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
 #endif
     TextFileDialog dialog(app_,id,clipboard_,this); dialog.setRevealSeconds(appliedPreferences_.revealSeconds);
+    connect(&dialog,&TextFileDialog::requestRegistryImport,this,[this,&dialog](model::Id id) {
+        dialog.reject(); QTimer::singleShot(0,this,[this,id] {structureDocument(id);});
+    });
     connect(&dialog,&TextFileDialog::requestVisibilityChange,this,[this](model::Id id,int line,bool visible) {
         commitEntry([&](model::VaultModel& model) {
             const auto* current=model.entry(id); if(!current || current->type!=model::EntryType::TextFile) return QStringLiteral("Документ недоступен.");
@@ -1095,6 +1100,67 @@ void MainWindow::openDocument(model::Id id) {
         },id);
     });
     dialog.exec();
+}
+void MainWindow::previewTextImport(io::TextImportPreview preview) {
+    if(!ready()) return;
+    const auto baseline=*app_.model(); const auto generation=app_.generation();
+    TextImportDialog dialog(app_,std::move(preview),[this,baseline,generation](const io::TextImportPreview& p,const QList<io::RegistrySelection>& choices,QString* error) {
+        if(!ready() || generation!=app_.generation() || *app_.model()!=baseline) {if(error) *error=QStringLiteral("Сеанс или данные изменились. Повторите импорт."); return false;}
+        model::VaultModel candidate;
+        if(!io::buildRegistryCandidate(*app_.model(),p,choices,&candidate,error)) return false;
+        const bool saved=commit([&](model::VaultModel& model) {model=std::move(candidate); return QString();});
+        if(!saved && error) *error=error_->text(); return saved;
+    },this);
+    dialog.setRevealSeconds(appliedPreferences_.revealSeconds); dialog.exec();
+}
+void MainWindow::structureDocument(model::Id id) {
+    if(!ready() || editing_) return;
+    QScopedValueRollback guard(editing_,true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    if(!authorizeEntry(app_,id,this,true)) return;
+    const auto* e=app_.model()->entry(id); if(!e || e->type!=model::EntryType::TextFile) return;
+    auto parsed=io::parseTextFile(e->textFile.bytes,e->textFile.fileName);
+    if(e->textFile.sourceSnapshot) parsed.source=*e;
+    else {
+        const auto newId=parsed.source.id; parsed.source=*e; parsed.source.id=newId; parsed.source.textFile.sourceSnapshot=true;
+        parsed.source.textFile.visibleLines.clear(); parsed.source.title+=QStringLiteral(" — снимок импорта");
+        parsed.source.created=parsed.source.modified=QDateTime::currentDateTimeUtc();
+    }
+    previewTextImport(std::move(parsed));
+}
+void MainWindow::importTextFile() {
+    if(!ready() || editing_) return;
+    const auto group=selectedNode(); if(group.isNull()) {report(QStringLiteral("Сначала выберите существующую группу ресурса.")); return;}
+    QScopedValueRollback guard(editing_,true); const auto generation=app_.generation();
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    const auto path=QFileDialog::getOpenFileName(this,QStringLiteral("TXT — источник реестра"),{},QStringLiteral("Текстовые файлы (*.txt *.env);;Все файлы (*)"));
+    if(path.isEmpty() || !ready() || generation!=app_.generation()) return;
+    QFutureWatcher<io::TextImportPreview> watcher; QEventLoop loop;
+    connect(&watcher,&QFutureWatcher<io::TextImportPreview>::finished,&loop,&QEventLoop::quit);
+    connect(&app_,&Application::stateChanged,&loop,[&] {if(generation!=app_.generation() || app_.gate()!=Application::Gate::Ready) loop.quit();});
+    statusBar()->showMessage(QStringLiteral("Чтение и разбор TXT…"));
+    watcher.setFuture(QtConcurrent::run([path] {
+        const QFileInfo info(path); io::TextImportPreview result;
+        if(!info.isFile() || info.isSymbolicLink() || info.isShortcut() || info.isJunction() || info.size()>model::VaultModel::MaxSecretBytes) {
+            result.error=QStringLiteral("Нужен обычный файл UTF-8 не больше 1 МиБ."); return result;
+        }
+        QFile file(path);
+        if(!file.open(QIODevice::ReadOnly)) {result.error=QStringLiteral("Не удалось прочитать TXT."); return result;}
+        auto bytes=file.read(model::VaultModel::MaxSecretBytes+1);
+        if(file.error()!=QFile::NoError || !file.atEnd() || bytes.size()>model::VaultModel::MaxSecretBytes) {result.error=QStringLiteral("Файл изменился, недоступен или превышает 1 МиБ."); return result;}
+        return io::parseTextFile(bytes,info.fileName());
+    }));
+    if(!watcher.isFinished()) loop.exec();
+    if(!ready() || generation!=app_.generation() || !watcher.isFinished()) return;
+    statusBar()->clearMessage(); io::TextImportPreview preview;
+    try {preview=watcher.result();} catch(...) {report(QStringLiteral("Не удалось подготовить предпросмотр TXT.")); return;}
+    if(!preview.error.isEmpty()) {report(preview.error); return;}
+    if(!VerifyDialog::verify(app_,this,QStringLiteral("предпросмотр TXT")) || !ready() || generation!=app_.generation()) return;
+    preview.source.groupId=group; previewTextImport(std::move(preview));
 }
 #ifdef Q_OS_WIN
 bool MainWindow::canExportEnv() const {

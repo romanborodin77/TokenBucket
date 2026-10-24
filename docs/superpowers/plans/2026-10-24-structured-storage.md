@@ -278,7 +278,7 @@ bool buildRegistryCandidate(const model::VaultModel&,const TextImportPreview&,
 
 TextImportDialog выдаёт только утверждённые selections и согласованное разрешение видимых строк снимка; выбор type сам по себе не считается подтверждением раскрытия прежнего секрета.
 
-- [ ] **1. RED:** источник с комментариями, public IP, секретом в URL и повторным ключом; байты source совпадают, повтор не теряется:
+- [x] **1. RED:** источник с комментариями, public IP, секретом в URL и повторным ключом; байты source совпадают, повтор не теряется:
 
 ```cpp
 const QByteArray input="# Demo\r\nPUBLIC_IP=192.0.2.10\r\nTOKEN=synthetic\r\nPUBLIC_IP=192.0.2.20\r\n";
@@ -289,8 +289,8 @@ QCOMPARE(parsed.parameters[1].suggestedType,EntryType::ApiToken);
 QCOMPARE(parsed.parameters[0].line,1); QCOMPARE(parsed.parameters[2].line,3);
 ```
 
-- [ ] **2. Run:** test_text_import. Expected: разбор отсутствует либо теряет повтор/классификацию. Добавить парные кавычки, export, NAME: VALUE, неизвестную строку, пароль в комментарии, DATABASE_URL с userinfo, APP_URL с token query, пустую/слишком большую/битую UTF-8 запись и лимит групп/entries.
-- [ ] **3. Реализация:** parser только читает bytes; source не меняет visibleLines по эвристике. Не исполнять команды/escape. Известные безопасные значения предлагаются PlainValue, остальные ApiToken; классификацию подтверждает UI. Разные одинаковые имена остаются параметрами с разными line. Перед buildRegistryCandidate заново проверить индексы, target types, ссылки, список видимых строк и ограничения целого кандидата; out присваивается только после полного успеха.
+- [x] **2. Run:** test_text_import. Expected: разбор отсутствует либо теряет повтор/классификацию. Добавить парные кавычки, export, NAME: VALUE, неизвестную строку, пароль в комментарии, DATABASE_URL с userinfo, APP_URL с token query, пустую/слишком большую/битую UTF-8 запись и лимит групп/entries.
+- [x] **3. Реализация:** parser только читает bytes; source не меняет visibleLines по эвристике. Не исполнять команды/escape. Известные безопасные значения предлагаются PlainValue, остальные ApiToken; классификацию подтверждает UI. Разные одинаковые имена остаются параметрами с разными line. Перед buildRegistryCandidate заново проверить индексы, target types, ссылки, список видимых строк и ограничения целого кандидата; out присваивается только после полного успеха.
 
 ```cpp
 auto candidate=base;
@@ -303,8 +303,8 @@ return true;
 ```
 
 applyChoice — приватная функция TextImport.cpp с сигнатурой bool(VaultModel&,const TextImportPreview&,const RegistrySelection&,QString*), без файлов/сохранения. После отдельного подтверждения UI связывает рабочую запись sourceEntryId/sourceLine. При Skip не менять прежние записи; Replace сохраняет UUID и пользовательские метаданные, CreateVersion создаёт отличимое название. Неоднозначная цель Replace запрещена.
-- [ ] **4. GREEN:** чистые тесты parser/candidate плюс настоящий диалог cancel/классификация/конфликты на временной модели. QFile-чтение выполняется отдельно с лимитом/обычным файлом и worker+проверкой поколения; parser не открывает пути. Полный набор.
-- [ ] **5. Commit:** Preview and classify text imports without losing source data.
+- [x] **4. GREEN:** чистые тесты parser/candidate плюс настоящий диалог cancel/классификация/конфликты на временной модели. QFile-чтение выполняется отдельно с лимитом/обычным файлом и worker+проверкой поколения; parser не открывает пути. Полный набор.
+- [x] **5. Commit:** Preview and classify text imports without losing source data.
 
 ### Task 6: Реестр ресурсов и подтверждённая миграция прежних записей
 

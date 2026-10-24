@@ -16,8 +16,11 @@
 #include <QAccessible>
 #include <QFile>
 #include <QFileDialog>
+#include <QAction>
 #include <QTableView>
+#include <QTreeWidget>
 #include "../src/ui/TextFileDialog.h"
+#include "../src/ui/TextImportDialog.h"
 #include "../src/ui/MiniPanel.h"
 #include "../src/platform/ClipboardGuard.h"
 #include "../src/ui/EntryAccess.h"
@@ -54,6 +57,117 @@ class TestStorageUi : public QObject {
         return e;
     }
 private slots:
+    void textFileImportReadsBoundedSource_data() {
+        QTest::addColumn<int>("action"); QTest::newRow("saved")<<0; QTest::newRow("oversize")<<1; QTest::newRow("invalid-utf8")<<2; QTest::newRow("preview-cancel")<<3;
+    }
+    void textFileImportReadsBoundedSource() {
+        QFETCH(int,action); QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        QByteArray bytes=QByteArray::fromHex("efbbbf")+"PUBLIC_IP=192.0.2.10\r\nTOKEN=synthetic\r\n# synthetic hidden\r\n";
+        if(action==1) bytes=QByteArray(model::VaultModel::MaxSecretBytes+1,'x'); if(action==2) bytes=QByteArray::fromHex("ff");
+        const auto path=dir.filePath("source.txt"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+        QFile vault(app.storePathForTest()); QVERIFY(vault.open(QIODevice::ReadOnly)); const auto before=vault.readAll(); vault.close();
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        auto* tree=window.tree(); QVERIFY(tree->topLevelItem(0)); tree->setCurrentItem(tree->topLevelItem(0)); QCOMPARE(tree->currentItem()->data(0,Qt::UserRole).value<model::Id>(),group);
+        const bool nativeDisabled=QApplication::testAttribute(Qt::AA_DontUseNativeDialogs); QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,true); const auto restore=qScopeGuard([&] {QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,nativeDisabled);});
+        bool fileSeen=false,authSeen=false,previewSeen=false,timedOut=false; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            auto* modal=QApplication::activeModalWidget();
+            if(auto* file=qobject_cast<QFileDialog*>(modal);file && !fileSeen) {fileSeen=true; file->selectFile(path); QMetaObject::invokeMethod(file,"accept",Qt::QueuedConnection);}
+            else if(auto* auth=qobject_cast<QInputDialog*>(modal)) {authSeen=true; auth->setTextValue("valid-password"); auth->accept();}
+            else if(auto* box=qobject_cast<QMessageBox*>(modal)) box->button(QMessageBox::Yes)->click();
+            else if(auto* preview=qobject_cast<ui::TextImportDialog*>(modal);preview && !previewSeen) {
+                previewSeen=true; QTimer::singleShot(0,preview,[preview,action] {if(action==3) preview->reject(); else preview->accept();});
+            }
+        });
+        QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();});
+        driver.start(); watchdog.start(10000); window.importTextFile(); driver.stop(); watchdog.stop(); QVERIFY(!timedOut); QVERIFY(fileSeen); QCOMPARE(authSeen,action==0 || action==3); QCOMPARE(previewSeen,action==0 || action==3);
+        QCOMPARE(app.model()->entries().size(),action==0?3:0); QVERIFY(vault.open(QIODevice::ReadOnly)); const auto after=vault.readAll(); vault.close();
+        if(action!=0) QCOMPARE(after,before);
+        else for(const auto& e:app.model()->entries()) if(e.type==model::EntryType::TextFile) {QVERIFY(e.textFile.sourceSnapshot); QCOMPARE(e.textFile.bytes,bytes); QCOMPARE(e.textFile.visibleLines,QList<int>{0});}
+    }
+    void initTestCase() {qApp->setQuitOnLastWindowClosed(false);}
+    void textPreviewMasksUnknownDataAndCancelIsReadOnly() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        auto p=io::parseTextFile("# synthetic-comment\nsynthetic-sensitive-label=synthetic-password\nPUBLIC_IP=192.0.2.10\n","demo.txt"); p.source.groupId=group;
+        const auto before=*app.model(); int called=0; ui::TextImportDialog dialog(app,p,[&](const auto&,const auto&,QString*) {++called; return false;});
+        auto* parameters=dialog.findChild<QTableView*>("textImportParameters"); auto* source=dialog.findChild<QTableView*>("textImportSource");
+        QCOMPARE(parameters->model()->rowCount(),2); QCOMPARE(source->model()->rowCount(),4);
+        for(auto role:{Qt::DisplayRole,Qt::ToolTipRole,Qt::AccessibleTextRole,Qt::UserRole,Qt::EditRole}) {
+            QVERIFY(!parameters->model()->index(0,3).data(role).toString().contains("synthetic-password"));
+            QVERIFY(!parameters->model()->index(0,2).data(role).toString().contains("sensitive-label"));
+            QVERIFY(!source->model()->index(0,1).data(role).toString().contains("synthetic-comment"));
+        }
+        dialog.reject(); QCOMPARE(called,0); QVERIFY(*app.model()==before); QCOMPARE(parameters->model()->rowCount(),0); QCOMPARE(source->model()->rowCount(),0);
+    }
+    void textPreviewConfirmsClassificationAndStaysOpenOnError() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty()); auto p=io::parseTextFile("TOKEN=synthetic\n","demo.txt"); p.source.groupId=group;
+        int applied=0; bool classified=false; ui::TextImportDialog dialog(app,p,[&](const io::TextImportPreview& preview,const QList<io::RegistrySelection>& choices,QString* e) {
+            ++applied; classified=preview.source.textFile.visibleLines==QList<int>{0} && choices.first().type==model::EntryType::PlainValue; *e="synthetic storage refused"; return false;
+        }); dialog.show(); QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* type=dialog.findChild<QComboBox*>("textImportType"); answer(false); type->setCurrentIndex(1); QCOMPARE(type->currentData().toInt(),int(model::EntryType::ApiToken));
+        answer(true); type->setCurrentIndex(1); QCOMPARE(type->currentData().toInt(),int(model::EntryType::PlainValue));
+        answer(false); dialog.accept(); QCOMPARE(applied,0); QVERIFY(dialog.isVisible());
+        answer(true); dialog.accept(); QCOMPARE(applied,1); QVERIFY(classified); QVERIFY(dialog.isVisible()); QCOMPARE(dialog.findChild<QLabel*>("textImportError")->text(),QString("synthetic storage refused"));
+        QVERIFY(app.model()->entries().isEmpty()); dialog.reject();
+    }
+    void textPreviewLockClosesClassification() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        auto p=io::parseTextFile("PUBLIC_IP=192.0.2.10","demo.txt"); p.source.groupId=group; int applied=0;
+        ui::TextImportDialog dialog(app,p,[&](const auto&,const auto&,QString*) {++applied; return true;});
+        bool seen=false; QTimer::singleShot(0,[&] {QVERIFY(qobject_cast<QMessageBox*>(QApplication::activeModalWidget())); seen=true; app.lock();});
+        dialog.accept(); QVERIFY(seen); QCOMPARE(applied,0); QCOMPARE(dialog.findChild<QTableView*>("textImportParameters")->model()->rowCount(),0); QVERIFY(dialog.findChild<QLineEdit*>("textImportTitle")->text().isEmpty());
+    }
+    void textPreviewUsesTimedOwnerCheckAndBlocksNativeCopy() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        auto p=io::parseTextFile("PUBLIC_IP=192.0.2.10\nTOKEN=synthetic","demo.txt"); p.source.groupId=group; p.source.reverify=true;
+        ui::TextImportDialog dialog(app,p,{}); dialog.setRevealSeconds(5); dialog.show(); QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* table=dialog.findChild<QTableView*>("textImportParameters"); QVERIFY(!table->model()->index(0,3).data().toString().contains("192.0.2.10"));
+        QTimer::singleShot(0,[] {auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(auth); auth->setTextValue("valid-password"); auth->accept();});
+        dialog.findChild<QPushButton*>("textImportReveal")->click(); QCOMPARE(table->model()->index(0,3).data().toString(),QString("192.0.2.10"));
+        auto* timer=dialog.findChild<QTimer*>("textImportHideTimer"); QVERIFY(timer->isActive()); QCOMPARE(timer->interval(),5000);
+        QSignalSpy changed(QApplication::clipboard(),&QClipboard::dataChanged); QTest::keyClick(table,Qt::Key_C,Qt::ControlModifier); QCOMPARE(changed.count(),0);
+        QMetaObject::invokeMethod(timer,"timeout"); QVERIFY(!table->model()->index(0,3).data().toString().contains("192.0.2.10"));
+        app.lock(); QCOMPARE(table->model()->rowCount(),0); QCOMPARE(dialog.findChild<QTableView*>("textImportSource")->model()->rowCount(),0);
+    }
+    void structureDocumentAppliesOnceOrKeepsOriginal_data() {
+        QTest::addColumn<int>("action"); QTest::newRow("save")<<0; QTest::newRow("save-failed")<<1; QTest::newRow("cancel")<<2;
+    }
+    void structureDocumentAppliesOnceOrKeepsOriginal() {
+        QFETCH(int,action); QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        auto e=document(group); e.textFile.bytes="PUBLIC_IP=192.0.2.10\r\nTOKEN=synthetic\r\n"; e.textFile.visibleLines.clear(); QVERIFY(app.model()->setEntry(e).isEmpty()); QVERIFY(app.save(&error));
+        QFile file(app.storePathForTest()); QVERIFY(file.open(QIODevice::ReadOnly)); const auto before=file.readAll(); file.close();
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        ops.failWrite=action==1; bool seen=false,timedOut=false; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            auto* modal=QApplication::activeModalWidget();
+            if(auto* auth=qobject_cast<QInputDialog*>(modal)) {auth->setTextValue("valid-password"); auth->accept();}
+            else if(auto* box=qobject_cast<QMessageBox*>(modal)) box->button(QMessageBox::Yes)->click();
+            else if(auto* preview=qobject_cast<ui::TextImportDialog*>(modal);preview && !seen) {
+                seen=true; QTimer::singleShot(0,preview,[&,preview] {
+                    if(action==2) {preview->reject(); return;} preview->accept();
+                    if(action==1) {QVERIFY(!preview->findChild<QLabel*>("textImportError")->text().isEmpty()); QCOMPARE(app.model()->entries().size(),1); preview->reject();}
+                });
+            }
+        });
+        QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();});
+        driver.start(); watchdog.start(6000); window.structureDocument(e.id); driver.stop(); watchdog.stop(); QVERIFY(seen); QVERIFY(!timedOut); QCOMPARE(*app.model()->entry(e.id),e);
+        QCOMPARE(app.model()->entries().size(),action==0?4:1); QVERIFY(file.open(QIODevice::ReadOnly)); const auto after=file.readAll(); file.close();
+        if(action!=0) QCOMPARE(after,before);
+        ops.failWrite=false; app.lock(); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->entries().size(),action==0?4:1);
+    }
+    void textImportHasAnExplicitPreviewAction() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;}); QVERIFY(window.findChild<QAction*>("importTextFile"));
+    }
     void documentLockClosesOutputPrompts_data() {
         QTest::addColumn<int>("prompt"); QTest::newRow("warning")<<0; QTest::newRow("owner-check")<<1; QTest::newRow("file-dialog")<<2;
     }

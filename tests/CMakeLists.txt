@@ -17,6 +17,7 @@ tb_add_test(test_container)
 
 tb_add_test(test_model)
 tb_add_test(test_textfile)
+tb_add_test(test_text_import)
 tb_add_test(test_storage_ui)
 
 tb_add_test(test_store)

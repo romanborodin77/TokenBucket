@@ -39,6 +39,7 @@ add_library(tokenbucket_core STATIC
   src/ui/EntryCard.cpp
   src/ui/EntryAccess.cpp
   src/ui/TextFileDialog.cpp
+  src/ui/TextImportDialog.cpp
   src/ui/ExportDialog.cpp
   src/ui/VerifyDialog.cpp
   src/app/IdleTimer.cpp
@@ -52,6 +53,7 @@ add_library(tokenbucket_core STATIC
   src/ui/AboutDialog.h
   src/ui/AboutDialog.cpp
   src/io/Import.cpp
+  src/io/TextImport.cpp
 )
 target_include_directories(tokenbucket_core PUBLIC src $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>)
 target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent Qt6::Network unofficial-sodium::sodium)

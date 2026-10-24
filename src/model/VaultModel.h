@@ -13,7 +13,8 @@ namespace tb::model {
 // файл между сохранениями может отличаться порядком элементов — это норма формата.
 class VaultModel {
 public:
-    struct Node { Id id, parent; QString name; }; // parent.isNull() => проект
+    struct Node { Id id, parent; QString name; bool operator==(const Node&) const = default; }; // parent.isNull() => проект
+    bool operator==(const VaultModel&) const = default;
     static constexpr int MaxEntries = 10000;
     static constexpr qsizetype MaxSecretBytes = 1024 * 1024;
     static constexpr qsizetype MaxPlainBytesCBOR = 64LL * 1024 * 1024;
@@ -47,6 +48,7 @@ public:
 
     QByteArray toCbor() const;      // эталон Qt: используется тестами для золотого сравнения
     cbor::SecureBuffer toCborSecure() const; // рабочий путь записи: секреты не проходят через обычную кучу
+    std::size_t encodedSize() const;
     enum class ParseStatus { Ok, Bad, TooLarge };
     ParseStatus fromCbor(const QByteArray& cbor, QString* err);
     int decodedVersion() const { return decodedVersion_; }

@@ -12,6 +12,7 @@
 #include <memory>
 namespace tb::platform { class QuickPaste; }
 namespace tb { class IdleTimer; }
+namespace tb::io {struct TextImportPreview;}
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox;
 class QScrollArea; class QLabel; class QAction;
 class QPushButton;
@@ -67,6 +68,8 @@ public slots:
     void showAbout();
     void showSettings();
     void openDocument(model::Id);
+    void importTextFile();
+    void structureDocument(model::Id);
 #ifdef Q_OS_WIN
     void exportToEnvironment();
     void removeExportedVariables();
@@ -105,6 +108,7 @@ private:
     QLabel *idleStatus_{}, *clipboardStatus_{}, *hotkeyStatus_{};
     QDate statusDate_ = QDateTime::currentDateTimeUtc().date();
     bool ready() const;
+    void previewTextImport(io::TextImportPreview);
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
     void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);
     void report(const QString& error);
