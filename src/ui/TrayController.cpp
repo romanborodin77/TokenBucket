@@ -1,5 +1,6 @@
 #include "TrayController.h"
 #include "../app/Application.h"
+#include "../app/Preferences.h"
 #include "Brand.h"
 #include <QAction>
 #include <QGuiApplication>
@@ -33,13 +34,13 @@ void TrayController::onStateChanged() {
     wasReady_ = ready;
     refresh();
 }
-bool TrayController::notificationsEnabled() {
+bool TrayController::notificationsEnabled(QSettings* preferences) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    return settings.value(QStringLiteral("trayNotifications"), true).toBool();
+    return prefs::read(preferences?*preferences:settings).notifications;
 }
-void TrayController::setNotificationsEnabled(bool on) {
+bool TrayController::setNotificationsEnabled(bool on,QSettings* preferences,QString* error) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    settings.setValue(QStringLiteral("trayNotifications"), on);
+    return prefs::writeValue(preferences?*preferences:settings,QStringLiteral("trayNotifications"),on,error);
 }
 void TrayController::notify(const QString& text) {
     if (!notificationsEnabled() || !tray_.isVisible()) return;

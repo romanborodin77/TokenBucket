@@ -62,6 +62,48 @@ class TestUi : public QObject {
     }
 private slots:
     void init() { uiPreferences_.clear(); }
+    void configuredRevealUsesRealTimer() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Synthetic").isEmpty());
+        model::Entry entry; entry.id=QUuid::createUuid(); entry.groupId=group; entry.title="Demo"; entry.token="synthetic-secret";
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        uiPreferences_.setValue("secretRevealSeconds",5);
+        ui::MainWindow window(app,nullptr,&uiPreferences_); window.show(); window.list()->setCurrentRow(0);
+        window.card()->revealButton()->click();
+        auto* timer=window.card()->findChild<QTimer*>("secretHideTimer"); QVERIFY(timer);
+        QCOMPARE(timer->interval(),5000); QVERIFY(timer->isActive());
+        QVERIFY(window.card()->revealButton()->text().contains("5"));
+        window.card()->setRevealSeconds(10);
+        QVERIFY(!timer->isActive()); QVERIFY(!window.card()->secretText().contains("synthetic-secret"));
+        window.card()->revealButton()->click(); QCOMPARE(timer->interval(),10000); QVERIFY(timer->isActive());
+        window.card()->setRevealSeconds(0); QCOMPARE(timer->interval(),15000); QVERIFY(!timer->isActive());
+        QVERIFY(window.card()->revealButton()->text().contains("15"));
+    }
+    void quickPanelDefaultAndManualChoiceSurviveRefill() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Synthetic").isEmpty());
+        model::Entry credentials; credentials.id=QUuid::createUuid(); credentials.groupId=group;
+        credentials.title="Shared credentials"; credentials.type=model::EntryType::Credentials;
+        credentials.login="synthetic-user"; credentials.password="synthetic-password";
+        auto empty=credentials; empty.id=QUuid::createUuid(); empty.title="Shared empty"; empty.login.clear();
+        auto token=credentials; token.id=QUuid::createUuid(); token.title="Shared token"; token.type=model::EntryType::ApiToken; token.token="synthetic-token";
+        for(const auto& e:{credentials,empty,token}) QVERIFY(app.model()->setEntry(e).isEmpty());
+        ClipboardGuard guard; ui::MiniPanel panel(app,guard); panel.setDefaultField(paste::Field::Login); panel.popup();
+        auto* search=panel.findChild<QLineEdit*>("miniSearch"); auto* list=panel.findChild<QListWidget*>("miniEntries");
+        auto* field=panel.findChild<QComboBox*>("miniField"); QVERIFY(search&&list&&field);
+        search->setText("Shared");
+        const auto select=[&](model::Id id){for(int i=0;i<list->count();++i) if(list->item(i)->data(Qt::UserRole).toString()==id.toString()){list->setCurrentRow(i);return;} QFAIL("Entry not found");};
+        select(credentials.id); QCOMPARE(field->currentData().toInt(),int(paste::Field::Login));
+        field->setCurrentIndex(0); search->setText("SHARED");
+        QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(),credentials.id.toString());
+        QCOMPARE(field->currentData().toInt(),int(paste::Field::Secret));
+        select(empty.id); QCOMPARE(field->currentData().toInt(),int(paste::Field::Login));
+        QVERIFY(!panel.findChild<QPushButton*>("miniCopy")->isEnabled()); QVERIFY(!panel.findChild<QPushButton*>("miniPaste")->isEnabled());
+        select(token.id); QCOMPARE(field->count(),1); QCOMPARE(field->currentData().toInt(),int(paste::Field::Secret));
+        panel.close(); panel.popup(); search->setText("Shared"); select(credentials.id);
+        QCOMPARE(field->currentData().toInt(),int(paste::Field::Login)); panel.close();
+    }
     void entryEditorFitsVisibleFields() {
         model::VaultModel model; const auto group = QUuid::createUuid();
         QVERIFY(model.addNode(group, {}, "Project").isEmpty());
@@ -834,7 +876,7 @@ private slots:
     void idleTimeoutClampAndPersist() {
         Application app(dir_.path() + "/idle"); QString err; QVERIFY(app.createPasswordVault("valid-password", &err));
         ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
-        QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+        auto& settings = uiPreferences_;
         const auto previous = settings.value(QStringLiteral("idleTimeoutMinutes"));
         QSignalSpy changed(&w, &ui::MainWindow::idleTimeoutChanged);
         w.applyIdleTimeout(7);
@@ -854,14 +896,14 @@ private slots:
         ui::theme::apply(ui::theme::Mode::Light);
         QVERIFY(qApp->palette().color(QPalette::Highlight).green() > qApp->palette().color(QPalette::Highlight).blue());
         QVERIFY(qApp->palette().color(QPalette::Base).lightness() > 192);  // светлее тёмного
-        QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
+        auto& settings = uiPreferences_;
         const auto previous = settings.value(QStringLiteral("theme"));
         settings.setValue(QStringLiteral("theme"), QStringLiteral("dark"));
-        QCOMPARE(ui::theme::load(), ui::theme::Mode::Dark);
+        QCOMPARE(ui::theme::load(&settings), ui::theme::Mode::Dark);
         settings.setValue(QStringLiteral("theme"), QStringLiteral("light"));
-        QCOMPARE(ui::theme::load(), ui::theme::Mode::Light);
+        QCOMPARE(ui::theme::load(&settings), ui::theme::Mode::Light);
         settings.setValue(QStringLiteral("theme"), QStringLiteral("мусор"));
-        QCOMPARE(ui::theme::load(), ui::theme::Mode::System);
+        QCOMPARE(ui::theme::load(&settings), ui::theme::Mode::System);
         if (previous.isValid()) settings.setValue(QStringLiteral("theme"), previous);
         else settings.remove(QStringLiteral("theme"));
     }

@@ -46,7 +46,7 @@ RestoreResult VaultStore::restoreBackup(const QByteArray& expectedMain,
 
 Application использует тот же RestoreResult, а не параллельный enum успеха. `committed` описывает совершённую замену, даже если после неё ошибка финальной проверки или блокировка. Непустая error никогда не трактуется UI как полный успех.
 
-### B1. Файловая фиксация с сохранением предыдущего main
+### Task 1: B1. Файловая фиксация с сохранением предыдущего main
 
 **Consumes:** FileOps::writeAll/renameReplace/removeFile, ensurePrivateDir, VaultStore::loadBytes/acceptVerified.
 
@@ -92,7 +92,7 @@ return {true, safetyPath, postCommitError};
 - [ ] **4. GREEN:** test_store, включая существующие save/rollback/DACL/reparse tests. Дополнить реальной проверкой DACL страховочной копии тем же способом, что существующий тест main/.bak; Windows replacement занятого файла должен сохранить прежний main.
 - [ ] **5. Commit:** `Restore validated backup with an encrypted safety copy`.
 
-### B2. Проверка кандидата и поколение Application
+### Task 2: B2. Проверка кандидата и поколение Application
 
 **Consumes:** B1 RestoreResult/restoreBackup; A3 Application::BackupInfo; Container::readMode/openPassword/openHello, VaultModel::fromCbor, SecureBytes и текущий HelloRequest.
 
@@ -157,7 +157,7 @@ restorePreparedBackup потребляет кандидат один раз, п�
 - [ ] **4. GREEN:** test_app/test_store и прежние password/Hello/lateHello/save tests. Windows Hello — внедрённый HelloRequest и собственный тестовый контейнер; не биометрия владельца. Проверить восстановление копии другого режима и необходимость её старого пароля, повторную попытку после ошибки, работоспособность последующего save и возврат к зашифрованной страховочной копии в новом временном Application.
 - [ ] **5. Commit:** `Authenticate backup restoration without reopening a stale session`.
 
-### B3. Подтверждение в настройках и полный маршрут
+### Task 3: B3. Подтверждение в настройках и полный маршрут
 
 **Files:** SettingsDialog.*, MainWindow.*, test_settings.cpp/test_e2e.cpp, общий acceptance-отчёт A7.
 

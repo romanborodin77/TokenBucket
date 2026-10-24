@@ -10,7 +10,7 @@
 
 **Spec:** [утверждённая спецификация](../specs/2026-10-24-unified-settings-design.md), база реализации `146f393` поверх main `2328280`.
 
-**Статус:** план подготовлен для рассмотрения; продуктовый код не изменён. Общая готовность объявляется после A1–A7 и B1–B3, не после появления диалога.
+**Статус:** исполнение подтверждено владельцем 2026-10-24 командой «продолжай план»; работа ведётся последовательно в текущем чате. Общая готовность объявляется после A1–A7 и B1–B3, не после появления диалога.
 
 ## Global Constraints
 
@@ -76,7 +76,7 @@ static void withSettingsDialog(ui::MainWindow& window,
 
 Каждая fixture создаёт QTemporaryDir, Application с `valid-password`, непустой узел/запись с вымышленными значениями и два INI-объекта preferences/run. Типы и методы принадлежат настоящему продукту; тестовый helper только заполняет UI и ограничивает ожидание.
 
-### A1. Снимок предпочтений и проверяемая запись
+### Task 1: A1. Снимок предпочтений и проверяемая запись
 
 **Files:** создать `src/app/Preferences.h/.cpp`, `tests/test_preferences.cpp`; изменить `CMakeLists.txt`, `tests/CMakeLists.txt`, `src/platform/EnvOps.h`, `src/platform/envops_win.cpp`, `src/ui/Theme.h/.cpp`, `src/ui/TrayController.h/.cpp`, `tests/test_ui.cpp`, `tests/test_env_win.cpp`.
 
@@ -141,7 +141,7 @@ attempt.sync();
 - [ ] **4. GREEN:** test_preferences и прежние theme/idle tests. Перевести затронутые функции темы/уведомлений/учёта EnvOps на необязательный `QSettings* preferences = nullptr`; nullptr сохраняет обычный профиль. Для функции записи возвращать bool/ошибку с прежними аргументами по умолчанию, чтобы проверить sync. `exportedNames/rememberExported/forgetExported/clearAllExported` используют один переданный источник; в тестах — временный INI и уникальные синтетические имена. Не очищать список переменных владельца.
 - [ ] **5. Commit:** `Add validated preferences and checked persistence` — только перечисленные исходники/тесты, Git identity владельца, без атрибуции.
 
-### A2. Подключить сроки и начальное поле к настоящим владельцам
+### Task 2: A2. Подключить сроки и начальное поле к настоящим владельцам
 
 **Files:** EntryCard.*, ClipboardGuard.*, MiniPanel.*, QuickPasteWin.h/quickpaste_win.cpp, MainWindow.*, tests/test_ui.cpp, tests/test_clipboard.cpp, tests/test_paste_win.cpp.
 
@@ -178,7 +178,7 @@ MiniPanel хранит начальное поле и последнее выб�
 - [ ] **4. GREEN:** прежние проверки чужого буфера, отмены, focus/lock/reverify и новые случаи. Для буфера использовать явный тестовый opt-in; при уменьшении/увеличении срока старая собственная публикация очищается, чужая сохраняется, следующий срок действительно работает.
 - [ ] **5. Commit:** `Apply configurable secret timers and paste field preference`.
 
-### A3. Рабочий диалог черновика и несекретные сведения о копии
+### Task 3: A3. Рабочий диалог черновика и несекретные сведения о копии
 
 **Files:** создать SettingsDialog.h/.cpp и test_settings.cpp, изменить Application.h/.cpp, CMakeLists.txt/tests/CMakeLists.txt, MainWindow.*.
 
@@ -244,7 +244,7 @@ connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 - [ ] **4. GREEN:** test_settings, test_ui; обе темы, размеры 900 и 420 логических пикселей, скролл страницы и доступный footer. В settings-demo тестового EXE показывать только временный Application/INI и фиктивные записи.
 - [ ] **5. Commit:** `Add unified settings dialog with staged edits`.
 
-### A4. Сохранение и интеграция системных предпочтений
+### Task 4: A4. Сохранение и интеграция системных предпочтений
 
 **Files:** MainWindow.*, TrayController.*, EnvOps.h/envops_win.cpp, EnvExportDialog.*, Theme.*, test_settings.cpp/test_env_win.cpp/test_ui.cpp/test_e2e.cpp.
 
@@ -287,7 +287,7 @@ TrayController получает необязательный QSettings* в ко�
 - [ ] **4. GREEN:** test_settings/test_preferences/test_env_win/test_ui/test_paste_win. Нативный тест проверяет фактическую новую регистрацию и сохранность старой при конфликте. Прежние сценарии reverify/cancel не теряются. Перед закрытием диалога ни выбранная тема, ни автозапуск не меняются без Save.
 - [ ] **5. Commit:** `Persist and apply unified settings with explicit failures`.
 
-### A5. Поведение закрытия F5
+### Task 5: A5. Поведение закрытия F5
 
 **Files:** MainWindow.*, test_settings.cpp/test_ui.cpp; граница с main задаётся сигналом и используется A6.
 
@@ -323,7 +323,7 @@ if (appliedPreferences_.closeBehavior == prefs::CloseBehavior::LockHide) app_.lo
 - [ ] **4. GREEN:** проверить порядок lockedHiddenRequested→stateChanged; при выборе Exit из настроек не завершать процесс до последующего закрытия главного окна. Esc/крестик SettingsDialog не запускает политику MainWindow.
 - [ ] **5. Commit:** `Honor window close preference without bypassing lock`.
 
-### A6. Проверяемый цикл сеанса и заблокированный трей
+### Task 6: A6. Проверяемый цикл сеанса и заблокированный трей
 
 **Files:** создать SessionFlow.h/.cpp, test_session.cpp; изменить main.cpp, TrayController.cpp, CMakeLists.txt/tests/CMakeLists.txt и settings-demo в test_e2e.cpp.
 
@@ -383,7 +383,7 @@ if (core.gate() == Application::Gate::NeedUnlock && waitForTrayOpen && trayAvail
 - [ ] **4. GREEN:** test_session (на Windows — native Qt), test_lock/test_e2e/test_settings. Проверить возвращение после отмены setup/unlock и действующий cleanup выхода. В settings-demo использовать эту же SessionFlow для маршрута трея, а не вторую реализацию.
 - [ ] **5. Commit:** `Keep locked sessions hidden until tray activation`.
 
-### A7. Восстановление, общий обзор и поставка
+### Task 7: A7. Восстановление, общий обзор и поставка
 
 **Files:** выполнить B1–B3 из [связанного плана](2026-10-24-backup-recovery.md); затем README.md, RESUME.MD, новый отчёт `docs/testing/2026-10-24-settings-acceptance.md` и `docs/build/2026-10-24-settings-release.md`.
 

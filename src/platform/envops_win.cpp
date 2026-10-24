@@ -1,4 +1,5 @@
 #include "EnvOps.h"
+#include "../app/Preferences.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -15,9 +16,9 @@ void broadcastEnvironmentChange() {
     SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, reinterpret_cast<LPARAM>(L"Environment"),
         SMTO_ABORTIFHUNG, 5000, nullptr);
 }
-void storeExported(const QStringList& names) {
+bool storeExported(const QStringList& names,QSettings* preferences,QString* error) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    settings.setValue(QStringLiteral("env-exported"), names); // нативный QStringList — без своего формата
+    return prefs::writeValue(preferences?*preferences:settings,QStringLiteral("env-exported"),names,error);
 }
 }
 
@@ -115,70 +116,70 @@ bool deleteKnownUserVariable(const QString& name, QString* err) {
     return true;
 }
 
-QStringList exportedNames() {
+QStringList exportedNames(QSettings* preferences) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    return settings.value(QStringLiteral("env-exported")).toStringList();
+    return (preferences?*preferences:settings).value(QStringLiteral("env-exported")).toStringList();
 }
-void rememberExported(const QString& name) {
-    QStringList names = exportedNames();
-    if (!names.contains(name)) { names << name; storeExported(names); }
+bool rememberExported(const QString& name,QSettings* preferences,QString* error) {
+    QStringList names = exportedNames(preferences);
+    if (!names.contains(name)) { names << name; return storeExported(names,preferences,error); }
+    if(error) error->clear(); return true;
 }
-void forgetExported(const QString& name) {
-    QStringList names = exportedNames();
-    if (names.removeAll(name)) storeExported(names);
+bool forgetExported(const QString& name,QSettings* preferences,QString* error) {
+    QStringList names = exportedNames(preferences);
+    if (names.removeAll(name)) return storeExported(names,preferences,error);
+    if(error) error->clear(); return true;
 }
-bool clearOnExitEnabled() {
+bool clearOnExitEnabled(QSettings* preferences) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    return settings.value(QStringLiteral("env-clear-on-exit"), false).toBool();
+    return prefs::read(preferences?*preferences:settings).clearEnvironmentOnExit;
 }
-void setClearOnExitEnabled(bool enabled) {
+bool setClearOnExitEnabled(bool enabled,QSettings* preferences,QString* error) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    settings.setValue(QStringLiteral("env-clear-on-exit"), enabled);
+    return prefs::writeValue(preferences?*preferences:settings,QStringLiteral("env-clear-on-exit"),enabled,error);
 }
-int clearAllExported() {
+int clearAllExported(QSettings* preferences) {
     int removed = 0;
-    for (const QString& name : exportedNames()) {
+    for (const QString& name : exportedNames(preferences)) {
         QString error;
         // Идемпотентно: отсутствующая переменная считается стёртой; при реальном отказе
         // имя остаётся в списке, чтобы переменную можно было удалить вручную позже.
-        if (deleteKnownUserVariable(name, &error)) { forgetExported(name); ++removed; }
+        if (deleteKnownUserVariable(name, &error) && forgetExported(name,preferences,&error)) ++removed;
     }
     return removed;
 }
 }
 
 namespace tb::platform::autostart {
-namespace {
-constexpr wchar_t kRunKey[] = L"Software\Microsoft\Windows\CurrentVersion\Run";
-constexpr wchar_t kValueName[] = L"TokenBucket";
-}
 QString commandForTest() {
     // Кавычки обязательны: путь к программе обычно содержит пробелы; --tray просит
     // стартовать свёрнутым в трей, не показывая окно при входе в систему.
     return QStringLiteral("\"%1\" --tray").arg(QDir::toNativeSeparators(QCoreApplication::applicationFilePath()));
 }
-bool enabled() {
-    wchar_t buffer[1024] = {};
-    DWORD size = sizeof(buffer);
-    return RegGetValueW(HKEY_CURRENT_USER, kRunKey, kValueName, RRF_RT_REG_SZ, nullptr, buffer, &size) == ERROR_SUCCESS;
-}
-bool setEnabled(bool on, QString* err) {
-    if (err) err->clear();
-    if (on) {
-        const std::wstring command = commandForTest().toStdWString();
-        const LSTATUS status = RegSetKeyValueW(HKEY_CURRENT_USER, kRunKey, kValueName, REG_SZ,
-            command.c_str(), DWORD((command.size() + 1) * sizeof(wchar_t)));
-        if (status != ERROR_SUCCESS) {
-            if (err) *err = QStringLiteral("Не удалось включить автозапуск (код %1).").arg(status);
-            return false;
-        }
-        return true;
+std::optional<bool> enabled(QSettings& run,QString* error) {
+    if(error) error->clear();
+    QSettings reader(run.fileName(),run.format()); reader.setFallbacksEnabled(run.fallbacksEnabled()); reader.sync();
+    if(reader.status()!=QSettings::NoError) {
+        if(error) *error=QStringLiteral("Не удалось прочитать состояние автозапуска.");
+        return std::nullopt;
     }
-    const LSTATUS status = RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kValueName);
-    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
-        if (err) *err = QStringLiteral("Не удалось выключить автозапуск (код %1).").arg(status);
+    return reader.contains("TokenBucket");
+}
+bool setEnabled(bool on,QSettings& run,QString* error) {
+    if(!prefs::writeValue(run,"TokenBucket",on?QVariant(commandForTest()):QVariant(),error)) return false;
+    const auto current=enabled(run,error);
+    if(!current || *current!=on || (on && run.value("TokenBucket").toString()!=commandForTest())) {
+        if(error) *error=QStringLiteral("Не удалось подтвердить состояние автозапуска.");
         return false;
     }
     return true;
+}
+bool enabled() {
+    QSettings run(QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"),QSettings::NativeFormat);
+    return enabled(run).value_or(false);
+}
+bool setEnabled(bool on,QString* error) {
+    QSettings run(QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"),QSettings::NativeFormat);
+    return setEnabled(on,run,error);
 }
 }

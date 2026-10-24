@@ -6,6 +6,7 @@
 #include <QSettings>
 #include <QWidget>
 #include <windows.h>
+#include "QuickPaste.h"
 namespace tb {
 class Application;
 class ClipboardGuard;
@@ -25,6 +26,9 @@ public:
     bool changeSequence(const QKeySequence& sequence, QSettings& settings, QString* err);
     QKeySequence sequence() const { return sequence_; }
     void popupPanel();
+    void setDefaultField(paste::Field field);
+    void setSuspended(bool suspended);
+    bool suspended() const {return suspended_;}
     bool nativeEventFilter(const QByteArray& type, void* message, qintptr* result) override;
 signals:
     void conflictDetected(const QString& combo);
@@ -32,6 +36,7 @@ private:
     bool applySequence(const QKeySequence& sequence, QSettings* settings, QString* err);
     QKeySequence sequence_;
     bool filterInstalled_ = false;
+    bool suspended_ = false;
     Application& app_;
     ClipboardGuard& clip_;
     ui::MiniPanel* panel_;   // parentless-панель: живёт и при свёрнутом в трей окне; удаляем сами

@@ -20,6 +20,7 @@ if(WIN32)
 endif()
 
 add_library(tokenbucket_core STATIC
+  src/app/Preferences.cpp
   src/vault/Crypto.cpp
   src/vault/CborWriter.cpp
   src/vault/Container.cpp

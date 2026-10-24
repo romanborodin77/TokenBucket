@@ -85,7 +85,12 @@ bool ClipboardGuard::copySecret(const QString& text, QString* err) {
     QApplication::clipboard()->setMimeData(data, QClipboard::Clipboard);
     if (epoch != epoch_) { clearIfOurs(); return fail("Копирование отменено."); }
 #endif
-    clearPending_ = false; timer_.start(20000); return true;
+    clearPending_ = false; timer_.start(clearSeconds_ * 1000); return true;
+}
+void ClipboardGuard::setClearSeconds(int seconds) {
+    if(seconds!=10 && seconds!=20 && seconds!=30 && seconds!=60) seconds=20;
+    if(seconds==clearSeconds_) return;
+    clearSeconds_=seconds; clearIfOurs();
 }
 ClipboardGuard::Snapshot ClipboardGuard::snapshot() const {
 #ifdef Q_OS_WIN

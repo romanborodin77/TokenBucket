@@ -42,6 +42,27 @@ using namespace tb;
 // E2E-путешествия: реальные диалоги, реальная модель/файлы/буфер, без моков.
 // Системные файловые диалоги (QFileDialog) автотестом не управляемы — они в ручной матрице приёмки.
 namespace {
+#ifdef Q_OS_WIN
+bool activateTestReceiver(HWND receiver,DWORD expectedPid) {
+    DWORD actualPid=0;
+    const DWORD receiverThread=GetWindowThreadProcessId(receiver,&actualPid);
+    if(!IsWindow(receiver) || !IsWindowVisible(receiver)
+        || !receiverThread || actualPid!=expectedPid) return false;
+    if(GetForegroundWindow()==receiver) return true;
+    // Only fixture setup: permit the known test receiver to become foreground.
+    const DWORD currentThread=GetCurrentThreadId();
+    const DWORD foregroundThread=GetWindowThreadProcessId(GetForegroundWindow(),nullptr);
+    const bool attached=foregroundThread && foregroundThread!=currentThread
+        && AttachThreadInput(currentThread,foregroundThread,TRUE);
+    const bool receiverAttached=receiverThread!=currentThread && receiverThread!=foregroundThread
+        && AttachThreadInput(currentThread,receiverThread,TRUE);
+    const auto detach=qScopeGuard([&] {
+        if(receiverAttached) AttachThreadInput(currentThread,receiverThread,FALSE);
+        if(attached) AttachThreadInput(currentThread,foregroundThread,FALSE);
+    });
+    return SetForegroundWindow(receiver);
+}
+#endif
 void typeInto(::EntryEditDialog& dialog, int type, const QString& title, std::function<void(::EntryEditDialog&)> extra = {}) {
     dialog.findChild<QComboBox*>(QStringLiteral("entryType"))->setCurrentIndex(type);
     dialog.findChild<QLineEdit*>(QStringLiteral("entryTitle"))->setText(title);
@@ -156,7 +177,7 @@ private slots:
         QVERIFY(IsWindowVisible(receiver));
         DWORD actualPid = 0; GetWindowThreadProcessId(receiver, &actualPid);
         QCOMPARE(actualPid, DWORD(header[2].toULong()));
-        QTRY_VERIFY_WITH_TIMEOUT(GetForegroundWindow() == receiver || SetForegroundWindow(receiver), 60000);
+        QVERIFY(activateTestReceiver(receiver,actualPid));
         QTRY_VERIFY(GetForegroundWindow() == receiver);
         const auto parsed = paste::parseHotkey(quick.sequence()); QVERIFY(parsed);
         INPUT trigger[6] = {};
@@ -456,6 +477,7 @@ private slots:
         QVERIFY(guard.copySecret(QStringLiteral("live-paste-777"), nullptr));
         QLineEdit target; target.resize(240, 32); target.show(); target.raise(); target.activateWindow();
         QVERIFY(QTest::qWaitForWindowExposed(&target));
+        QVERIFY(activateTestReceiver(reinterpret_cast<HWND>(target.winId()),GetCurrentProcessId()));
         QTest::qWait(150);
         const bool focused = GetForegroundWindow() == reinterpret_cast<HWND>(target.winId());
         if (!focused) QSKIP("окно не получило фокус в этой среде (посторонний topmost)");

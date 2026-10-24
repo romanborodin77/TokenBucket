@@ -5,9 +5,9 @@
 #include <QStyle>
 #include <QStyleHints>
 namespace tb::ui::theme {
-Mode load() {
+Mode load(QSettings* preferences) {
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    const auto value = settings.value(QStringLiteral("theme")).toString();
+    const auto value = (preferences?*preferences:settings).value(QStringLiteral("theme")).toString();
     if (value == QLatin1String("dark")) return Mode::Dark;
     if (value == QLatin1String("light")) return Mode::Light;
     return Mode::System;

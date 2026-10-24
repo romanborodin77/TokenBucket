@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "../app/Preferences.h"
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
 #include "AboutDialog.h"
@@ -316,8 +317,8 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
         if (!ready()) return; QString error;
         if (!clipboard_.copySecret(text, &error)) { if (app_.gate() == Application::Gate::Ready) report(error); }
         else {
-            statusBar()->showMessage(QStringLiteral("Скопировано. Очистка буфера через 20 секунд."), 5000);
-            emit notifyRequested(QStringLiteral("Секрет скопирован. Буфер очистится через 20 секунд."));
+            statusBar()->showMessage(QStringLiteral("Скопировано. Очистка буфера через %1 секунд.").arg(clipboard_.clearSeconds()), 5000);
+            emit notifyRequested(QStringLiteral("Секрет скопирован. Буфер очистится через %1 секунд.").arg(clipboard_.clearSeconds()));
         }
     });
     connect(&clipboard_, &ClipboardGuard::cleared, this, [this] { emit notifyRequested(QStringLiteral("Буфер обмена очищен")); });
@@ -342,8 +343,12 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
             changeHotkey();
         });
     });
+    hotkey_->setDefaultField(prefs::read(*preferences_).defaultField);
     hotkey_->start(nullptr);
 #endif
+    const auto preferences=prefs::read(*preferences_);
+    card_->setRevealSeconds(preferences.revealSeconds);
+    clipboard_.setClearSeconds(preferences.clipboardSeconds);
     refreshAll(); restoreUiState();
 }
 MainWindow::~MainWindow() { saveUiState(); }
@@ -1076,8 +1081,8 @@ void MainWindow::applyIdleTimeout(int minutes) {
     // Кламп 1–60 минут: границы те же, что у спинбокса диалога; защита от
     // испорченных значений настроек и от прямых вызовов вне диапазона.
     minutes = qBound(1, minutes, 60);
-    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    settings.setValue(QStringLiteral("idleTimeoutMinutes"), minutes);
+    QString error;
+    if(!prefs::writeValue(*preferences_,QStringLiteral("idleTimeoutMinutes"),minutes,&error)) {report(error); return;}
     emit idleTimeoutChanged(minutes);
 }
 void MainWindow::configureIdleTimeout() {

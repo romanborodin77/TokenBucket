@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QTemporaryDir>
+#include <QSettings>
 #include <windows.h>
 #include "../src/platform/EnvOps.h"
 #include "../src/ui/EnvExportDialog.h"
@@ -14,6 +15,9 @@ using namespace tb;
 
 class TestEnv : public QObject {
     Q_OBJECT
+    QTemporaryDir settingsDir_;
+    QSettings preferences_{settingsDir_.filePath("prefs.ini"),QSettings::IniFormat};
+    QSettings run_{settingsDir_.filePath("run.ini"),QSettings::IniFormat};
 private slots:
     void validName() {
         QVERIFY(platform::envops::validName(QStringLiteral("TOKEN")));
@@ -57,8 +61,8 @@ private slots:
         QVERIFY(QFile::remove(out)); // чистим за собой
     }
     void userVariableCycle() {
-        const QString name = QStringLiteral("TOKENBUCKET_TEST_ENV");
-        platform::envops::forgetExported(name); // хвосты прошлых прогонов недопустимы
+        const QString name = QStringLiteral("TOKENBUCKET_TEST_ENV_%1").arg(QCoreApplication::applicationPid());
+        platform::envops::forgetExported(name,&preferences_); // хвосты прошлых прогонов недопустимы
         QString err;
         QVERIFY2(platform::envops::setUserVariable(name, QStringLiteral("значение-теста"), &err), qPrintable(err));
         const std::wstring wide = name.toStdWString();
@@ -66,50 +70,50 @@ private slots:
         DWORD size = sizeof(buf);
         QCOMPARE(RegGetValueW(HKEY_CURRENT_USER, L"Environment", wide.c_str(), RRF_RT_REG_SZ, nullptr, buf, &size), LSTATUS(ERROR_SUCCESS));
         QCOMPARE(QString::fromWCharArray(buf), QStringLiteral("значение-теста"));
-        platform::envops::rememberExported(name);
-        QVERIFY(platform::envops::exportedNames().contains(name));
+        platform::envops::rememberExported(name,&preferences_);
+        QVERIFY(platform::envops::exportedNames(&preferences_).contains(name));
         QVERIFY2(platform::envops::deleteKnownUserVariable(name, &err), qPrintable(err));
         size = sizeof(buf);
         QCOMPARE(RegGetValueW(HKEY_CURRENT_USER, L"Environment", wide.c_str(), RRF_RT_REG_SZ, nullptr, buf, &size), LSTATUS(ERROR_FILE_NOT_FOUND));
-        platform::envops::forgetExported(name);
-        QVERIFY(!platform::envops::exportedNames().contains(name));
+        platform::envops::forgetExported(name,&preferences_);
+        QVERIFY(!platform::envops::exportedNames(&preferences_).contains(name));
     }
     void clearAllExportedAndOptionRoundtrip() {
-        const QString first = QStringLiteral("TOKENBUCKET_TEST_ENV"), second = QStringLiteral("TOKENBUCKET_TEST_ENV_2");
-        platform::envops::forgetExported(first); platform::envops::forgetExported(second);
+        const QString first = QStringLiteral("TOKENBUCKET_TEST_ENV_%1").arg(QCoreApplication::applicationPid()), second = QStringLiteral("TOKENBUCKET_TEST_ENV_2_%1").arg(QCoreApplication::applicationPid());
+        platform::envops::forgetExported(first,&preferences_); platform::envops::forgetExported(second,&preferences_);
         QString err;
         QVERIFY2(platform::envops::setUserVariable(first, QStringLiteral("один"), &err), qPrintable(err));
         QVERIFY2(platform::envops::setUserVariable(second, QStringLiteral("два"), &err), qPrintable(err));
-        platform::envops::rememberExported(first); platform::envops::rememberExported(second);
+        platform::envops::rememberExported(first,&preferences_); platform::envops::rememberExported(second,&preferences_);
         // опция: выключена по умолчанию в наших тестах не гарантируется — проверяем раундтрип
-        platform::envops::setClearOnExitEnabled(true);
-        QVERIFY(platform::envops::clearOnExitEnabled());
-        platform::envops::setClearOnExitEnabled(false);
-        QVERIFY(!platform::envops::clearOnExitEnabled());
-        QCOMPARE(platform::envops::clearAllExported(), 2);
+        platform::envops::setClearOnExitEnabled(true,&preferences_);
+        QVERIFY(platform::envops::clearOnExitEnabled(&preferences_));
+        platform::envops::setClearOnExitEnabled(false,&preferences_);
+        QVERIFY(!platform::envops::clearOnExitEnabled(&preferences_));
+        QCOMPARE(platform::envops::clearAllExported(&preferences_), 2);
         const std::wstring w1 = first.toStdWString(), w2 = second.toStdWString();
         wchar_t buf[64] = {}; DWORD size = sizeof(buf);
         QCOMPARE(RegGetValueW(HKEY_CURRENT_USER, L"Environment", w1.c_str(), RRF_RT_REG_SZ, nullptr, buf, &size), LSTATUS(ERROR_FILE_NOT_FOUND));
         size = sizeof(buf);
         QCOMPARE(RegGetValueW(HKEY_CURRENT_USER, L"Environment", w2.c_str(), RRF_RT_REG_SZ, nullptr, buf, &size), LSTATUS(ERROR_FILE_NOT_FOUND));
-        QVERIFY(platform::envops::exportedNames().isEmpty());
+        QVERIFY(platform::envops::exportedNames(&preferences_).isEmpty());
         // повторный вызов идемпотентен (переменных и имён нет)
-        QCOMPARE(platform::envops::clearAllExported(), 0);
+        QCOMPARE(platform::envops::clearAllExported(&preferences_), 0);
     }
     void autostartRoundtrip() {
-        const bool initial = platform::autostart::enabled(); // восстановим состояние машины
+        const bool initial = platform::autostart::enabled(run_).value(); // восстановим состояние машины
         QString err;
-        QVERIFY2(platform::autostart::setEnabled(true, &err), qPrintable(err));
-        QVERIFY(platform::autostart::enabled());
+        QVERIFY2(platform::autostart::setEnabled(true, run_, &err), qPrintable(err));
+        QVERIFY(platform::autostart::enabled(run_).value());
         // Команда всегда указывает на текущий файл программы и просит старт в трее.
         const QString command = platform::autostart::commandForTest();
         QVERIFY(command.startsWith(QLatin1Char('"')));
         QVERIFY(command.endsWith(QStringLiteral("--tray")));
         QVERIFY(command.contains(QStringLiteral("test_env_win"), Qt::CaseInsensitive));
-        QVERIFY2(platform::autostart::setEnabled(false, &err), qPrintable(err));
-        QVERIFY(!platform::autostart::enabled());
-        QVERIFY(platform::autostart::setEnabled(false, &err)); // идемпотентно
-        if (initial) QVERIFY(platform::autostart::setEnabled(true, &err));
+        QVERIFY2(platform::autostart::setEnabled(false, run_, &err), qPrintable(err));
+        QVERIFY(!platform::autostart::enabled(run_).value());
+        QVERIFY(platform::autostart::setEnabled(false, run_, &err)); // идемпотентно
+        if (initial) QVERIFY(platform::autostart::setEnabled(true, run_, &err));
     }
     void dialogValidation() {
         ui::EnvExportDialog dialog;

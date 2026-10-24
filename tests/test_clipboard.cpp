@@ -68,6 +68,22 @@ class TestClipboard : public QObject {
     HWND foreign_ = CreateWindowExW(0,L"STATIC",L"",0,0,0,0,0,HWND_MESSAGE,nullptr,nullptr,nullptr);
 #endif
 private slots:
+    void configuredTimeoutClearsOnlyOwnedPublication() {
+        tb::ClipboardGuard guard; QString error;
+        guard.setClearSeconds(10); QVERIFY(guard.copySecret("synthetic-timed",&error));
+        auto* timer=guard.findChild<QTimer*>("clipboardClearTimer"); QVERIFY(timer); QCOMPARE(timer->interval(),10000);
+        guard.setClearSeconds(10); QCOMPARE(clipboardText(),QStringLiteral("synthetic-timed"));
+        guard.setClearSeconds(60); QVERIFY(clipboardText().isEmpty()); QCOMPARE(guard.clearSeconds(),60);
+        QVERIFY(guard.copySecret("synthetic-next",&error)); QCOMPARE(timer->interval(),60000);
+#ifdef Q_OS_WIN
+        QVERIFY(foreignText(foreign_,"synthetic-foreign"));
+#else
+        QApplication::clipboard()->setText("synthetic-foreign");
+#endif
+        guard.setClearSeconds(0); QCOMPARE(guard.clearSeconds(),20);
+        QCOMPARE(clipboardText(),QStringLiteral("synthetic-foreign"));
+        QVERIFY(guard.copySecret("synthetic-final",&error)); QCOMPARE(timer->interval(),20000);
+    }
     void initTestCase() {
 #ifdef Q_OS_WIN
         // Среда без права создания изолированной станции буфера (например, сервисный

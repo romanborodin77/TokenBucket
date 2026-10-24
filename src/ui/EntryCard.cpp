@@ -43,7 +43,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(reveal_, &QPushButton::clicked, this, [this] {
         if (!authorize()) return; const auto* entry = app_.model()->entry(id_); if (!entry) return;
         value_->setPlainText(entry->type == model::EntryType::Credentials ? QStringLiteral("Логин: %1\nПароль: %2").arg(entry->login, entry->password) : entry->token);
-        hideTimer_.start(15000);
+        hideTimer_.start();
     });
     connect(copySecret_, &QPushButton::clicked, this, [this] { copyField(0); });
     connect(copyLogin_, &QPushButton::clicked, this, [this] { copyField(1); });
@@ -62,6 +62,12 @@ void EntryCard::updateEnabled() {
     for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_}) button->setEnabled(allowed);
 }
 void EntryCard::hideNowForTest() { hideTimer_.stop(); value_->setPlainText(QStringLiteral("••••••••")); }
+void EntryCard::setRevealSeconds(int seconds) {
+    if(seconds!=5 && seconds!=10 && seconds!=15 && seconds!=30) seconds=15;
+    if(hideTimer_.interval()!=seconds*1000) hideNowForTest();
+    hideTimer_.setInterval(seconds*1000);
+    reveal_->setText(QStringLiteral("Показать на %1 секунд").arg(seconds));
+}
 void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); identity_->clear(); flags_->clear(); metadata_->clear(); error_->clear(); updateEnabled(); }
 void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();

@@ -14,6 +14,7 @@ class MiniPanel : public QWidget {
 public:
     MiniPanel(Application& app, ClipboardGuard& clip, QWidget* parent = nullptr);
     void popup();
+    void setDefaultField(paste::Field field);
 protected:
     void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* object, QEvent* event) override;
@@ -46,6 +47,7 @@ private:
     model::EntryType type_ = model::EntryType::ApiToken;
     bool reverify_ = false;
     paste::Field operationField_ = paste::Field::Secret;
+    paste::Field defaultField_ = paste::Field::Secret;
     QTimer restoreTimer_;
     QElapsedTimer restoreBudget_;
 #ifdef Q_OS_WIN

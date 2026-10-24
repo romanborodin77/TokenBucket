@@ -1,6 +1,7 @@
 #include "QuickPasteWin.h"
 #include "QuickPaste.h"
 #include "../app/Application.h"
+#include "../app/Preferences.h"
 #include "../platform/ClipboardGuard.h"
 #include "../ui/MiniPanel.h"
 #include <QApplication>
@@ -167,15 +168,9 @@ bool QuickPaste::applySequence(const QKeySequence& sequence, QSettings* settings
         return false;
     }
     if (settings) {
-        const auto previous = settings->value(QStringLiteral("hotkey"));
-        settings->setValue(QStringLiteral("hotkey"), sequence.toString(QKeySequence::PortableText));
-        settings->sync();
-        if (settings->status() != QSettings::NoError) {
+        if (!prefs::writeValue(*settings,QStringLiteral("hotkey"),sequence.toString(QKeySequence::PortableText),err)) {
             UnregisterHotKey(hotkeyHwnd_, candidate);
-            if (previous.isValid()) settings->setValue(QStringLiteral("hotkey"), previous);
-            else settings->remove(QStringLiteral("hotkey"));
-            settings->sync();
-            if (err) *err = QStringLiteral("Настройки не сохранены. Прежнее сочетание остаётся активным; состояние файла настроек нужно проверить.");
+            if (err) *err += QStringLiteral(" Прежнее сочетание остаётся активным.");
             return false;
         }
     }
@@ -187,12 +182,17 @@ bool QuickPaste::nativeEventFilter(const QByteArray& type, void* message, qintpt
     if (type != "windows_generic_MSG" && type != "windows_dispatcher_MSG") return false;
     auto* msg = static_cast<MSG*>(message);
     if (hotkeyId_ && msg->message == WM_HOTKEY && msg->hwnd == hotkeyHwnd_ && msg->wParam == WPARAM(hotkeyId_)) {
-        panel_->popup();
+        popupPanel();
         if (result) *result = 0;
         return true;
     }
     return false;
 }
-void QuickPaste::popupPanel() { panel_->popup(); }
+void QuickPaste::popupPanel() { if(!suspended_) panel_->popup(); }
+void QuickPaste::setDefaultField(paste::Field field) {panel_->setDefaultField(field);}
+void QuickPaste::setSuspended(bool suspended) {
+    suspended_=suspended;
+    if(suspended_) panel_->close();
+}
 }
 }

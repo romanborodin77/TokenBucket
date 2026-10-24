@@ -8,6 +8,7 @@
 #include "../src/platform/ClipboardGuard.h"
 #include "../src/app/Application.h"
 #include "../src/platform/QuickPaste.h"
+#include "../src/ui/MiniPanel.h"
 using namespace tb;
 #ifdef Q_OS_WIN
 namespace {
@@ -37,6 +38,22 @@ private slots:
         QVERIFY(paste::eligibleForAutoPaste(e, paste::Field::Secret));
     }
 #ifdef Q_OS_WIN
+    void suspensionBlocksHotkeyAndManualPopup() {
+        QTemporaryDir dir; Application app(dir.path()); ClipboardGuard clip; QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        platform::QuickPaste quick(app,clip,nullptr);
+        QVERIFY2(quick.start(QKeySequence("Ctrl+Alt+Shift+F7"),&error),qPrintable(error));
+        ui::MiniPanel* panel=nullptr;
+        for(auto* widget:QApplication::topLevelWidgets()) if(auto* candidate=qobject_cast<ui::MiniPanel*>(widget)) panel=candidate;
+        QVERIFY(panel); auto* owner=panel->findChild<QWidget*>("hotkeyOwnerWindow"); QVERIFY(owner);
+        const auto before=GetClipboardSequenceNumber();
+        quick.setSuspended(true); QVERIFY(quick.suspended()); quick.popupPanel(); QVERIFY(!panel->isVisible());
+        MSG message{}; message.hwnd=reinterpret_cast<HWND>(owner->winId()); message.message=WM_HOTKEY; message.wParam=1;
+        qintptr result=-1; QVERIFY(quick.nativeEventFilter("windows_generic_MSG",&message,&result));
+        QVERIFY(!panel->isVisible()); QCOMPARE(GetClipboardSequenceNumber(),before);
+        quick.setSuspended(false); quick.popupPanel(); QVERIFY(panel->isVisible());
+        quick.setSuspended(true); QVERIFY(!panel->isVisible());
+    }
     void hotkeys() {
         QTemporaryDir dir; Application app(dir.path()); ClipboardGuard clip;
         platform::QuickPaste quick(app, clip, nullptr);

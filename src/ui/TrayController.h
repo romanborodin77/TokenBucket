@@ -4,6 +4,7 @@
 #include <functional>
 class QMenu;
 class QAction;
+class QSettings;
 namespace tb {
 class Application;
 namespace ui {
@@ -20,8 +21,8 @@ public:
     // Короткое всплывающее уведомление области уведомлений. Секреты сюда не попадают:
     // передаём только факт события («скопировано», «буфер очищен», «заблокировано»).
     void notify(const QString& text);
-    static bool notificationsEnabled();
-    static void setNotificationsEnabled(bool on);
+    static bool notificationsEnabled(QSettings* preferences=nullptr);
+    static bool setNotificationsEnabled(bool on,QSettings* preferences=nullptr,QString* error=nullptr);
     // Подсказка текущего состояния — для тестов и диагностики (без секретов).
     QString toolTip() const { return tray_.toolTip(); }
 signals:

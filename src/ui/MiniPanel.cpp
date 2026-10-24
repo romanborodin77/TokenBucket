@@ -39,7 +39,7 @@ MiniPanel::MiniPanel(Application& app, ClipboardGuard& clip, QWidget* parent)
     connect(search_, &QLineEdit::returnPressed, this, [this] { send(); });
     connect(list_, &QListWidget::itemActivated, this, [this] { send(); });
     connect(list_, &QListWidget::currentRowChanged, this, [this] { selectField(); });
-    connect(field_, &QComboBox::currentIndexChanged, this, [this] { updateActions(); });
+    connect(field_, &QComboBox::currentIndexChanged, this, [this] { status_->clear(); updateActions(); });
     connect(paste_, &QPushButton::clicked, this, [this] { send(); });
     connect(copy_, &QPushButton::clicked, this, [this] { send(true); });
     connect(cancelButton, &QPushButton::clicked, this, &MiniPanel::cancel);
@@ -55,6 +55,9 @@ MiniPanel::MiniPanel(Application& app, ClipboardGuard& clip, QWidget* parent)
     qApp->installEventFilter(this);
 }
 paste::Field MiniPanel::field() const { return paste::Field(field_->currentData().toInt()); }
+void MiniPanel::setDefaultField(paste::Field field) {
+    defaultField_=field==paste::Field::Login?field:paste::Field::Secret;
+}
 void MiniPanel::clearContext() {
     ++action_;
     if (publishing_) clip_.cancelPendingCopy();
@@ -84,6 +87,10 @@ bool MiniPanel::eventFilter(QObject* object, QEvent* event) {
 }
 void MiniPanel::refill() {
     if (phase_ != Phase::Choosing) return;
+    const auto* previousItem=list_->currentItem();
+    const auto previousId=previousItem?previousItem->data(Qt::UserRole).toString():QString();
+    const auto previousField=field();
+    const QSignalBlocker listSignals(list_);
     list_->clear();
     if (app_.gate() != Application::Gate::Ready || app_.busy()) return;
     for (auto id : app_.model()->search(search_->text())) {
@@ -99,7 +106,13 @@ void MiniPanel::refill() {
         auto* item = new QListWidgetItem(QStringLiteral("%1\n%2 · %3").arg(entry->title, type, path.join(" / ")), list_);
         item->setData(Qt::UserRole, id.toString());
     }
-    if (list_->count()) { status_->clear(); list_->setCurrentRow(0); }
+    if (list_->count()) {
+        int row=0; bool same=false;
+        for(int i=0;i<list_->count();++i) if(list_->item(i)->data(Qt::UserRole).toString()==previousId) {row=i;same=true;break;}
+        status_->clear(); list_->setCurrentRow(row); selectField();
+        if(same) {const int choice=field_->findData(int(previousField)); if(choice>=0) field_->setCurrentIndex(choice);}
+        updateActions();
+    }
     else { selectField(); status_->setText(QStringLiteral("Подходящих записей нет.")); }
 }
 void MiniPanel::selectField() {
@@ -110,6 +123,8 @@ void MiniPanel::selectField() {
     if (entry) {
         field_->addItem(entry->type == model::EntryType::ApiToken ? QStringLiteral("Токен") : QStringLiteral("Пароль"), int(paste::Field::Secret));
         if (entry->type == model::EntryType::Credentials) field_->addItem(QStringLiteral("Логин"), int(paste::Field::Login));
+        const int preferred=field_->findData(int(defaultField_));
+        if(preferred>=0) field_->setCurrentIndex(preferred);
     }
     updateActions();
 }
