@@ -99,8 +99,11 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
         copies->addRow(QStringLiteral("Размер"),text(QStringLiteral("%1 байт").arg(backup.size)));
         copies->addRow(QStringLiteral("Изменена"),text(backup.modified.toLocalTime().toString(Qt::ISODate)));
     }
+    backupAvailable_=backup.state==Application::BackupInfo::State::Available;
+    restore_=new QPushButton(QStringLiteral("Восстановить резервную копию…"),this);
+    restore_->setObjectName("restoreBackup"); restore_->setAccessibleName(QStringLiteral("Восстановить резервную копию")); copies->addRow(restore_);
     dirtyHint_=text(QStringLiteral("Чтобы выполнить отдельное действие, сохраните или отмените изменения.")); root->addWidget(dirtyHint_);
-    error_=text({}); error_->setObjectName("settingsError"); error_->setAccessibleName(QStringLiteral("Результат сохранения")); root->addWidget(error_);
+    error_=text({}); error_->setObjectName("settingsError"); error_->setAccessibleName(QStringLiteral("Результат операции")); root->addWidget(error_);
     buttons_=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel,this); root->addWidget(buttons_);
     buttons_->button(QDialogButtonBox::Save)->setText(QStringLiteral("Сохранить")); buttons_->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
     connect(buttons_,&QDialogButtonBox::accepted,this,&SettingsDialog::saveRequested);
@@ -108,6 +111,7 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
     connect(password_,&QPushButton::clicked,this,&SettingsDialog::changePasswordRequested);
     connect(unlock_,&QPushButton::clicked,this,&SettingsDialog::changeUnlockModeRequested);
     connect(clearEnvironment_,&QPushButton::clicked,this,&SettingsDialog::clearEnvironmentRequested);
+    connect(restore_,&QPushButton::clicked,this,&SettingsDialog::restoreBackupRequested);
     connect(sections_,&QListWidget::currentRowChanged,sectionCombo_,&QComboBox::setCurrentIndex);
     connect(sectionCombo_,&QComboBox::currentIndexChanged,sections_,qOverload<int>(&QListWidget::setCurrentRow));
     connect(sections_,&QListWidget::currentRowChanged,pages_,&QStackedWidget::setCurrentIndex);
@@ -145,6 +149,8 @@ void SettingsDialog::updateDraft() {
     const bool dirty=draft()!=baseline_;
     dirtyHint_->setVisible(dirty); buttons_->button(QDialogButtonBox::Save)->setEnabled(dirty);
     password_->setEnabled(!dirty && passwordAllowed_); unlock_->setEnabled(!dirty && unlockAllowed_);
+    restore_->setEnabled(!dirty && backupAvailable_);
+    restore_->setToolTip(dirty?dirtyHint_->text():!backupAvailable_?QStringLiteral("Доступной резервной копии нет."):QString());
 #ifdef Q_OS_WIN
     clearEnvironment_->setEnabled(!dirty);
 #endif
@@ -159,6 +165,7 @@ void SettingsDialog::setUnlockMode(Application::Mode mode,bool helloAvailable) {
 #endif
     updateDraft();
 }
+void SettingsDialog::setOperationError(const QString& error) {error_->setText(error);}
 void SettingsDialog::setApplyResult(const prefs::ApplyResult& result,const prefs::Values& current) {
     baseline_=current;
     if(result.error.isEmpty() && result.failedKey.isEmpty()) {accept(); return;}

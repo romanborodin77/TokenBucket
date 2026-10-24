@@ -1,5 +1,7 @@
 #include "MainWindow.h"
 #include "SettingsDialog.h"
+#include "SessionFlow.h"
+#include "UnlockDialog.h"
 #include "../app/Preferences.h"
 #include "EntryEditDialog.h"
 #include "EntryCard.h"
@@ -310,7 +312,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
 }
 MainWindow::~MainWindow() { saveUiState(); }
 void MainWindow::showSettings() {
-    if(!ready()) return;
+    if(!ready() || restoring_) return;
     card_->hideNowForTest();
     appliedPreferences_.clearEnvironmentOnExit=prefs::read(*preferences_).clearEnvironmentOnExit;
     SettingsDialog dialog(appliedPreferences_,app_.backupInfo(),
@@ -322,6 +324,7 @@ void MainWindow::showSettings() {
         this);
     dialog.setUnlockMode(app_.mode(),helloAvailable_);
     connect(&dialog,&SettingsDialog::saveRequested,this,[&] {
+        if(restoring_) return;
         if(!ready()) {dialog.reject(); return;}
         const auto result=applyPreferences(dialog.draft());
         if(ready()) dialog.setApplyResult(result,appliedPreferences_);
@@ -332,12 +335,81 @@ void MainWindow::showSettings() {
     connect(&dialog,&SettingsDialog::changeUnlockModeRequested,this,[&] {
         switchUnlockMode(); if(ready()) dialog.setUnlockMode(app_.mode(),helloAvailable_);
     });
+    connect(&dialog,&SettingsDialog::restoreBackupRequested,this,&MainWindow::restoreBackup);
 #ifdef Q_OS_WIN
     const bool suspended=hotkey_->suspended(); hotkey_->setSuspended(true);
     const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
     connect(&dialog,&SettingsDialog::clearEnvironmentRequested,this,&MainWindow::removeExportedVariables);
 #endif
     dialog.exec();
+}
+void MainWindow::restoreBackup() {
+    QPointer<SettingsDialog> dialog(qobject_cast<SettingsDialog*>(sender()));
+    if(!dialog || dialog->parentWidget()!=this || !ready() || restoring_
+        || dialog->draft()!=appliedPreferences_) return;
+    QPointer<MainWindow> self(this); auto* core=&app_; const auto generation=core->generation();
+    restoring_=true;
+    const auto cancelOnClose=connect(dialog.data(),&QDialog::finished,core,&Application::cancelBackupRestore);
+    const auto stop=qScopeGuard([core,self,cancelOnClose] {
+        QObject::disconnect(cancelOnClose); core->cancelBackupRestore(); if(self) self->restoring_=false;
+    });
+    const auto allowed=[&] {
+        return self && dialog && dialog->isVisible() && self->ready() && core->generation()==generation
+            && dialog->draft()==self->appliedPreferences_;
+    };
+    dialog->setOperationError({}); core->cancelBackupRestore();
+    Application::Mode mode=Application::Mode::None; QString error;
+    const bool hinted=runVaultOperation(*core,[&](void*,QString* err) {
+        mode=core->backupMode(err); return mode!=Application::Mode::None;
+    },&error,this);
+    if(!allowed()) return;
+    if(!hinted) {dialog->setOperationError(error); return;}
+    const auto backupInfo=core->backupInfo();
+    if(backupInfo.state!=Application::BackupInfo::State::Available) {
+        dialog->setOperationError(QStringLiteral("Резервная копия недоступна.")); return;
+    }
+#ifndef Q_OS_WIN
+    if(mode==Application::Mode::Hello) {dialog->setOperationError(QStringLiteral("Копия Windows Hello требует Windows.")); return;}
+#endif
+    SecureBytes password;
+    {
+        UnlockDialog auth(mode==Application::Mode::Hello?UnlockDialog::Kind::Hello:UnlockDialog::Kind::Password,this);
+        auth.setWindowTitle(QStringLiteral("Проверка резервной копии"));
+        auth.setPrompt(mode==Application::Mode::Password
+            ?QStringLiteral("Введите пароль резервной копии. Он может отличаться от текущего мастер-пароля. Пока основной файл не изменяется.")
+            :QStringLiteral("Подтвердите доступ к резервной копии через Windows Hello на этом компьютере. Пока основной файл не изменяется."),
+            QStringLiteral("Проверить копию"));
+        if(auth.exec()!=QDialog::Accepted || !allowed()) {auth.clearSecrets(); return;}
+        password=SecureBytes(auth.password()); auth.clearSecrets();
+    }
+    const bool prepared=runVaultOperation(*core,[&](void* hwnd,QString* err) {
+#ifdef Q_OS_WIN
+        if(mode==Application::Mode::Hello) return core->prepareHelloBackupRestore(hwnd,err);
+#else
+        Q_UNUSED(hwnd);
+#endif
+        return core->prepareBackupRestore(password.bytes(),err);
+    },&error,this);
+    password.clear();
+    if(!allowed()) return;
+    if(!prepared) {dialog->setOperationError(error); return;}
+    QMessageBox confirm(QMessageBox::Warning,QStringLiteral("Подтвердить восстановление"),
+        QStringLiteral("Заменить текущее хранилище проверенной резервной копией?\nКопия изменена: %1\n\nБудет создана зашифрованная страховочная копия текущего файла. Изменения после резервной копии исчезнут из основного хранилища. После восстановления потребуется разблокировка паролем или Hello этой копии.").arg(backupInfo.modified.toLocalTime().toString(Qt::ISODate)),
+        QMessageBox::Yes|QMessageBox::No,this);
+    confirm.setTextFormat(Qt::PlainText); confirm.setDefaultButton(QMessageBox::No); confirm.setEscapeButton(QMessageBox::No);
+    if(confirm.exec()!=QMessageBox::Yes || !allowed()) return;
+    store::RestoreResult result;
+    runVaultOperation(*core,[&](void*,QString* err) {
+        result=core->restorePreparedBackup(); if(err) *err=result.error;
+        return result.committed && result.error.isEmpty();
+    },&error,this);
+    if(!self) return;
+    if(!result.committed) {if(dialog && dialog->isVisible()) dialog->setOperationError(error); return;}
+    const auto message=(result.error.isEmpty()?QStringLiteral("Резервная копия восстановлена. Хранилище заблокировано."):result.error)
+        +QStringLiteral("\n\nСтраховочная копия: %1").arg(result.safetyPath);
+    QMessageBox outcome(result.error.isEmpty()?QMessageBox::Information:QMessageBox::Warning,
+        QStringLiteral("Результат восстановления"),message,QMessageBox::Ok,this);
+    outcome.setTextFormat(Qt::PlainText); outcome.exec();
 }
 prefs::ApplyResult MainWindow::applyPreferences(const prefs::Values& requested) {
     prefs::ApplyResult result;

@@ -75,6 +75,7 @@ protected:
     void closeEvent(QCloseEvent*) override;
 private slots:
     void refreshStatus();
+    void restoreBackup();
 private:
     enum class LibraryView { All, Favorites, Expiring, Group };
     void setLibraryView(LibraryView view);
@@ -148,7 +149,7 @@ private:
     std::unique_ptr<platform::QuickPaste> hotkey_;
     QAction* envExportAction_{};
 #endif
-    bool editing_ = false, narrow_ = false, cardOpen_ = false;
+    bool editing_ = false, narrow_ = false, cardOpen_ = false,restoring_=false;
     bool exiting_ = false;
 };
 }

@@ -11,11 +11,13 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QKeySequenceEdit>
+#include <QLineEdit>
 #include <QStackedWidget>
 #include <QSignalSpy>
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QMessageBox>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/SettingsDialog.h"
@@ -24,9 +26,14 @@
 #include "../src/ui/Theme.h"
 #include "../src/ui/EnvExportDialog.h"
 #include "../src/platform/EnvOps.h"
+#include "../src/ui/UnlockDialog.h"
+#include "FaultFileOps.h"
 using namespace tb;
 class TestSettings : public QObject {
     Q_OBJECT
+    static QByteArray readFile(const QString& path) {
+        QFile file(path); if(!file.open(QIODevice::ReadOnly)) return {}; return file.readAll();
+    }
 #ifdef Q_OS_WIN
     static QKeySequence freeHotkey(const QKeySequence& excluded={}) {
         for(int key=Qt::Key_F6;key<=Qt::Key_F11;++key) {
@@ -41,6 +48,125 @@ class TestSettings : public QObject {
     }
 #endif
 private slots:
+    void backupDialogFlow_data() {
+        QTest::addColumn<int>("action");
+        QTest::newRow("wrong-password")<<0; QTest::newRow("decline-confirmation")<<1; QTest::newRow("cancel-auth")<<2;
+        QTest::newRow("lock-at-auth")<<3; QTest::newRow("lock-at-confirmation")<<4;
+        QTest::newRow("repeat-click-and-commit")<<5; QTest::newRow("safety-write-failure")<<6;
+        QTest::newRow("close-settings-during-header")<<7; QTest::newRow("close-settings-during-prepare")<<8;
+    }
+    void backupDialogFlow() {
+        QFETCH(int,action);
+        QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        const auto before=readFile(app.storePathForTest()),backup=readFile(app.storePathForTest()+".bak");
+        QVERIFY(!before.isEmpty()); QVERIFY(!backup.isEmpty());
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&preferences,&run,[] {return true;});
+        QPointer<ui::SettingsDialog> settings; int authVisits=0,confirmVisits=0,resultVisits=0;
+        int busyCount=0;
+        connect(&app,&Application::busyChanged,&window,[&](bool busy) {
+            if(busy && settings && ++busyCount==(action==7?1:2) && (action==7 || action==8)) settings->reject();
+        });
+        bool returned=false; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            if(auto* auth=qobject_cast<UnlockDialog*>(QApplication::activeModalWidget())) {
+                ++authVisits;
+                if(action==2) {auth->reject(); return;}
+                if(action==3) {app.lock(); return;}
+                if(action==5 && settings) settings->findChild<QPushButton*>("restoreBackup")->click();
+                auth->findChild<QLineEdit*>("unlockPassword")->setText(action==0?"wrong-password-789":"valid-password");
+                auth->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            } else if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                QCOMPARE(box->textFormat(),Qt::PlainText);
+                if(box->button(QMessageBox::Yes)) {
+                    QVERIFY(box->text().contains(app.backupInfo().modified.toLocalTime().toString(Qt::ISODate)));
+                    ++confirmVisits; QCOMPARE(box->defaultButton(),qobject_cast<QPushButton*>(box->button(QMessageBox::No)));
+                    if(action==4) {app.lock(); return;}
+                    if(action==6) {ops=FaultOps{}; ops.failWriteCall=1;}
+                    box->button(action==1?QMessageBox::No:QMessageBox::Yes)->click();
+                } else if(auto* ok=box->button(QMessageBox::Ok)) {++resultVisits; ok->click();}
+            }
+        });
+        QTimer::singleShot(0,&window,[&] {
+            settings=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(settings);
+            auto* restore=settings->findChild<QPushButton*>("restoreBackup"); QVERIFY(restore); QVERIFY(restore->isEnabled());
+            driver.start(); restore->click(); returned=true;
+            QCOMPARE(authVisits,action==7?0:1);
+            if(action==0 || action==6) {QVERIFY(settings->isVisible()); QVERIFY(!settings->findChild<QLabel*>("settingsError")->text().isEmpty());}
+            if(settings && settings->isVisible()) settings->reject();
+        });
+        QTimer::singleShot(5000,&window,[] {if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();});
+        window.showSettings(); driver.stop(); QVERIFY(returned); QCOMPARE(authVisits,action==7?0:1);
+        QCOMPARE(confirmVisits,action==1 || action==4 || action==5 || action==6?1:0);
+        QCOMPARE(resultVisits,action==5?1:0);
+        QCOMPARE(readFile(app.storePathForTest()),action==5?backup:before);
+        QCOMPARE(readFile(app.storePathForTest()+".bak"),backup);
+        QCOMPARE(app.gate(),action>=3 && action<=5?Application::Gate::NeedUnlock:Application::Gate::Ready);
+        QVERIFY(!app.restorePreparedBackup().committed);
+        if(action==5) {QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->nodes().size(),1);}
+    }
+#ifdef Q_OS_WIN
+    void partialSettingsDoNotSaveDraftDuringFailedRecovery() {
+        QTemporaryDir dir; FaultOps ops;
+        Application app(dir.path(),nullptr,platform::hello::request,ops); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        const auto before=readFile(app.storePathForTest());
+        const auto parent=dir.filePath("prefs"); QVERIFY(QDir().mkdir(parent));
+        QSettings preferences(parent+"/ui.ini",QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        preferences.setValue("secretRevealSeconds",15); preferences.sync();
+        ui::MainWindow window(app,nullptr,&preferences,&run,[] {return true;});
+        QVERIFY(QFile::remove(preferences.fileName())); QVERIFY(QDir().rmdir(parent));
+        QFile blocker(parent); QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close();
+        int authVisits=0; bool returned=false; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            if(auto* auth=qobject_cast<UnlockDialog*>(QApplication::activeModalWidget())) {
+                ++authVisits; auth->findChild<QLineEdit*>("unlockPassword")->setText("valid-password");
+                auth->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            } else if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                if(auto* yes=box->button(QMessageBox::Yes)) {ops=FaultOps{}; ops.failWriteCall=1; yes->click();}
+                else if(auto* ok=box->button(QMessageBox::Ok)) ok->click();
+            }
+        });
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            auto* reveal=dialog->findChild<QComboBox*>("secretRevealSeconds");
+            dialog->findChild<QCheckBox*>("autostart")->setChecked(true); reveal->setCurrentIndex(0);
+            dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+            QVERIFY(dialog->isVisible()); QCOMPARE(run.value("TokenBucket").toString(),platform::autostart::commandForTest());
+            auto* restore=dialog->findChild<QPushButton*>("restoreBackup"); QVERIFY(!restore->isEnabled());
+            driver.start(); QVERIFY(QMetaObject::invokeMethod(dialog,"restoreBackupRequested")); QCOMPARE(authVisits,0);
+            reveal->setCurrentIndex(2); QVERIFY(restore->isEnabled());
+            restore->click(); QCOMPARE(authVisits,1); QVERIFY(dialog->isVisible());
+            QVERIFY(!dialog->findChild<QLabel*>("settingsError")->text().isEmpty());
+            QCOMPARE(readFile(app.storePathForTest()),before); QVERIFY(!QFile::exists(preferences.fileName()));
+            returned=true; dialog->reject();
+        });
+        QTimer::singleShot(5000,&window,[] {if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();});
+        window.showSettings(); driver.stop(); QVERIFY(returned); QCOMPARE(app.gate(),Application::Gate::Ready);
+        QCOMPARE(readFile(app.storePathForTest()),before); QVERIFY(!app.restorePreparedBackup().committed);
+    }
+#endif
+    void backupActionRequiresCleanDraftAndAvailableFile() {
+        Application::BackupInfo backup; backup.state=Application::BackupInfo::State::Available;
+        ui::SettingsDialog dialog({},backup,{});
+        auto* restore=dialog.findChild<QPushButton*>("restoreBackup"); QVERIFY(restore); QVERIFY(restore->isEnabled());
+        dialog.findChild<QComboBox*>("secretRevealSeconds")->setCurrentIndex(0); QVERIFY(!restore->isEnabled());
+        dialog.findChild<QComboBox*>("secretRevealSeconds")->setCurrentIndex(2); QVERIFY(restore->isEnabled());
+        for(auto state:{Application::BackupInfo::State::Missing,Application::BackupInfo::State::Unavailable}) {
+            backup.state=state; ui::SettingsDialog unavailable({},backup,{});
+            QVERIFY(!unavailable.findChild<QPushButton*>("restoreBackup")->isEnabled());
+        }
+    }
     void savingExitPolicyWaitsForMainWindowClose() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123",&error));
@@ -286,7 +412,12 @@ private slots:
     void navigationAndFooterFit() {
         QFETCH(int,width); QFETCH(bool,dark);
         ui::theme::apply(dark?ui::theme::Mode::Dark:ui::theme::Mode::Light);
-        ui::SettingsDialog dialog({}, {},QStringLiteral("Ctrl+Alt+F8"));
+        Application::BackupInfo backup;
+        backup.state=Application::BackupInfo::State::Available; backup.size=4096;
+        backup.mainPath=QStringLiteral("C:/Synthetic/TokenBucket/vault.tb"); backup.backupPath=backup.mainPath+".bak";
+        backup.modified=QDateTime::fromString(QStringLiteral("2026-10-24T12:34:56Z"),Qt::ISODate);
+        ui::SettingsDialog dialog({},backup,QStringLiteral("Ctrl+Alt+F8"));
+        dialog.setUnlockMode(Application::Mode::Password,true);
         dialog.resize(width,480); dialog.show(); QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         QCOMPARE(dialog.width(),width);
         auto* sections=dialog.findChild<QListWidget*>("settingsSections");
@@ -297,9 +428,15 @@ private slots:
         auto* cancel=dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Cancel);
         QVERIFY(dialog.rect().contains(QRect(cancel->mapTo(&dialog,QPoint()),cancel->size())));
         const auto shots=qEnvironmentVariable("TOKENBUCKET_SETTINGS_SCREENSHOTS");
-        if(!shots.isEmpty()) {
-            QVERIFY(QDir().mkpath(shots));
-            QVERIFY(dialog.grab().save(shots+QStringLiteral("/settings-%1-%2.png").arg(width).arg(dark?"dark":"light")));
+        for(int page=0;page<5;++page) {
+            combo->setCurrentIndex(page); QCoreApplication::processEvents();
+            QCOMPARE(dialog.findChild<QStackedWidget*>()->currentIndex(),page);
+            cancel->setFocus(); QTest::keyClick(cancel,Qt::Key_Tab); QVERIFY(dialog.focusWidget());
+            QVERIFY(dialog.rect().contains(QRect(cancel->mapTo(&dialog,QPoint()),cancel->size())));
+            if(!shots.isEmpty()) {
+                QVERIFY(QDir().mkpath(shots));
+                QVERIFY(dialog.grab().save(shots+QStringLiteral("/settings-%1-%2-page-%3.png").arg(width).arg(dark?"dark":"light").arg(page)));
+            }
         }
     }
     void backupMetadataHasNoAuthenticationSideEffects() {
@@ -358,11 +495,14 @@ int main(int argc,char** argv) {
         qt.setQuitOnLastWindowClosed(false);
         QTemporaryDir dir; Application vault(dir.path()); QString error;
         if(!vault.createPasswordVault("test-password-123",&error)) return 2;
+        if(!vault.model()->addNode(QUuid::createUuid(),{},QStringLiteral("Демо: исходная версия")).isEmpty() || !vault.save(&error)) return 3;
+        if(!vault.model()->addNode(QUuid::createUuid(),{},QStringLiteral("Демо: новые данные")).isEmpty() || !vault.save(&error)) return 4;
         QSettings preferences(dir.filePath("demo.ini"),QSettings::IniFormat);
         QSettings run(dir.filePath("demo-run.ini"),QSettings::IniFormat);
         ui::theme::apply(qt.arguments().contains("--dark")?ui::theme::Mode::Dark:ui::theme::Mode::Light);
         if(!qt.arguments().contains("--tray")) QTimer::singleShot(0,&vault,[&] {
             for(auto* widget:QApplication::topLevelWidgets()) if(auto* window=qobject_cast<ui::MainWindow*>(widget)) {
+                window->setWindowTitle(QStringLiteral("TokenBucket — вымышленные данные"));
                 QTimer::singleShot(0,window,[&] {
                     if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
                         dialog->setWindowTitle(QStringLiteral("Настройки — вымышленные данные"));

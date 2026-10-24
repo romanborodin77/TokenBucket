@@ -24,6 +24,25 @@ class TestApp : public QObject {
         QFile file(path); if(!file.open(QIODevice::ReadOnly)) return {}; return file.readAll();
     }
 private slots:
+    void backupHintBindsCiphertextBeforeAuthentication() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        const auto before=readFile(app.storePathForTest());
+        QCOMPARE(app.backupMode(&error),Application::Mode::Password);
+        model::VaultModel other; const auto replacement=QUuid::createUuid();
+        QVERIFY(other.addNode(replacement,{},"Different backup").isEmpty());
+        const auto changed=container::packPassword("valid-password",other.toCbor(),nullptr); QVERIFY(!changed.isEmpty());
+        const auto backup=app.storePathForTest()+".bak";
+        QVERIFY(QFile::remove(backup)); QVERIFY(store::realFileOps().writeAll(backup,changed));
+        QVERIFY(!app.prepareBackupRestore("valid-password",&error)); QVERIFY(!error.isEmpty());
+        QVERIFY(!app.restorePreparedBackup().committed); QCOMPARE(readFile(app.storePathForTest()),before);
+        QCOMPARE(app.backupMode(&error),Application::Mode::Password);
+        QVERIFY(app.prepareBackupRestore("valid-password",&error)); QVERIFY(app.restorePreparedBackup().committed);
+        QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->nodes().size(),1);
+        QCOMPARE(app.model()->nodes().value(replacement).name,QStringLiteral("Different backup"));
+    }
     void backupUsesItsOldPasswordAndSafetyUsesCurrentPassword() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("valid-password",&error));

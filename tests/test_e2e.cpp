@@ -32,6 +32,8 @@
 #include "../src/ui/EntryEditDialog.h"
 #include "../src/ui/EntryCard.h"
 #include "../src/ui/TrayController.h"
+#include "../src/ui/SessionFlow.h"
+#include "../src/ui/SettingsDialog.h"
 #include "../src/platform/ClipboardGuard.h"
 #include "../src/platform/QuickPaste.h"
 #ifdef Q_OS_WIN
@@ -148,6 +150,60 @@ private slots:
         QCOMPARE(GetClipboardSequenceNumber(), sequence);
         QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("marker"));
         QVERIFY(!panel.isVisible());
+    }
+    void backupRecoveryUsesCopyModeAndReturnsToNormalUnlock() {
+        QTemporaryDir dir;
+        Application core(dir.path(),nullptr,[](void*,const QString&) {return platform::hello::Result::Verified;}); QString error;
+        QVERIFY(core.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid();
+        QVERIFY(core.model()->addNode(group,{},"Original").isEmpty()); QVERIFY(core.save(&error));
+        QVERIFY(core.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(core.switchToHello(&error));
+        QCOMPARE(core.mode(),Application::Mode::Hello); QCOMPARE(core.backupMode(&error),Application::Mode::Password);
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        preferences.setValue("trayNotifications",false);
+        QTimer driver,watchdog; driver.setInterval(10); watchdog.setSingleShot(true); watchdog.setInterval(15000);
+        int stage=0; bool timedOut=false,completed=false,restoredData=false,copyPasswordPrompt=false;
+        connect(&watchdog,&QTimer::timeout,&core,[&] {
+            timedOut=true; if(auto* tray=core.findChild<ui::TrayController*>("sessionTray")) emit tray->quitRequested();
+        });
+        connect(&driver,&QTimer::timeout,&core,[&] {
+            ui::MainWindow* main=nullptr;
+            for(auto* widget:QApplication::topLevelWidgets()) if(auto* window=qobject_cast<ui::MainWindow*>(widget)) main=window;
+            auto* modal=QApplication::activeModalWidget();
+            if(stage==0 && main && main->isVisible()) {
+                stage=1; QTimer::singleShot(0,main,&ui::MainWindow::showSettings);
+            } else if(stage==1) {
+                if(auto* settings=qobject_cast<ui::SettingsDialog*>(modal)) {
+                    auto* restore=settings->findChild<QPushButton*>("restoreBackup");
+                    if(restore && restore->isEnabled()) {stage=2; QTimer::singleShot(0,restore,&QPushButton::click);}
+                }
+            } else if(stage==2 || stage==5) {
+                if(auto* auth=qobject_cast<UnlockDialog*>(modal)) {
+                    auto* password=auth->findChild<QLineEdit*>("unlockPassword");
+                    if(!password) {if(auto* tray=core.findChild<ui::TrayController*>("sessionTray")) emit tray->quitRequested(); return;}
+                    if(stage==2) copyPasswordPrompt=auth->windowTitle().contains(QStringLiteral("резервной"));
+                    stage=stage==2?3:6; password->setText("valid-password");
+                    auth->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                }
+            } else if(stage==3) {
+                if(auto* confirm=qobject_cast<QMessageBox*>(modal);confirm && confirm->button(QMessageBox::Yes)) {
+                    stage=4; confirm->button(QMessageBox::Yes)->click();
+                }
+            } else if(stage==4) {
+                if(auto* outcome=qobject_cast<QMessageBox*>(modal);outcome && outcome->button(QMessageBox::Ok)) {
+                    stage=5; outcome->button(QMessageBox::Ok)->click();
+                }
+            } else if(stage==6 && main && main->isVisible() && core.gate()==Application::Gate::Ready && !core.busy()) {
+                restoredData=core.mode()==Application::Mode::Password && core.model()->nodes().size()==1
+                    && core.model()->nodes().value(group).name==QStringLiteral("Original");
+                completed=true; stage=7; main->requestExit();
+            }
+        });
+        driver.start(); watchdog.start();
+        const int result=ui::runSession(core,preferences,false,&run,[] {return true;});
+        driver.stop(); watchdog.stop();
+        QCOMPARE(result,0); QVERIFY(!timedOut); QVERIFY(completed); QVERIFY(copyPasswordPrompt); QVERIFY(restoredData);
+        QCOMPARE(core.gate(),Application::Gate::NeedUnlock);
     }
     void quickPasteFullRoute() {
         QTemporaryDir dir;

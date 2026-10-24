@@ -13,6 +13,7 @@ public:
     prefs::Values draft() const;
     void setApplyResult(const prefs::ApplyResult&,const prefs::Values& current);
     void setUnlockMode(Application::Mode mode,bool helloAvailable);
+    void setOperationError(const QString& error);
 signals:
     void saveRequested();
     void changePasswordRequested();
@@ -29,7 +30,8 @@ private:
     QStackedWidget* pages_{};
     QLabel *error_{},*dirtyHint_{},*registered_{};
     QDialogButtonBox* buttons_{};
-    QPushButton *password_{},*unlock_{},*clearEnvironment_{};
+    QPushButton *password_{},*unlock_{},*clearEnvironment_{},*restore_{};
     bool passwordAllowed_=false,unlockAllowed_=false;
+    bool backupAvailable_=false;
 };
 }

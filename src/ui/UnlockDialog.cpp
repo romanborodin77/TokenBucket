@@ -16,6 +16,7 @@ UnlockDialog::UnlockDialog(Kind kind, QWidget* parent) : QDialog(parent) {
         ? QStringLiteral("Введите мастер-пароль этого хранилища. Если пароль забыт, восстановить его невозможно — используйте заранее сделанный защищённый экспорт.")
         : QStringLiteral("Подтвердите вход через Windows Hello. Ключ хранилища защищён этой учётной записью Windows и не переносится на другие компьютеры."), this);
     note->setWordWrap(true); note->setTextFormat(Qt::PlainText);
+    note->setObjectName("unlockPrompt");
     layout->addWidget(note);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
@@ -32,5 +33,10 @@ UnlockDialog::UnlockDialog(Kind kind, QWidget* parent) : QDialog(parent) {
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 }
 UnlockDialog::~UnlockDialog() { clearSecrets(); }
+void UnlockDialog::setPrompt(const QString& text,const QString& acceptText) {
+    findChild<QLabel*>("unlockPrompt")->setText(text);
+    if(pw_) pw_->setAccessibleDescription(text);
+    findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->setText(acceptText);
+}
 QByteArray UnlockDialog::password() const { return pw_ ? pw_->text().toUtf8() : QByteArray(); }
 void UnlockDialog::clearSecrets() { if (pw_) pw_->clear(); }

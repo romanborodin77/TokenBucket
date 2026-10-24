@@ -82,7 +82,7 @@ private:
         Mode mode=Mode::None;
         quint64 generation=0,request=0;
     };
-    std::optional<PreparedBackup> preparedBackup_;
+    std::optional<PreparedBackup> backupHint_,preparedBackup_;
     std::atomic<quint64> backupRequest_{0};
     bool prepareBackup(Mode mode,const QByteArray& password,void* hwnd,QString* error);
     // Запуск job в QtConcurrent с модальным прогрессом и применением результата в

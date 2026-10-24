@@ -11,6 +11,7 @@ public:
     QByteArray password() const;
     bool passwordMode() const { return pw_ != nullptr; }
     void clearSecrets();
+    void setPrompt(const QString& text,const QString& acceptText);
 private:
     QLineEdit* pw_{};
 };

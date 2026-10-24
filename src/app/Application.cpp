@@ -64,26 +64,33 @@ Application::Application(const QString& dir, QObject* parent,store::FileOps& ops
 bool Application::validPassword(const QByteArray& pw) { return pw.size() >= 12 && pw.size() <= 1024 && pw.isValidUtf8(); }
 Application::Mode Application::backupMode(QString* error) {
     if(!canStart(Gate::Ready,error)) return Mode::None;
-    const auto expected=generation();
-    struct Header {Mode mode=Mode::None; QString error;};
+    cancelBackupRestore();
+    const auto expected=generation(),request=backupRequest_.load(); const auto current=file_;
+    struct Header {PreparedBackup snapshot; QString error;};
     auto result=std::make_shared<Header>();
     busy_=true;
     const auto done=qScopeGuard([&] {busy_=false; emit busyChanged(false);});
     emit busyChanged(true);
-    try {waitFor(QtConcurrent::run([this,result] {
-        QByteArray bytes;
-        if(store_.loadBytes(store_.backupPath(),&bytes)!=store::VaultStore::Load::Ok) {
+    try {waitFor(QtConcurrent::run([this,result,current,expected,request] {
+        auto& snapshot=result->snapshot;
+        if(store_.loadBytes(store_.mainPath(),&snapshot.main)!=store::VaultStore::Load::Ok || snapshot.main!=current) {
+            result->error=QStringLiteral("Основной файл изменился или недоступен. Откройте хранилище заново."); return false;
+        }
+        if(store_.loadBytes(store_.backupPath(),&snapshot.backup)!=store::VaultStore::Load::Ok) {
             result->error=QStringLiteral("Резервная копия недоступна."); return false;
         }
-        const auto mode=container::readMode(bytes);
-        if(mode==container::ModePassword) result->mode=Mode::Password;
-        else if(mode==container::ModeHello) result->mode=Mode::Hello;
+        const auto mode=container::readMode(snapshot.backup);
+        if(mode==container::ModePassword) snapshot.mode=Mode::Password;
+        else if(mode==container::ModeHello) snapshot.mode=Mode::Hello;
         else result->error=QStringLiteral("Неподдерживаемый или повреждённый заголовок резервной копии.");
-        return result->mode!=Mode::None;
+        snapshot.generation=expected; snapshot.request=request;
+        return snapshot.mode!=Mode::None;
     }));} catch(...) {result->error=QStringLiteral("Не удалось прочитать резервную копию.");}
-    if(generation()!=expected || gate_!=Gate::Ready) result->error=QStringLiteral("Чтение копии отменено блокировкой.");
+    if(generation()!=expected || backupRequest_.load()!=request || gate_!=Gate::Ready) result->error=QStringLiteral("Чтение копии отменено.");
     if(error) *error=result->error;
-    return result->error.isEmpty()?result->mode:Mode::None;
+    if(!result->error.isEmpty()) return Mode::None;
+    backupHint_=std::move(result->snapshot);
+    return backupHint_->mode;
 }
 bool Application::prepareBackupRestore(const QByteArray& password,QString* error) {
     return prepareBackup(Mode::Password,password,nullptr,error);
@@ -93,9 +100,10 @@ bool Application::prepareHelloBackupRestore(void* hwnd,QString* error) {
     return prepareBackup(Mode::Hello,{},hwnd,error);
 }
 #endif
-void Application::cancelBackupRestore() {preparedBackup_.reset(); ++backupRequest_;}
+void Application::cancelBackupRestore() {backupHint_.reset(); preparedBackup_.reset(); ++backupRequest_;}
 bool Application::prepareBackup(Mode mode,const QByteArray& password,void* hwnd,QString* error) {
     if(!canStart(Gate::Ready,error)) return false;
+    auto hint=std::move(backupHint_);
     cancelBackupRestore();
     if(mode==Mode::Password && !validPassword(password)) return fail(error,"Недопустимый пароль резервной копии.");
     const auto expected=generation(),request=backupRequest_.load(); const auto current=file_;
@@ -104,7 +112,7 @@ bool Application::prepareBackup(Mode mode,const QByteArray& password,void* hwnd,
     busy_=true;
     const auto done=qScopeGuard([&] {secret->clear(); busy_=false; emit busyChanged(false);});
     emit busyChanged(true);
-    try {waitFor(QtConcurrent::run([this,result,secret,current,expected,request,mode,hwnd] {
+    try {waitFor(QtConcurrent::run([this,result,secret,current,expected,request,mode,hwnd,hint=std::move(hint)] {
         const auto canceled=[&] {return generation()!=expected || backupRequest_.load()!=request;};
         auto& snapshot=result->snapshot;
         if(canceled()) return false;
@@ -113,6 +121,9 @@ bool Application::prepareBackup(Mode mode,const QByteArray& password,void* hwnd,
         }
         if(store_.loadBytes(store_.backupPath(),&snapshot.backup)!=store::VaultStore::Load::Ok) {
             result->error=QStringLiteral("Резервная копия недоступна."); return false;
+        }
+        if(hint && (hint->main!=snapshot.main || hint->backup!=snapshot.backup)) {
+            result->error=QStringLiteral("Выбранная резервная копия или основной файл изменились. Повторите действие."); return false;
         }
         const auto actual=container::readMode(snapshot.backup);
         if(actual!=(mode==Mode::Password?container::ModePassword:container::ModeHello)) {
