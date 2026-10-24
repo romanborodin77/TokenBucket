@@ -69,6 +69,9 @@ VaultStore::Load VaultStore::loadBytes(const QString& path, QByteArray* out) con
 QString VaultStore::preserveBeforeUpgrade(const QByteArray& expectedMain,QString* error) {
     return preserveVerified(expectedMain,QStringLiteral("upgrade"),error);
 }
+QString VaultStore::preserveBeforeRegistryMigration(const QByteArray& expectedMain,QString* error) {
+    return preserveVerified(expectedMain,QStringLiteral("registry-migration"),error);
+}
 QString VaultStore::preserveVerified(const QByteArray& expectedMain,const QString& purpose,QString* error) {
     if(error) error->clear();
     const auto fail=[&](const char* text) {if(error) *error=QString::fromUtf8(text); return QString();};

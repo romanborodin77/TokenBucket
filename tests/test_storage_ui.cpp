@@ -19,6 +19,10 @@
 #include <QAction>
 #include <QTableView>
 #include <QTreeWidget>
+#include <QTreeView>
+#include <QTableWidget>
+#include <QTabWidget>
+#include "../src/ui/RegistryView.h"
 #include "../src/ui/TextFileDialog.h"
 #include "../src/ui/TextImportDialog.h"
 #include "../src/ui/MiniPanel.h"
@@ -57,6 +61,101 @@ class TestStorageUi : public QObject {
         return e;
     }
 private slots:
+    void registryRolesAreSafeAndShareMainFilters() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        model::Entry value; value.id=QUuid::createUuid(); value.groupId=group; value.title="IP"; value.type=model::EntryType::PlainValue; value.parameterName="PUBLIC_IP"; value.plainValue="192.0.2.10"; QVERIFY(app.model()->setEntry(value).isEmpty());
+        auto protectedValue=value; protectedValue.id=QUuid::createUuid(); protectedValue.reverify=true; protectedValue.plainValue="synthetic-protected-value"; QVERIFY(app.model()->setEntry(protectedValue).isEmpty());
+        model::Entry secret; secret.id=QUuid::createUuid(); secret.groupId=group; secret.title="TOKEN"; secret.token="synthetic-token-value"; QVERIFY(app.model()->setEntry(secret).isEmpty());
+        ui::RegistryView registry(app); registry.setGroup(group); auto* view=registry.findChild<QTreeView*>("registryEntries"); QCOMPARE(view->model()->rowCount(),3);
+        for(int row=0;row<3;++row) for(int col=0;col<5;++col) for(auto role:{Qt::DisplayRole,Qt::ToolTipRole,Qt::AccessibleTextRole,Qt::UserRole,Qt::EditRole}) {
+            const auto text=view->model()->index(row,col).data(role).toString(); QVERIFY(!text.contains(secret.token)); QVERIFY(!text.contains(protectedValue.plainValue));
+        }
+        QSignalSpy copies(&registry,&ui::RegistryView::copyRequested); view->setCurrentIndex(view->model()->index(0,0)); QTest::keyClick(view,Qt::Key_C,Qt::ControlModifier); QCOMPARE(copies.size(),1);
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        auto* embedded=window.findChild<ui::RegistryView*>()->findChild<QTreeView*>(); QCOMPARE(embedded->model()->rowCount(),3);
+        window.search()->setText("192.0.2.10"); QCOMPARE(embedded->model()->rowCount(),1); QCOMPARE(embedded->model()->index(0,0).data(Qt::UserRole).value<model::Id>(),value.id);
+        window.search()->setText(protectedValue.plainValue); QCOMPARE(embedded->model()->rowCount(),0);
+        app.lock(); QCOMPARE(view->model()->rowCount(),0); QCOMPARE(embedded->model()->rowCount(),0);
+    }
+    void compareSourceRequiresBothOwnersAndReportsOnlyResult_data() {
+        QTest::addColumn<int>("action"); for(int i=0;i<6;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
+    }
+    void compareSourceRequiresBothOwnersAndReportsOnlyResult() {
+        QFETCH(int,action); QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty()); auto source=document(group,true); source.reverify=true; source.textFile.bytes="TOKEN=synthetic-value\r\n"; source.textFile.visibleLines.clear(); QVERIFY(app.model()->setEntry(source).isEmpty());
+        model::Entry e; e.id=QUuid::createUuid(); e.groupId=group; e.title="TOKEN"; e.token=action==1?"synthetic-different":"synthetic-value"; e.reverify=true; e.sourceEntryId=source.id; e.sourceLine=0; QVERIFY(app.model()->setEntry(e).isEmpty());
+        if(action==4) QVERIFY(app.model()->removeEntry(source.id).isEmpty());
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        int auths=0; QString result; QTimer driver; driver.setInterval(10); connect(&driver,&QTimer::timeout,&window,[&] {
+            if(auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                ++auths; if(action==2 && auths==2) {auth->reject(); return;} if(action==3 && auths==2) {app.lock(); return;}
+                if(action==5 && auths==2) {auto changed=e; changed.token="changed-without-modified"; QVERIFY(app.model()->setEntry(changed).isEmpty());}
+                auth->setTextValue("valid-password"); auth->accept();
+            } else if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {result=box->text(); box->accept();}
+        });
+        bool timedOut=false; QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();});
+        driver.start(); watchdog.start(5000); window.compareWithSource(e.id); driver.stop(); watchdog.stop(); QVERIFY(!timedOut);
+        QCOMPARE(auths,action==4?1:2); QCOMPARE(result,action==0?QStringLiteral("Совпадает"):action==1?QStringLiteral("Отличается"):QString());
+    }
+    void registryMigrationIsReviewedAndTransactional_data() {
+        QTest::addColumn<int>("action"); for(int i=0;i<7;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
+    }
+    void registryMigrationIsReviewedAndTransactional() {
+        QFETCH(int,action); QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        model::Entry ip; ip.id=QUuid::createUuid(); ip.groupId=group; ip.title="PUBLIC_IP"; ip.token="192.0.2.10"; QVERIFY(app.model()->setEntry(ip).isEmpty()); QVERIFY(app.save(&error));
+        QFile vault(app.storePathForTest()); QVERIFY(vault.open(QIODevice::ReadOnly)); const auto before=vault.readAll(); vault.close();
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;}); window.tree()->setCurrentItem(window.tree()->topLevelItem(0));
+        if(action==3) ops.failWriteCall=ops.writeCalls+1;
+        if(action==4) ops.beforeWrite=[&](const QString& path) {if(path.endsWith("vault.tb.tmp")) ops.failWrite=true;};
+        if(action==5) ops.beforeWrite=[&](const QString& path) {if(path.contains(".before-registry-migration-")) QMetaObject::invokeMethod(&app,&Application::lock,Qt::BlockingQueuedConnection);};
+        bool seen=false,timedOut=false; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            auto* modal=QApplication::activeModalWidget();
+            if(auto* auth=qobject_cast<QInputDialog*>(modal)) {auth->setTextValue("valid-password"); auth->accept();}
+            else if(auto* box=qobject_cast<QMessageBox*>(modal)) {QCOMPARE(box->textFormat(),Qt::PlainText); box->button(action==2?QMessageBox::No:QMessageBox::Yes)->click();}
+            else if(auto* preview=qobject_cast<QDialog*>(modal);preview && preview->objectName()=="registryMigrationPreview" && !seen) {
+                seen=true; QTimer::singleShot(0,preview,[&,preview] {
+                    if(action==1) {preview->reject(); return;}
+                    if(action==0 && preview->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->isEnabled()) {
+                        auto* table=preview->findChild<QTableWidget*>(); table->setCurrentCell(0,4); QCOMPARE(table->item(0,4)->text(),QStringLiteral("••••••••"));
+                        preview->findChild<QPushButton*>("migrationReveal")->click(); QCOMPARE(table->item(0,4)->text(),ip.token);
+                        auto* timer=preview->findChild<QTimer*>("migrationHideTimer"); QVERIFY(timer->isActive()); QMetaObject::invokeMethod(timer,"timeout"); QCOMPARE(table->item(0,4)->text(),QStringLiteral("••••••••"));
+                    }
+                    if(action==6) {auto changed=ip; changed.token="192.0.2.20"; QVERIFY(app.model()->setEntry(changed).isEmpty());}
+                    preview->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                    if(app.gate()==Application::Gate::Ready) {if(action==3 || action==4 || action==6) QVERIFY(!preview->findChild<QLabel*>("registryMigrationError")->text().isEmpty()); preview->reject();}
+                });
+            }
+        });
+        QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();});
+        driver.start(); watchdog.start(7000); window.previewRegistryMigration(); driver.stop(); watchdog.stop(); QVERIFY(seen); QVERIFY(!timedOut);
+        ops.beforeWrite={}; ops.failWrite=false; ops.failWriteCall=0;
+        if(action==0 || action==5) QVERIFY(app.unlock("valid-password",&error));
+        QCOMPARE(app.model()->entry(ip.id)->type,action==0?model::EntryType::PlainValue:model::EntryType::ApiToken);
+        QVERIFY(vault.open(QIODevice::ReadOnly)); const auto after=vault.readAll(); vault.close(); if(action!=0) QCOMPARE(after,before);
+        const auto copies=QDir(dir.path()).entryList({"vault.tb.before-registry-migration-*"},QDir::Files);
+        if(action==0) {
+            QCOMPARE(copies.size(),1); QFile copy(dir.filePath(copies.first())); QVERIFY(copy.open(QIODevice::ReadOnly)); const auto safety=copy.readAll(); QCOMPARE(safety,before);
+            Application restored(dir.filePath("recovered")); QVERIFY(restored.importContainer(safety,"valid-password","recovery-password",&error));
+            QCOMPARE(restored.model()->entry(ip.id)->type,model::EntryType::ApiToken); QCOMPARE(restored.model()->entry(ip.id)->token,ip.token);
+            window.tree()->setCurrentItem(window.tree()->topLevelItem(0)); seen=false; driver.start(); watchdog.start(7000); window.previewRegistryMigration(); driver.stop(); watchdog.stop(); QVERIFY(seen); QVERIFY(!timedOut);
+            QCOMPARE(QDir(dir.path()).entryList({"vault.tb.before-registry-migration-*"},QDir::Files),copies);
+            QVERIFY(vault.open(QIODevice::ReadOnly)); QCOMPARE(vault.readAll(),after); vault.close();
+        }
+        if(action==1 || action==2) QVERIFY(copies.isEmpty());
+    }
+    void mainWindowHasAResourceRegistry() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        QVERIFY(window.findChild<QWidget*>("resourceRegistry")); QVERIFY(window.findChild<QAction*>("previewRegistryMigration"));
+    }
     void textFileImportReadsBoundedSource_data() {
         QTest::addColumn<int>("action"); QTest::newRow("saved")<<0; QTest::newRow("oversize")<<1; QTest::newRow("invalid-utf8")<<2; QTest::newRow("preview-cancel")<<3;
     }

@@ -39,6 +39,31 @@ class TestApp : public QObject {
         return container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr);
     }
 private slots:
+    void registrySafetyCopyPreservesVerifiedCiphertext_data() {
+        QTest::addColumn<int>("fault"); for(int i=0;i<5;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
+    }
+    void registrySafetyCopyPreservesVerifiedCiphertext() {
+        QFETCH(int,fault); QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto before=readFile(app.storePathForTest()); const auto generation=app.generation();
+        if(fault==1) ops.failWrite=true;
+        if(fault==2) ops.corruptWriteCall=ops.writeCalls+1;
+        if(fault==3) ops.beforeWrite=[&](const QString&) {QMetaObject::invokeMethod(&app,&Application::lock,Qt::BlockingQueuedConnection);};
+        if(fault==4) {QVERIFY(store::realFileOps().removeFile(app.storePathForTest())); QVERIFY(store::realFileOps().writeAll(app.storePathForTest(),"different-synthetic"));}
+        const auto path=app.preserveBeforeRegistryMigration(&error);
+        if(fault!=4) QCOMPARE(readFile(app.storePathForTest()),before);
+        if(fault) {QVERIFY(path.isEmpty()); QVERIFY(!error.isEmpty());}
+        else {
+            QVERIFY(!path.isEmpty()); QVERIFY(path.contains(".before-registry-migration-")); QCOMPARE(readFile(path),before); QCOMPARE(app.generation(),generation);
+            const auto second=app.preserveBeforeRegistryMigration(&error); QVERIFY(!second.isEmpty()); QVERIFY(second!=path); QCOMPARE(readFile(second),before);
+            QVERIFY(app.save(&error)); app.lock(); QVERIFY(app.unlock("valid-password",&error));
+        }
+        if(fault==3) QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+    }
     void legacySaveRequiresExplicitConsent() {
         QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); const auto bytes=legacyV3(); QVERIFY(!bytes.isEmpty());
         const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));

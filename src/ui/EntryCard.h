@@ -27,6 +27,8 @@ signals:
     void editRequested();
     void moreRequested();
     void documentRequested(model::Id);
+    void sourceRequested(model::Id);
+    void compareRequested(model::Id);
 protected:
     bool eventFilter(QObject*, QEvent*) override;     // клик мимо карточки мгновенно прячет секрет
     void changeEvent(QEvent*) override;
@@ -43,6 +45,7 @@ private:
     QPlainTextEdit* value_{};
     QPushButton *reveal_{}, *copySecret_{}, *copyLogin_{}, *copyPhrase_{}, *sshToFile_{};
     QPushButton *edit_{}, *more_{}, *document_{};
+    QPushButton *source_{},*compare_{};
     QTimer hideTimer_;
 };
 }

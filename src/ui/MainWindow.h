@@ -13,12 +13,13 @@
 namespace tb::platform { class QuickPaste; }
 namespace tb { class IdleTimer; }
 namespace tb::io {struct TextImportPreview;}
-class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox;
+class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox; class QTabWidget;
 class QScrollArea; class QLabel; class QAction;
 class QPushButton;
 class QSplitter; class QBoxLayout;
 namespace tb::ui {
 class EntryCard;
+class RegistryView;
 // Главное окно: дерево проектов/групп — список записей с фильтрами/сортировкой —
 // карточка записи. Все изменения модели идут через commit()/commitEntry()
 // (сохранение + откат при отказе). Крестик следует сохранённой политике закрытия;
@@ -70,6 +71,8 @@ public slots:
     void openDocument(model::Id);
     void importTextFile();
     void structureDocument(model::Id);
+    void previewRegistryMigration();
+    void compareWithSource(model::Id);
 #ifdef Q_OS_WIN
     void exportToEnvironment();
     void removeExportedVariables();
@@ -134,6 +137,7 @@ private:
     Application& app_;
     QTreeWidget* tree_{};
     QListWidget* list_{};
+    RegistryView* registry_{}; QTabWidget* resultsTabs_{};
     QLineEdit* search_{};
     QComboBox* typeFilter_{};
     QComboBox* sortMode_{};

@@ -67,6 +67,8 @@ bool applyChoice(model::VaultModel& model,const TextImportPreview& preview,const
 }
 model::EntryType suggestStorageType(const QString& name,const QString& value) {
     using model::EntryType; const auto n=key(name);
+    if(!value.isValidUtf16() || value.contains(QChar::Null) || value.contains('\r') || value.contains('\n')
+        || value.contains(QChar(0x2028)) || value.contains(QChar(0x2029))) return EntryType::ApiToken;
     static const QRegularExpression secret("PASS|PWD|TOKEN|SECRET|KEY|CREDENTIAL|CONNECTION|DSN");
     if(secret.match(n).hasMatch() || value.contains('$') || value.contains('`') || value.contains('\\') || value.contains("-----BEGIN")) return EntryType::ApiToken;
     static const QSet<QString> ips={"IP","IP_ADDRESS","PUBLIC_IP","PRIVATE_IP","HOST","HOST_IP","IP_АДРЕС"};

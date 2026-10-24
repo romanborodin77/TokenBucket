@@ -328,7 +328,7 @@ bool buildMigrationCandidate(const model::VaultModel&,const MigrationProposal&,
 
 Group изменения выбираются существующим TextImportDialog; before/after сохраняют исходные метаданные. Безвредная структура не означает согласия раскрыть содержимое.
 
-- [ ] **1. RED:** прежняя ApiToken PUBLIC_IP и ApiToken TOKEN, richEntry с несколькими непустыми полями, SSH и снимок исходника:
+- [x] **1. RED:** прежняя ApiToken PUBLIC_IP и ApiToken TOKEN, richEntry с несколькими непустыми полями, SSH и снимок исходника:
 
 ```cpp
 const auto plan=io::proposeRegistryMigration(model,{ip.id,token.id,ssh.id},generation);
@@ -341,8 +341,8 @@ QCOMPARE(candidate.entry(ssh.id)->sshPrivate,ssh.sshPrivate);
 ```
 
 Фактический переход ip в PlainValue разрешён только после UI-подтверждения соответствующего after; до него защищённый тип остаётся. Тест изменённого before запрещает применить старое предложение.
-- [ ] **2. Run:** test_text_import/test_storage_ui/test_app. Expected: отсутствует реестр/миграция или меняется база до подтверждения. Проверить deleted source, отсутствующую/неоднозначную запись, изменённый payload без корректировки modified, lock/generation, невыбранные проекты, наследование reverify и все метаданные.
-- [ ] **3. Реализация:** RegistryView использует QAbstractItemModel/QTreeView по имеющимся группам; роли показывают только безопасные значения. UserRole содержит UUID, не секрет; копирование направляется прежнему владельцу. Открытие ресурса не создаёт группы и не меняет записи.
+- [x] **2. Run:** test_text_import/test_storage_ui/test_app. Expected: отсутствует реестр/миграция или меняется база до подтверждения. Проверить deleted source, отсутствующую/неоднозначную запись, изменённый payload без корректировки modified, lock/generation, невыбранные проекты, наследование reverify и все метаданные.
+- [x] **3. Реализация:** RegistryView использует QAbstractItemModel/QTreeView по имеющимся группам; роли показывают только безопасные значения. UserRole содержит UUID, не секрет; копирование направляется прежнему владельцу. Открытие ресурса не создаёт группы и не меняет записи.
 
 ```cpp
 if(app.generation()!=proposal.generation || app.gate()!=Application::Gate::Ready)
@@ -357,8 +357,8 @@ if(!app.save(error)) {
 ```
 
 Перед этим создать проверенную уникальную страховочную копию для миграции даже при уже v4; добавить QString Application::preserveBeforeRegistryMigration(QString*) с Ready/!busy, strict expected ciphertext и CREATE_NEW. В VaultStore переиспользовать внутреннюю проверенную запись копии Task 2, передав назначение before-registry-migration вместо before-upgrade; не дублировать проверку путей, прав и readback. Пустой результат — отказ до изменения модели. Обычный save не заменяет этот шаг. Назначение/подписи снимка — прежние FileOps-права и чтение; тела снимков не копируются в заметки. После commit перечитать/проверить сохранённую модель через обычную блокировку и разблокировку; пользователь вводит пароль локально, существующий тест использует вымышленный.
-- [ ] **4. GREEN:** точность значений и SSH, before/after metadata, неправильные признаки snapshot, отказ safety/save, повтор, отмена, lock во время apply и восстановление страховочной копии. Проверить отсутствие невыбранных преобразований и секретов в DisplayRole/tooltip/search. Полный набор.
-- [ ] **5. Commit:** Organize resource registries with reviewed record migration.
+- [x] **4. GREEN:** точность значений и SSH, before/after metadata, неправильные признаки snapshot, отказ safety/save, повтор, отмена, lock во время apply и восстановление страховочной копии. Проверить отсутствие невыбранных преобразований и секретов в DisplayRole/tooltip/search. Полный набор.
+- [x] **5. Commit:** Organize resource registries with reviewed record migration.
 
 ### Task 7: Интеграция подтверждений, копий и старых путей приложения
 

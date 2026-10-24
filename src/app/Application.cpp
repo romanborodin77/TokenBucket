@@ -209,6 +209,14 @@ bool Application::approveSchemaUpgrade(QString* error) {
     if(schemaUpgradeRequired()) upgradeApproval_=generation();
     return true;
 }
+QString Application::preserveBeforeRegistryMigration(QString* error) {
+    if(!canStart(Gate::Ready,error)) return {};
+    auto path=std::make_shared<QString>();
+    const bool ok=execute([this,path](Outcome& result,quint64) {
+        *path=store_.preserveBeforeRegistryMigration(result.previousFile,&result.error); result.ok=!path->isEmpty();
+    },mode_,false,error);
+    return ok?*path:QString();
+}
 bool Application::storeCandidate(Outcome& result,quint64 expected) {
     const auto canceled=[&] {return generation()!=expected;};
     if(canceled()) return fail(&result.error,"Запись отменена.");

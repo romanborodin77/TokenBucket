@@ -21,6 +21,7 @@ public:
     void acceptVerified(const QByteArray& bytes) { verified_ = bytes; hasVerified_ = true; }
     bool save(const QByteArray& bytes, QString* err,const std::function<bool()>& canceled={});
     QString preserveBeforeUpgrade(const QByteArray& expectedMain,QString* error);
+    QString preserveBeforeRegistryMigration(const QByteArray& expectedMain,QString* error);
     RestoreResult restoreBackup(const QByteArray& expectedMain,const QByteArray& expectedBackup,
                                 const std::function<bool()>& canceled);
     enum class Load { Ok, Missing, IoError };

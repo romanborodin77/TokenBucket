@@ -1,11 +1,49 @@
 #include <QtTest>
 #include "../src/io/TextImport.h"
+#include "../src/io/RegistryMigration.h"
 #include "../src/model/TextFile.h"
 using namespace tb;
 class TestTextImport:public QObject {
     Q_OBJECT
     static model::Id group(model::VaultModel& model) {const auto id=QUuid::createUuid(); if(!model.addNode(id,{},"Demo").isEmpty()) return {}; return id;}
 private slots:
+    void migrationPreservesMetadataAmbiguousFieldsAndUnselectedProjects() {
+        model::VaultModel base; const auto id=group(base); model::Entry source; source.id=QUuid::createUuid(); source.groupId=id; source.type=model::EntryType::TextFile;
+        source.textFile={"demo.txt","PUBLIC_IP=192.0.2.10\r\n",true,{}}; QVERIFY(base.setEntry(source).isEmpty());
+        model::Entry ip; ip.id=QUuid::createUuid(); ip.groupId=id; ip.title="PUBLIC_IP"; ip.token="192.0.2.10"; ip.reverify=true; ip.favorite=true; ip.tags={"demo"}; ip.note="Owner note";
+        ip.url="https://example.test"; ip.created=ip.modified=QDateTime::currentDateTimeUtc(); ip.expiresAt=ip.created.addDays(3); ip.sourceEntryId=source.id; ip.sourceLine=0; QVERIFY(base.setEntry(ip).isEmpty());
+        auto token=ip; token.id=QUuid::createUuid(); token.title="TOKEN"; QVERIFY(base.setEntry(token).isEmpty());
+        auto rich=ip; rich.id=QUuid::createUuid(); rich.password="synthetic-secondary"; QVERIFY(base.setEntry(rich).isEmpty());
+        auto ssh=ip; ssh.id=QUuid::createUuid(); ssh.type=model::EntryType::SshKey; ssh.sshPrivate=QByteArray::fromHex("00ff010203"); QVERIFY(base.setEntry(ssh).isEmpty());
+        const auto otherGroup=group(base); auto other=ip; other.id=QUuid::createUuid(); other.groupId=otherGroup; QVERIFY(base.setEntry(other).isEmpty());
+        const auto p=io::proposeRegistryMigration(base,{ip.id,token.id,rich.id,ssh.id,source.id},7); QVERIFY(p.error.isEmpty()); QCOMPARE(p.generation,quint64(7)); QCOMPARE(base.entry(ip.id)->type,model::EntryType::ApiToken);
+        model::VaultModel out; QString error; QVERIFY2(io::buildMigrationCandidate(base,p,&out,&error),qPrintable(error));
+        auto expected=ip; expected.type=model::EntryType::PlainValue; expected.parameterName=ip.title; expected.plainValue=ip.token; expected.token.clear(); QCOMPARE(*out.entry(ip.id),expected);
+        for(const auto& e:{token,rich,ssh,source,other}) QCOMPARE(*out.entry(e.id),e);
+        QVERIFY(!out.search(ip.token).contains(ip.id));
+        QVERIFY(base.removeEntry(source.id).isEmpty()); const auto withoutSource=io::proposeRegistryMigration(base,{ip.id},8);
+        QVERIFY(io::buildMigrationCandidate(base,withoutSource,&out,&error)); QCOMPARE(out.entry(ip.id)->sourceEntryId,source.id);
+    }
+    void migrationRefusesStaleOrTamperedProposal_data() {
+        QTest::addColumn<int>("action"); for(int i=0;i<7;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
+    }
+    void migrationRefusesStaleOrTamperedProposal() {
+        QFETCH(int,action); model::VaultModel base; const auto id=group(base); model::Entry e; e.id=QUuid::createUuid(); e.groupId=id; e.title="PUBLIC_IP"; e.token="192.0.2.10"; e.reverify=true; QVERIFY(base.setEntry(e).isEmpty());
+        auto p=io::proposeRegistryMigration(base,{e.id},3);
+        if(action==0) {auto changed=e; changed.token="192.0.2.20"; QVERIFY(base.setEntry(changed).isEmpty());}
+        if(action==1) QVERIFY(base.removeEntry(e.id).isEmpty());
+        if(action==2) p.after[0].plainValue="different";
+        if(action==3) p.after[0].reverify=false;
+        if(action==4) p.after[0].note="changed";
+        if(action==5) {p.before.append(p.before.first()); p.after.append(p.after.first());}
+        if(action==6) p.after.clear();
+        model::VaultModel out=base; QString error; QVERIFY(!io::buildMigrationCandidate(base,p,&out,&error)); QVERIFY(out==base); QVERIFY(!error.isEmpty());
+    }
+    void migrationDoesNotGuessTextFileBytes() {
+        model::VaultModel base; const auto id=group(base); model::Entry e; e.id=QUuid::createUuid(); e.groupId=id; e.title="backup.txt"; e.token="PUBLIC_IP=192.0.2.10\r\nTOKEN=synthetic\r\n"; QVERIFY(base.setEntry(e).isEmpty());
+        const auto p=io::proposeRegistryMigration(base,{e.id},1); QCOMPARE(p.before,p.after); model::VaultModel out; QString error; QVERIFY(io::buildMigrationCandidate(base,p,&out,&error)); QCOMPARE(*out.entry(e.id),e);
+        QVERIFY(!io::proposeRegistryMigration(base,{e.id,e.id},1).error.isEmpty()); QVERIFY(!io::proposeRegistryMigration(base,{QUuid::createUuid()},1).error.isEmpty());
+    }
     void knownLabelsStayUsefulAndUnknownNamesStayHidden() {
         model::VaultModel base; const auto id=group(base); auto p=io::parseTextFile("PASSWORD=synthetic-password\nsynthetic-sensitive-name=synthetic-value\n","demo.txt"); p.source.groupId=id;
         const auto choices=io::defaultRegistrySelections(base,p); QCOMPARE(choices.first().title,QString("PASSWORD"));
@@ -24,6 +62,8 @@ private slots:
         QTest::newRow("ipv4")<<QString("PUBLIC_IP")<<QString("192.0.2.10")<<true;
         QTest::newRow("ipv6")<<QString("IP")<<QString("2001:db8::1")<<true;
         QTest::newRow("bad-ip")<<QString("IP")<<QString("192.999.1.1")<<false;
+        QTest::newRow("ip-with-newline")<<QString("PUBLIC_IP")<<QString("192.0.2.10\n")<<false;
+        QTest::newRow("ip-with-nul")<<QString("PUBLIC_IP")<<(QString("192.0.2.10")+QChar::Null+"synthetic")<<false;
         QTest::newRow("secret-name-wins")<<QString("TOKEN_IP")<<QString("192.0.2.10")<<false;
         QTest::newRow("unknown-name")<<QString("synthetic-sensitive-name")<<QString("192.0.2.10")<<false;
         QTest::newRow("public-url")<<QString("APP_URL")<<QString("https://example.test/path")<<true;

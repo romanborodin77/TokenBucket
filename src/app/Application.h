@@ -59,6 +59,7 @@ public:
     bool schemaUpgradeRequired() const;
     bool approveSchemaUpgrade(QString* error);
     QString upgradeSafetyPath() const { return upgradeSafetyPath_; }
+    QString preserveBeforeRegistryMigration(QString* error);
     bool checkPassword(const QByteArray& pw, QString* err);
     void lock();
     QByteArray exportContainer(const QByteArray& exportPw, QString* err);

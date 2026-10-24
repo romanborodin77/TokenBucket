@@ -9,6 +9,13 @@
 #include "EntryCard.h"
 #include "TextFileDialog.h"
 #include "TextImportDialog.h"
+#include "RegistryView.h"
+#include "../io/RegistryMigration.h"
+#include "../model/TextFile.h"
+#include <QTabWidget>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QKeyEvent>
 #include "AboutDialog.h"
 #include "../io/Import.h"
 #include "TrayController.h"
@@ -69,6 +76,20 @@
 #include <algorithm>
 namespace tb::ui {
 namespace {
+class MigrationTable:public QTableWidget {
+public:
+    MigrationTable(int rows,int columns,QWidget* parent):QTableWidget(rows,columns,parent) {qApp->installEventFilter(this);}
+    std::function<void()> hideValue;
+protected:
+    bool eventFilter(QObject* object,QEvent* event) override {
+        if(hideValue && (event->type()==QEvent::ApplicationDeactivate || (object==window() && (event->type()==QEvent::WindowDeactivate || event->type()==QEvent::Hide)))) hideValue();
+        return QTableWidget::eventFilter(object,event);
+    }
+    void keyPressEvent(QKeyEvent* event) override {
+        if(event->matches(QKeySequence::Copy) || event->matches(QKeySequence::Cut)) {event->accept(); return;}
+        QTableWidget::keyPressEvent(event);
+    }
+};
 // Перехватывает перетаскивание: базовая обработка двигает элемент в дереве,
 // затем намерение (узел → целевой родитель) проверяется правилами модели.
 class VaultTree : public QTreeWidget {
@@ -127,6 +148,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     action(vault, QStringLiteral("Импорт из файла…"), &MainWindow::importVault);
     action(vault, QStringLiteral("Импорт из CSV / KeePass XML…"), &MainWindow::importFromCsvKeePass);
     action(vault,QStringLiteral("TXT → предпросмотр и реестр…"),&MainWindow::importTextFile)->setObjectName("importTextFile");
+    action(entries,QStringLiteral("Предпросмотр преобразования старых записей…"),&MainWindow::previewRegistryMigration)->setObjectName("previewRegistryMigration");
     vault->addSeparator();
     auto* settings = menuBar()->addMenu(QStringLiteral("&Настройки"));
     auto* openSettings=settings->addAction(QStringLiteral("Настройки…"),this,&MainWindow::showSettings);
@@ -240,7 +262,15 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     resultsLayout->addWidget(searchScope_); resultsLayout->addWidget(listSummary_); resultsLayout->addWidget(controls);
     auto* tagsScroll = new QScrollArea(results); tagsScroll->setWidgetResizable(true); tagsScroll->setFrameShape(QFrame::NoFrame);
     tagsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); tagsScroll->setFixedHeight(44); tagsScroll->setWidget(tagBar_);
-    resultsLayout->addWidget(tagsScroll); resultsLayout->addWidget(list_, 1);
+    resultsTabs_=new QTabWidget(results); resultsTabs_->setObjectName("resultsTabs");
+    registry_=new RegistryView(app_,resultsTabs_); resultsTabs_->addTab(list_,QStringLiteral("Список")); resultsTabs_->addTab(registry_,QStringLiteral("Реестр"));
+    resultsLayout->addWidget(tagsScroll); resultsLayout->addWidget(resultsTabs_, 1);
+    const auto selectEntry=[this](model::Id id) {
+        for(int i=0;i<list_->count();++i) if(list_->item(i)->data(Qt::UserRole).value<model::Id>()==id) {list_->setCurrentRow(i); return true;} return false;
+    };
+    connect(registry_,&RegistryView::entryActivated,this,[this,selectEntry](model::Id id) {if(selectEntry(id)) {showMetadata(); openCardDialog();}});
+    connect(registry_,&RegistryView::copyRequested,this,[this,selectEntry](model::Id id) {if(ready() && selectEntry(id)) {card_->showEntry(id); card_->copySecret();}});
+    connect(registry_,&RegistryView::sourceRequested,this,&MainWindow::openDocument);
     layout->addWidget(splitter, 1);
     for (auto* combo : {typeFilter_, sortMode_, expiryFilter_}) { combo->setMinimumContentsLength(7); combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); }
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -280,6 +310,8 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
     connect(card_, &EntryCard::editRequested, this, &MainWindow::editSelected);
     connect(card_,&EntryCard::documentRequested,this,&MainWindow::openDocument);
+    connect(card_,&EntryCard::sourceRequested,this,&MainWindow::openDocument);
+    connect(card_,&EntryCard::compareRequested,this,&MainWindow::compareWithSource);
     connect(card_, &EntryCard::moreRequested, this, [this] {
         const auto* more = card_->findChild<QPushButton*>(QStringLiteral("cardMore"));
         showEntryMenu(more->mapToGlobal(QPoint(0, more->height())));
@@ -626,6 +658,7 @@ void MainWindow::refillList(model::Id selected) {
             if (first->favorite != second->favorite) return first->favorite;
             return byDate ? first->modified > second->modified : first->title < second->title;
         });
+        registry_->setEntries(ids);
         for (auto id : ids) {
             const auto* entry = app_.model()->entry(id);
             QString title = entry->favorite ? QStringLiteral("★ ") + entry->title : entry->title;
@@ -1078,6 +1111,93 @@ void MainWindow::updateSwitchActionText() {
     if (changePwAction_) changePwAction_->setVisible(app_.mode() != Application::Mode::Hello);
 }
 void MainWindow::showAbout() { ui::AboutDialog dialog(this); dialog.exec(); }
+void MainWindow::previewRegistryMigration() {
+    if(!ready() || editing_) return;
+    const auto group=selectedNode(); if(group.isNull() || libraryView_!=LibraryView::Group) {report(QStringLiteral("Выберите ресурс в дереве проектов.")); return;}
+    QScopedValueRollback guard(editing_,true); const auto generation=app_.generation();
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    if(!VerifyDialog::verify(app_,this,QStringLiteral("предпросмотр преобразования")) || !ready() || generation!=app_.generation() || group!=selectedNode()) return;
+    auto proposal=io::proposeRegistryMigration(*app_.model(),app_.model()->entriesInSubtree(group),generation);
+    if(!proposal.error.isEmpty()) {report(proposal.error); return;}
+    QDialog dialog(this); dialog.setObjectName("registryMigrationPreview"); dialog.setWindowTitle(QStringLiteral("Старые записи — предпросмотр")); dialog.resize(900,480);
+    auto* layout=new QVBoxLayout(&dialog); auto* heading=new QLabel(QStringLiteral("Ресурс: %1\nВыберите преобразования. Неоднозначные записи и SSH сохраняются без изменений. Исходные TXT с неподтверждёнными байтами остаются прежними записями.").arg(groupPath(group)),&dialog);
+    heading->setTextFormat(Qt::PlainText); heading->setWordWrap(true); layout->addWidget(heading);
+    auto* table=new MigrationTable(proposal.before.size(),5,&dialog); table->setObjectName("registryMigrationEntries"); table->setHorizontalHeaderLabels({QStringLiteral("Применить"),QStringLiteral("Запись"),QStringLiteral("Сейчас"),QStringLiteral("После"),QStringLiteral("Предложение")});
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->setDragEnabled(false); table->setContextMenuPolicy(Qt::NoContextMenu); table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    int changes=0;
+    for(int i=0;i<proposal.before.size();++i) {
+        const auto& before=proposal.before[i]; const auto& after=proposal.after[i]; const bool changed=before!=after; changes+=changed;
+        auto* check=new QTableWidgetItem; check->setFlags(changed?Qt::ItemIsEnabled|Qt::ItemIsUserCheckable:Qt::NoItemFlags); check->setCheckState(changed?Qt::Checked:Qt::Unchecked); table->setItem(i,0,check);
+        table->setItem(i,1,new QTableWidgetItem(before.title)); table->setItem(i,2,new QTableWidgetItem(entryTypeLabel(before.type)));
+        table->setItem(i,3,new QTableWidgetItem(changed?entryTypeLabel(after.type):QStringLiteral("Без изменений")));
+        table->setItem(i,4,new QTableWidgetItem(QStringLiteral("••••••••")));
+    }
+    table->horizontalHeader()->setSectionResizeMode(1,QHeaderView::Stretch); layout->addWidget(table,1);
+    QTimer revealTimer(&dialog); revealTimer.setSingleShot(true); revealTimer.setObjectName("migrationHideTimer"); revealTimer.setInterval(appliedPreferences_.revealSeconds*1000); int revealed=-1;
+    const auto hideValue=[&] {revealTimer.stop(); if(revealed>=0 && revealed<table->rowCount()) table->item(revealed,4)->setText(QStringLiteral("••••••••")); revealed=-1;};
+    table->hideValue=hideValue; const auto clearCallback=qScopeGuard([&] {table->hideValue={};});
+    connect(&revealTimer,&QTimer::timeout,&dialog,hideValue); connect(table,&QTableWidget::currentCellChanged,&dialog,[&] {hideValue();});
+    auto* reveal=new QPushButton(QStringLiteral("Показать выбранное на время…"),&dialog); reveal->setObjectName("migrationReveal"); layout->addWidget(reveal);
+    auto* error=new QLabel(changes?QString():QStringLiteral("Безопасных автоматических преобразований нет. Новые TXT можно импортировать отдельно через предпросмотр."),&dialog); error->setObjectName("registryMigrationError"); error->setTextFormat(Qt::PlainText); error->setWordWrap(true); layout->addWidget(error);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog); buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Применить выбранное…")); buttons->button(QDialogButtonBox::Ok)->setEnabled(changes>0); layout->addWidget(buttons);
+    bool applying=false,canceled=false; connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    connect(reveal,&QPushButton::clicked,&dialog,[&] {
+        const int row=table->currentRow(); if(applying || canceled || !ready() || row<0 || row>=proposal.before.size() || proposal.before[row]==proposal.after[row]) return;
+        const auto before=proposal.before[row];
+        if(!authorizeEntry(app_,before.id,&dialog,true) || canceled || !ready() || generation!=app_.generation() || row!=table->currentRow() || row>=proposal.before.size()) return;
+        const auto* current=app_.model()->entry(before.id); if(!current || *current!=before) {error->setText(QStringLiteral("Предпросмотр устарел. Откройте его заново.")); return;}
+        hideValue(); revealed=row; table->item(row,4)->setText(proposal.after[row].plainValue); revealTimer.start();
+    });
+    connect(&dialog,&QDialog::rejected,&dialog,[&] {canceled=true; if(applying && app_.gate()==Application::Gate::Ready) app_.lock();});
+    connect(&app_,&Application::stateChanged,&dialog,[&] {
+        if(generation!=app_.generation() || app_.gate()!=Application::Gate::Ready) {
+            for(auto* child:dialog.findChildren<QDialog*>()) child->reject(); hideValue(); table->setRowCount(0); proposal={}; dialog.reject();
+        }
+    });
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,[&] {
+        if(applying || canceled || !ready() || generation!=app_.generation()) return;
+        io::MigrationProposal selected; selected.generation=generation;
+        for(int i=0;i<proposal.before.size();++i) if(table->item(i,0)->checkState()==Qt::Checked) {selected.before.append(proposal.before[i]); selected.after.append(proposal.after[i]);}
+        if(selected.before.isEmpty()) {error->setText(QStringLiteral("Нет выбранных преобразований.")); return;}
+        QMessageBox confirm(QMessageBox::Warning,QStringLiteral("Изменение видимости"),QStringLiteral("Выбранные значения станут видимыми и доступными поиску, кроме записей с повторной проверкой. Перед записью будет создана проверенная зашифрованная копия. Затем сеанс заблокируется для повторного открытия. Продолжить?"),QMessageBox::Yes|QMessageBox::No,&dialog);
+        confirm.setTextFormat(Qt::PlainText); confirm.setDefaultButton(QMessageBox::No); confirm.setEscapeButton(QMessageBox::No);
+        if(confirm.exec()!=QMessageBox::Yes || canceled || !ready() || generation!=app_.generation()) return;
+        model::VaultModel candidate; QString failure;
+        if(!io::buildMigrationCandidate(*app_.model(),selected,&candidate,&failure)) {error->setText(failure); return;}
+        applying=true; buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+        const auto safety=app_.preserveBeforeRegistryMigration(&failure);
+        if(canceled || !ready() || generation!=app_.generation()) return;
+        if(safety.isEmpty() || !io::buildMigrationCandidate(*app_.model(),selected,&candidate,&failure)) {
+            applying=false; error->setText(failure); buttons->button(QDialogButtonBox::Ok)->setEnabled(true); return;
+        }
+        const bool saved=commit([&](model::VaultModel& model) {model=std::move(candidate); return QString();}); applying=false;
+        if(!saved) {if(!canceled && ready()) {error->setText(error_->text()); buttons->button(QDialogButtonBox::Ok)->setEnabled(true);} return;}
+        dialog.accept(); app_.lock();
+    });
+    dialog.exec();
+}
+void MainWindow::compareWithSource(model::Id id) {
+    if(!ready() || editing_) return; QScopedValueRollback guard(editing_,true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    if(!authorizeEntry(app_,id,this)) return;
+    const auto* e=app_.model()->entry(id); if(!e) return; const auto before=*e; const auto generation=app_.generation();
+    const auto* source=app_.model()->entry(before.sourceEntryId);
+    if(!source || source->type!=model::EntryType::TextFile || !source->textFile.sourceSnapshot) {report(QStringLiteral("Источник недоступен.")); return;}
+    const auto original=*source;
+    if(!authorizeEntry(app_,source->id,this,!model::textfile::isVisible(source->textFile,before.sourceLine))) return;
+    const auto* current=app_.model()->entry(id); source=app_.model()->entry(original.id);
+    if(!ready() || generation!=app_.generation() || !current || *current!=before || !source || *source!=original) return;
+    const auto* value=paste::fieldValue(before,paste::Field::Secret);
+    if(!value) {report(QStringLiteral("Для этого типа откройте исходную строку.")); return;}
+    auto sourceValue=model::textfile::lineText(original.textFile,before.sourceLine);
+    const auto parsed=io::parseTextFile(original.textFile.bytes,original.textFile.fileName);
+    for(const auto& parameter:parsed.parameters) if(parameter.line==before.sourceLine) {sourceValue=parameter.value; break;}
+    QMessageBox::information(this,QStringLiteral("Сравнение с источником"),*value==sourceValue?QStringLiteral("Совпадает"):QStringLiteral("Отличается"));
+}
 void MainWindow::openDocument(model::Id id) {
     if(!ready() || editing_) return;
     const auto* e=app_.model()->entry(id); if(!e || e->type!=model::EntryType::TextFile) return;
