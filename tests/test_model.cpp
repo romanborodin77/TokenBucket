@@ -3,6 +3,7 @@
 #include <QCborArray>
 #include <QCborValue>
 #include <functional>
+#include <limits>
 #include "../src/model/VaultModel.h"
 #include "../src/vault/CborWriter.h"
 using namespace tb::model;
@@ -215,7 +216,7 @@ private slots:
         model::VaultModel bad; err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("теги")));
-        root[u"v"_s] = 4; // v4 — будущая, не поддержана
+        root[u"v"_s] = 5; // будущая версия не поддержана
         err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
@@ -254,7 +255,7 @@ private slots:
         err.clear();
         QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("срок")));
-        root[u"v"_s] = 4;
+        root[u"v"_s] = 5;
         QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
     }
@@ -345,6 +346,8 @@ private slots:
                           quint64(4294967296u), quint64(9223372036854775807u)})
             QCOMPARE(encodeUnit([&](cbor::CborWriter& w) { w.uint(v); }), QCborValue(qint64(v)).toCbor());
         QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.boolean(false); }), QCborValue(false).toCbor());
+        for(qint64 value:{qint64(-1),qint64(-24),qint64(-25),std::numeric_limits<qint64>::min(),qint64(0),qint64(50000)})
+            QCOMPARE(encodeUnit([&](cbor::CborWriter& w) {w.integer(value);}),QCborValue(value).toCbor());
         QCOMPARE(encodeUnit([](cbor::CborWriter& w) { w.boolean(true); }), QCborValue(true).toCbor());
         for (const QString s : {QStringLiteral(""), QStringLiteral("ascii"),
                                 QStringLiteral("кириллица-ü"), QStringLiteral("🚀🎉 пара суррогатов")})

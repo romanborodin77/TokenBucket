@@ -1,9 +1,13 @@
 #include "VaultModel.h"
+#include "TextFile.h"
 #include <QCborArray>
 #include <QCborMap>
 #include <QCborValue>
 #include <QCborStreamReader>
 #include <QSet>
+#include <QHostAddress>
+#include <QUrl>
+#include <QStringDecoder>
 #include <functional>
 #include <algorithm>
 using namespace Qt::StringLiterals;
@@ -13,11 +17,40 @@ QString iso(const QDateTime& t) { return t.toUTC().toString(Qt::ISODateWithMs); 
 QDateTime fromIso(const QCborValue& v) { return QDateTime::fromString(v.toString(), Qt::ISODateWithMs); }
 Id idFrom(const QCborValue& v) { return QUuid::fromString(v.toString()); }
 QString idStr(const Id& id) { return id.toString(QUuid::WithoutBraces); }
+QString utf8(QByteArrayView bytes) {
+    return QStringDecoder(QStringConverter::Utf8,QStringConverter::Flag::ConvertInitialBom)(bytes);
+}
+QString payloadError(const Entry& e) {
+    if(int(e.valueFormat)<0 || int(e.valueFormat)>2) return QStringLiteral("Неизвестный формат значения.");
+    if(e.type!=EntryType::PlainValue && (!e.parameterName.isEmpty() || !e.plainValue.isEmpty() || e.valueFormat!=ValueFormat::Text))
+        return QStringLiteral("У этого типа не должно быть простого значения.");
+    if(e.type!=EntryType::TextFile && e.textFile!=TextFileData{}) return QStringLiteral("У этого типа не должно быть тела файла.");
+    if(e.type==EntryType::PlainValue || e.type==EntryType::TextFile) {
+        if(!e.token.isEmpty() || !e.password.isEmpty() || !e.login.isEmpty() || !e.sshPrivate.isEmpty()
+            || !e.sshPublic.isEmpty() || !e.sshPassphrase.isEmpty() || !e.sshComment.isEmpty())
+            return QStringLiteral("Новый тип содержит несовместимые прежние полезные поля.");
+    }
+    if(e.type==EntryType::TextFile) return textfile::validate(e.textFile);
+    if(e.type!=EntryType::PlainValue) return {};
+    if(e.parameterName.size()>128 || !e.parameterName.isValidUtf16()) return QStringLiteral("Имя параметра: до 128 печатных символов.");
+    for(auto ch:e.parameterName.toUcs4()) if(!QChar::isPrint(ch)) return QStringLiteral("Имя параметра содержит управляющий символ.");
+    if(!e.plainValue.isValidUtf16() || e.plainValue.contains(QChar(0)) || e.plainValue.contains('\r') || e.plainValue.contains('\n')
+        || e.plainValue.contains(QChar(0x2028)) || e.plainValue.contains(QChar(0x2029)))
+        return QStringLiteral("Простое значение должно быть одной строкой без NUL.");
+    if(!e.plainValue.isEmpty() && e.valueFormat==ValueFormat::Ip && !QHostAddress().setAddress(e.plainValue))
+        return QStringLiteral("Укажите корректный IPv4 или IPv6 без порта.");
+    if(!e.plainValue.isEmpty() && e.valueFormat==ValueFormat::Url) {
+        const QUrl url(e.plainValue,QUrl::StrictMode);
+        if(!url.isValid() || url.isRelative()) return QStringLiteral("Укажите корректный абсолютный URL.");
+    }
+    return {};
+}
 }
 QString VaultModel::addNode(Id id, Id parent, const QString& name) {
     if (id.isNull()) return "Пустой идентификатор.";
     if (name.isEmpty()) return "Имя не может быть пустым.";
     if (nodes_.contains(id) || entries_.contains(id)) return "Такой идентификатор уже есть.";
+    for(const auto& e:entries_) if(e.sourceEntryId==id) return QStringLiteral("Идентификатор используется как ссылка на снимок источника.");
     if (!parent.isNull()) {
         if (!nodes_.contains(parent)) return "Родитель не найден.";
         if (depth(parent) >= MaxDepth) return "Превышена вложенность 8 уровней.";
@@ -74,7 +107,8 @@ QList<Id> VaultModel::childNodes(Id parent) const {
 bool VaultModel::secretTooBig(const Entry& e) {
     return e.token.toUtf8().size() > MaxSecretBytes || e.password.toUtf8().size() > MaxSecretBytes
         || e.sshPrivate.size() > MaxSecretBytes || e.sshPublic.size() > MaxSecretBytes
-        || e.sshPassphrase.toUtf8().size() > MaxSecretBytes;
+        || e.sshPassphrase.toUtf8().size() > MaxSecretBytes || e.plainValue.toUtf8().size()>MaxSecretBytes
+        || e.textFile.bytes.size()>MaxSecretBytes;
 }
 QStringList VaultModel::normalizeTags(const QStringList& raw) {
     QStringList result;
@@ -92,10 +126,23 @@ QStringList VaultModel::normalizeTags(const QStringList& raw) {
 }
 QString VaultModel::setEntry(const Entry& e) {
     if (e.id.isNull() || nodes_.contains(e.id)) return "Недопустимый идентификатор записи.";
-    if (int(e.type) < 0 || int(e.type) > 2) return "Неизвестный тип записи.";
+    if (int(e.type) < 0 || int(e.type) > 4) return "Неизвестный тип записи.";
     if (!nodes_.contains(e.groupId)) return "Проект или группа не найдены.";
     if (!entries_.contains(e.id) && entries_.size() >= MaxEntries) return "Достигнут предел 10 000 записей.";
     if (secretTooBig(e)) return "Секрет превышает 1 МиБ.";
+    if(const auto error=payloadError(e);!error.isEmpty()) return error;
+    if(const auto error=sourceError(e);!error.isEmpty()) return error;
+    if(const auto* previous=entry(e.id);previous && previous->type==EntryType::TextFile) {
+        if(previous->textFile.sourceSnapshot && (e.type!=EntryType::TextFile || !e.textFile.sourceSnapshot || previous->textFile.bytes!=e.textFile.bytes))
+            return QStringLiteral("Снимок источника неизменяем. Редактируйте копию с новым идентификатором.");
+        if(e.type==EntryType::TextFile && previous->textFile.bytes!=e.textFile.bytes && !e.textFile.visibleLines.isEmpty())
+            return QStringLiteral("При изменении тела сначала сбросьте видимость строк.");
+    }
+    const auto sourceLines=e.type==EntryType::TextFile?textfile::lineRanges(e.textFile.bytes).size():0;
+    for(const auto& related:entries_) if(related.id!=e.id && related.sourceEntryId==e.id) {
+        if(e.type!=EntryType::TextFile || !e.textFile.sourceSnapshot || related.sourceLine>=sourceLines)
+            return QStringLiteral("Запись используется как снимок источника.");
+    }
     // Инвариант: в модели теги всегда нормализованы — редактор и CBOR-слой
     // могут полагаться на отсутствие пустых тегов и регистровых дублей.
     const QStringList tags = normalizeTags(e.tags);
@@ -105,6 +152,15 @@ QString VaultModel::setEntry(const Entry& e) {
     Entry stored = e; // параметр константен: нормализованные теги кладём в копию
     stored.tags = tags;
     entries_.insert(stored.id, stored);
+    return {};
+}
+QString VaultModel::sourceError(const Entry& e) const {
+    if(e.sourceEntryId.isNull()) return e.sourceLine==-1?QString():QStringLiteral("Номер строки без источника.");
+    if(e.sourceEntryId==e.id || nodes_.contains(e.sourceEntryId) || e.sourceLine<0 || e.sourceLine>=textfile::MaxLines)
+        return QStringLiteral("Недопустимая ссылка на источник.");
+    const auto* source=entry(e.sourceEntryId);
+    if(source && (source->type!=EntryType::TextFile || !source->textFile.sourceSnapshot
+        || e.sourceLine>=textfile::lineRanges(source->textFile.bytes).size())) return QStringLiteral("Источник должен быть текстовым снимком с указанной строкой.");
     return {};
 }
 QString VaultModel::removeEntry(Id id) { return entries_.remove(id) ? QString() : "Запись не найдена."; }
@@ -129,14 +185,23 @@ QList<Id> VaultModel::search(const QString& needle) const {
     // квадратичной — на 10 000 записей каждый узел поиска тянул бы проход по всему результату.
     // Порядок возврата и так недетерминирован (итерация QHash), поведения это не меняет.
     QSet<Id> seen;
-    for (auto& e : entries_)
-        if (e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
+    for (auto& e : entries_) {
+        bool visibleMatch=e.type==EntryType::PlainValue && !e.reverify && e.plainValue.contains(needle,Qt::CaseInsensitive);
+        if(e.type==EntryType::TextFile && !e.reverify) {
+            const auto lines=textfile::lineRanges(e.textFile.bytes);
+            for(int line:e.textFile.visibleLines) {
+                const auto r=lines[line];
+                if(utf8(QByteArrayView(e.textFile.bytes).sliced(r.offset,r.length)).contains(needle,Qt::CaseInsensitive)) {visibleMatch=true; break;}
+            }
+        }
+        if (visibleMatch || e.parameterName.contains(needle,Qt::CaseInsensitive) || e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
             || e.note.contains(needle, Qt::CaseInsensitive)
             // Тег — поисковый атрибут записи; секреты, как и выше, не ищутся.
             || std::any_of(e.tags.cbegin(), e.tags.cend(), [&](const QString& tag) { return tag.contains(needle, Qt::CaseInsensitive); })) {
             seen.insert(e.id);
             r << e.id;
         }
+    }
     for (auto& n : nodes_)
         if (n.name.contains(needle, Qt::CaseInsensitive))
             for (auto id : entriesInSubtree(n.id))
@@ -145,7 +210,7 @@ QList<Id> VaultModel::search(const QString& needle) const {
 }
 QByteArray VaultModel::toCbor() const {
     QCborMap root;
-    root[u"v"_s] = 3; // v3 = v2 + "exp" (срок действия записи); v2 — теги; v1 — исходная
+    root[u"v"_s] = 4;
     QCborArray ns;
     for (auto& n : nodes_) { QCborMap m; m[u"id"_s] = idStr(n.id); m[u"p"_s] = n.parent.isNull() ? QString() : idStr(n.parent); m[u"n"_s] = n.name; ns << m; }
     root[u"nodes"_s] = ns;
@@ -164,6 +229,11 @@ QByteArray VaultModel::toCbor() const {
         QCborArray tags;
         for (const QString& tag : e.tags) tags << tag;
         m[u"tags"_s] = tags;
+        m[u"key"_s]=e.parameterName; m[u"value"_s]=e.plainValue.toUtf8();
+        m[u"format"_s]=e.valueFormat==ValueFormat::Ip?QStringLiteral("ip"):e.valueFormat==ValueFormat::Url?QStringLiteral("url"):QStringLiteral("text");
+        m[u"fileName"_s]=e.textFile.fileName; m[u"fileBytes"_s]=e.textFile.bytes; m[u"fileSnapshot"_s]=e.textFile.sourceSnapshot;
+        QCborArray visible; for(int line:e.textFile.visibleLines) visible.append(line); m[u"fileVisible"_s]=visible;
+        m[u"sourceId"_s]=e.sourceEntryId.isNull()?QString():idStr(e.sourceEntryId); m[u"sourceLine"_s]=e.sourceLine;
         es << m;
     }
     root[u"entries"_s] = es;
@@ -174,7 +244,7 @@ QByteArray VaultModel::toCbor() const {
 // совпадает с QCborValue::toCbor() — это фиксирует золотой тест.
 void VaultModel::encodeTo(cbor::CborWriter& w) const {
     w.beginMap(3);
-    w.text(u"v"); w.uint(3);
+    w.text(u"v"); w.uint(4);
     w.text(u"nodes"); {
         w.beginArray(size_t(nodes_.size()));
         for (auto& n : nodes_) {
@@ -187,7 +257,7 @@ void VaultModel::encodeTo(cbor::CborWriter& w) const {
     w.text(u"entries"); {
         w.beginArray(size_t(entries_.size()));
         for (auto& e : entries_) {
-            w.beginMap(19);
+            w.beginMap(28);
             w.text(u"id"); w.text(idStr(e.id));
             w.text(u"g"); w.text(idStr(e.groupId));
             w.text(u"type"); w.uint(quint64(int(e.type)));
@@ -210,6 +280,15 @@ void VaultModel::encodeTo(cbor::CborWriter& w) const {
                 w.beginArray(size_t(e.tags.size()));
                 for (const QString& tag : e.tags) w.text(tag);
             }
+            w.text(u"key"); w.text(e.parameterName); w.text(u"value"); w.bytesUtf8(e.plainValue);
+            w.text(u"format"); w.text(e.valueFormat==ValueFormat::Ip?u"ip":e.valueFormat==ValueFormat::Url?u"url":u"text");
+            w.text(u"fileName"); w.text(e.textFile.fileName);
+            w.text(u"fileBytes"); w.bytes(e.textFile.bytes.constData(),size_t(e.textFile.bytes.size()));
+            w.text(u"fileSnapshot"); w.boolean(e.textFile.sourceSnapshot);
+            w.text(u"fileVisible"); w.beginArray(size_t(e.textFile.visibleLines.size()));
+            for(int line:e.textFile.visibleLines) w.uint(quint64(line));
+            w.text(u"sourceId"); w.text(e.sourceEntryId.isNull()?QString():idStr(e.sourceEntryId));
+            w.text(u"sourceLine"); w.integer(e.sourceLine);
         }
     }
 }
@@ -239,7 +318,7 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
     // v2 = v1 + теги записей; v1 читается как записи без тегов. Неизвестная версия — отказ,
     // чтобы новая программа не молча потеряла данные, а старая — не отбросила новые поля.
     const qint64 version = root.value(u"v"_s).toInteger(-1);
-    if (version < 1 || version > 3) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
+    if (version < 1 || version > 4) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
     VaultModel fresh;
     for (const auto& nv : root.value(u"nodes"_s).toArray()) {
         if (!nv.isMap()) return bad();
@@ -276,7 +355,7 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
         if ((m.contains(u"fav"_s) && !m.value(u"fav"_s).isBool())
             || (m.contains(u"rv"_s) && !m.value(u"rv"_s).isBool())
             || !m.value(u"type"_s).isInteger() || m.value(u"type"_s).toInteger() < 0
-            || m.value(u"type"_s).toInteger() > 2
+            || m.value(u"type"_s).toInteger() > (version<4?2:4)
             || !m.value(u"tok"_s).toByteArray().isValidUtf8()
             || !m.value(u"pw"_s).toByteArray().isValidUtf8()) return bad();
         Entry e;
@@ -289,10 +368,31 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
         if ((!e.created.isValid() && !m.value(u"cr"_s).toString().isEmpty())
             || (!e.modified.isValid() && !m.value(u"mod"_s).toString().isEmpty())) return bad();
         e.favorite = m.value(u"fav"_s).toBool(); e.reverify = m.value(u"rv"_s).toBool();
-        e.token = QString::fromUtf8(m.value(u"tok"_s).toByteArray()); e.login = m.value(u"login"_s).toString();
-        e.password = QString::fromUtf8(m.value(u"pw"_s).toByteArray());
+        e.token = utf8(m.value(u"tok"_s).toByteArray()); e.login = m.value(u"login"_s).toString();
+        e.password = utf8(m.value(u"pw"_s).toByteArray());
         e.sshPrivate = m.value(u"sshpriv"_s).toByteArray(); e.sshPublic = m.value(u"sshpub"_s).toByteArray();
         e.sshPassphrase = m.value(u"sshph"_s).toString(); e.sshComment = m.value(u"sshc"_s).toString();
+        for(const auto key:{u"key"_s,u"format"_s,u"fileName"_s,u"sourceId"_s})
+            if(m.contains(key) && !m.value(key).isString()) return bad();
+        for(const auto key:{u"value"_s,u"fileBytes"_s}) if(m.contains(key) && !m.value(key).isByteArray()) return bad();
+        if(!m.value(u"value"_s).toByteArray().isValidUtf8() || (m.contains(u"fileSnapshot"_s) && !m.value(u"fileSnapshot"_s).isBool())
+            || (m.contains(u"fileVisible"_s) && !m.value(u"fileVisible"_s).isArray())
+            || (m.contains(u"sourceLine"_s) && !m.value(u"sourceLine"_s).isInteger())) return bad();
+        e.parameterName=m.value(u"key"_s).toString(); e.plainValue=utf8(m.value(u"value"_s).toByteArray());
+        const auto format=m.contains(u"format"_s)?m.value(u"format"_s).toString():QStringLiteral("text");
+        if(format!="text" && format!="ip" && format!="url") return bad();
+        e.valueFormat=format=="ip"?ValueFormat::Ip:format=="url"?ValueFormat::Url:ValueFormat::Text;
+        e.textFile.fileName=m.value(u"fileName"_s).toString(); e.textFile.bytes=m.value(u"fileBytes"_s).toByteArray();
+        e.textFile.sourceSnapshot=m.value(u"fileSnapshot"_s).toBool();
+        for(const auto line:m.value(u"fileVisible"_s).toArray()) {
+            if(!line.isInteger() || line.toInteger()<0 || line.toInteger()>=textfile::MaxLines) return bad();
+            e.textFile.visibleLines.append(int(line.toInteger()));
+        }
+        const auto source=m.value(u"sourceId"_s).toString(); e.sourceEntryId=QUuid::fromString(source);
+        if(!source.isEmpty() && e.sourceEntryId.isNull()) return bad();
+        const auto sourceLine=m.contains(u"sourceLine"_s)?m.value(u"sourceLine"_s).toInteger():-1;
+        if(sourceLine< -1 || sourceLine>=textfile::MaxLines) return bad(); e.sourceLine=int(sourceLine);
+        if(version<4 && (!e.sourceEntryId.isNull() || e.sourceLine!=-1)) return bad();
         // Теги есть только в v2; отсутствие ключа — пустой список (спека формата).
         // Неверный тип элемента или нарушение лимитов означает правку файла извне.
         if (version >= 2 && m.contains(u"tags"_s)) {
@@ -324,8 +424,11 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
             }
         }
         if (secretTooBig(e)) { if (err) *err = "Секрет превышает 1 МиБ."; return ParseStatus::TooLarge; }
+        if(!payloadError(e).isEmpty()) return bad();
         fresh.entries_.insert(e.id, e);
     }
+    for(const auto& e:fresh.entries_) if(!fresh.sourceError(e).isEmpty()) return bad();
+    fresh.decodedVersion_=int(version);
     *this = std::move(fresh);
     return ParseStatus::Ok;
 }
@@ -372,5 +475,5 @@ QString VaultModel::removeTag(const QString& tag) {
     }
     return found ? QString() : "Тег не найден.";
 }
-void VaultModel::clear() { nodes_.clear(); entries_.clear(); }
+void VaultModel::clear() { nodes_.clear(); entries_.clear(); decodedVersion_=4; }
 }

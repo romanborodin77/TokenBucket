@@ -49,11 +49,14 @@ public:
     cbor::SecureBuffer toCborSecure() const; // рабочий путь записи: секреты не проходят через обычную кучу
     enum class ParseStatus { Ok, Bad, TooLarge };
     ParseStatus fromCbor(const QByteArray& cbor, QString* err);
+    int decodedVersion() const { return decodedVersion_; }
     void clear();
 private:
     void encodeTo(cbor::CborWriter& w) const; // единая логика обоих проходов toCborSecure
     bool wouldCycle(Id node, Id newParent) const;
     static bool secretTooBig(const Entry& e);
+    QString sourceError(const Entry& e) const;
+    int decodedVersion_=4;
     QHash<Id, Node> nodes_;
     QHash<Id, Entry> entries_;
 };

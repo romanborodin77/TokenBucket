@@ -25,6 +25,7 @@ public:
     bool overflow() const { return overflow_; }             // выход за capacity — ошибка программирования
 
     void uint(quint64 v) { head(0, v); }
+    void integer(qint64 v) { if(v<0) head(1,quint64(-(v+1))); else uint(quint64(v)); }
     void boolean(bool v) { put(v ? 0xf5 : 0xf4); }          // false = 0xf4, true = 0xf5, как у Qt
     void beginArray(std::size_t n) { head(4, quint64(n)); }
     void beginMap(std::size_t n) { head(5, quint64(n)); }

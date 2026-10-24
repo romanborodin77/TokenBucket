@@ -16,6 +16,7 @@ tb_add_test(test_crypto)
 tb_add_test(test_container)
 
 tb_add_test(test_model)
+tb_add_test(test_textfile)
 
 tb_add_test(test_store)
 

@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(MSVC)
   add_compile_options(/utf-8)
 endif()
-find_package(Qt6 REQUIRED COMPONENTS Widgets Test Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Test Concurrent Network)
 find_package(unofficial-sodium CONFIG REQUIRED)
 qt_standard_project_setup()
 
@@ -25,6 +25,7 @@ add_library(tokenbucket_core STATIC
   src/vault/CborWriter.cpp
   src/vault/Container.cpp
   src/model/VaultModel.cpp
+  src/model/TextFile.cpp
   src/vault/VaultStore.cpp
   src/app/Application.cpp
   src/ui/SetupDialog.cpp
@@ -51,7 +52,7 @@ add_library(tokenbucket_core STATIC
   src/io/Import.cpp
 )
 target_include_directories(tokenbucket_core PUBLIC src $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>)
-target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent unofficial-sodium::sodium)
+target_link_libraries(tokenbucket_core PUBLIC Qt6::Widgets Qt6::Concurrent Qt6::Network unofficial-sodium::sodium)
 
 qt_add_executable(TokenBucket WIN32 src/main.cpp)
 target_link_libraries(TokenBucket PRIVATE tokenbucket_core)
