@@ -221,7 +221,7 @@ confirmVisibleValue — локальный QMessageBox с PlainText и Yes/No, �
 
 **Produces:** TextFileDialog(Application&, model::Id, ClipboardGuard&, QWidget*); приватная QAbstractTableModel строк. Сигнал requestRegistryImport(model::Id) передаёт только UUID. Получателем копирования остаётся единственный ClipboardGuard MainWindow.
 
-- [ ] **1. RED:** открыть настоящий TextFileDialog с публичной строкой 0 и скрытой строкой 1; проверить DisplayRole/ToolTipRole/AccessibleTextRole не содержат секрета, Ctrl+C на строке 0 копирует только её, а на скрытой требует проверку. Предыдущий ввод вне этой строки не меняется:
+- [x] **1. RED:** открыть настоящий TextFileDialog с публичной строкой 0 и скрытой строкой 1; проверить DisplayRole/ToolTipRole/AccessibleTextRole не содержат секрета, Ctrl+C на строке 0 копирует только её, а на скрытой требует проверку. Предыдущий ввод вне этой строки не меняется:
 
 ```cpp
 TextFileDialog dialog(app,id,clipboard);
@@ -230,8 +230,8 @@ QVERIFY(!table->model()->data(table->model()->index(1,1)).toString().contains("s
 QVERIFY(!table->model()->data(table->model()->index(1,1),Qt::ToolTipRole).toString().contains("synthetic-password"));
 ```
 
-- [ ] **2. Run:** test_storage_ui/test_paste_win. Expected: нет таблицы строк/PlainValue не допускается. Negative rows: empty, CR/LF/NUL, TextFile целиком, reverify cancel, lock во время показа/копирования, существующий файл экспорта.
-- [ ] **3. Реализация:** модель вычисляет только запрошенные строки; не создавать 50 000 QWidgets. Из ролей наружу передаются только безопасное отображение и номер строки, не весь document.bytes. Показ скрытой строки имеет один таймер A2 и сбрасывается при уходе/блокировке/смене выбора. Выдача целого файла отдельна, её подтверждение по умолчанию отменено; точные байты в файл — FileOps CREATE_NEW с закрытыми правами. Занятый/существующий путь не обходить.
+- [x] **2. Run:** test_storage_ui/test_paste_win. Expected: нет таблицы строк/PlainValue не допускается. Negative rows: empty, CR/LF/NUL, TextFile целиком, reverify cancel, lock во время показа/копирования, существующий файл экспорта.
+- [x] **3. Реализация:** модель вычисляет только запрошенные строки; не создавать 50 000 QWidgets. Из ролей наружу передаются только безопасное отображение и номер строки, не весь document.bytes. Показ скрытой строки имеет один таймер A2 и сбрасывается при уходе/блокировке/смене выбора. Выдача целого файла отдельна, её подтверждение по умолчанию отменено; точные байты в файл — FileOps CREATE_NEW с закрытыми правами. Занятый/существующий путь не обходить.
 
 ```cpp
 if (e.type==EntryType::PlainValue && field==paste::Field::Secret) return &e.plainValue;
@@ -240,8 +240,8 @@ if (e.type==EntryType::TextFile || e.type==EntryType::SshKey) return nullptr;
 ```
 
 В MiniPanel подпись поля PlainValue — «Значение», без ложного login fallback; ручной выбор и suspended из A2 сохраняются. Весь TextFile исключён; отдельная строка выдаётся только явным выбором в документе. Реальные проверки получателя/SendInput остаются общими.
-- [ ] **4. GREEN:** test_storage_ui/test_paste_win/test_e2e; точные bytes экспорта BOM/CRLF, отмена full-copy, собственная публикация и чужой буфер, отсутствие Enter и fallback копирования. Полный набор.
-- [ ] **5. Commit:** View document lines and safely deliver plain values.
+- [x] **4. GREEN:** test_storage_ui/test_paste_win/test_e2e; точные bytes экспорта BOM/CRLF, отмена full-copy, собственная публикация и чужой буфер, отсутствие Enter и fallback копирования. Полный набор.
+- [x] **5. Commit:** View document lines and safely deliver plain values.
 
 ### Task 5: Чистый TXT-разбор и предпросмотр импорта
 

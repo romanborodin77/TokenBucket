@@ -260,10 +260,13 @@ private slots:
         INPUT trigger[6] = {};
         const WORD key[6] = {VK_CONTROL, VK_MENU, WORD(parsed->key), WORD(parsed->key), VK_MENU, VK_CONTROL};
         for (int i = 0; i < 6; ++i) { trigger[i].type = INPUT_KEYBOARD; trigger[i].ki.wVk = key[i]; trigger[i].ki.dwFlags = i >= 3 ? KEYEVENTF_KEYUP : 0; }
-        for (int route = 0; route < 10; ++route) {
+        for (int route = -1; route < 10; ++route) {
             qInfo("Quick-paste route %d", route);
-            e.type = route == 2 ? model::EntryType::ApiToken : model::EntryType::Credentials;
+            e.type = route == -1 ? model::EntryType::PlainValue : route == 2 ? model::EntryType::ApiToken : model::EntryType::Credentials;
             e.login = "synthetic-login"; e.token = "synthetic-token";
+            e.plainValue.clear();
+            if(route==-1) {e.plainValue="192.0.2.10"; e.login.clear(); e.token.clear(); e.password.clear();}
+            else e.password="demo-password-777";
             e.reverify = route == 3;
             if (e.reverify) e.password = "synthetic-verified-password";
             QVERIFY(vault.model()->setEntry(e).isEmpty());
@@ -328,7 +331,7 @@ private slots:
             if (route == 1) panel->findChild<QPushButton*>("miniPaste")->click();
             else if (route == 2) QTest::keyClick(panel->findChild<QListWidget*>("miniEntries"), Qt::Key_Return);
             else QTest::keyClick(search, Qt::Key_Return);
-            const auto expected = (route == 1 ? e.login : route == 2 ? e.token : e.password).toUtf8().toBase64();
+            const auto expected = (route == -1 ? e.plainValue : route == 1 ? e.login : route == 2 ? e.token : e.password).toUtf8().toBase64();
             QTRY_VERIFY2_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains("TEXT " + expected),
                 qPrintable(panel->findChild<QLabel*>("miniStatus")->text()),4000);
             QTest::qWait(100); output += child.readAllStandardOutput();

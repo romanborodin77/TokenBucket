@@ -2,6 +2,7 @@
 #include "../app/Application.h"
 #include "../platform/ClipboardGuard.h"
 #include "VerifyDialog.h"
+#include "EntryLabels.h"
 #include <QApplication>
 #include <QLabel>
 #include <QLineEdit>
@@ -95,14 +96,15 @@ void MiniPanel::refill() {
     if (app_.gate() != Application::Gate::Ready || app_.busy()) return;
     for (auto id : app_.model()->search(search_->text())) {
         const auto* entry = app_.model()->entry(id);
-        if (!entry || entry->type == model::EntryType::SshKey) continue;
+        if (!entry || entry->type == model::EntryType::SshKey || entry->type == model::EntryType::TextFile) continue;
         QStringList path;
         for (auto group = entry->groupId; !group.isNull();) {
             const auto node = app_.model()->nodes().constFind(group);
             if (node == app_.model()->nodes().cend()) break;
             path.prepend(node->name); group = node->parent;
         }
-        const auto type = entry->type == model::EntryType::ApiToken ? QStringLiteral("Токен") : QStringLiteral("Логин / пароль");
+        const auto type = entry->type==model::EntryType::PlainValue?entryTypeLabel(entry->type)
+            :entry->type==model::EntryType::ApiToken?QStringLiteral("Токен"):QStringLiteral("Логин / пароль");
         auto* item = new QListWidgetItem(QStringLiteral("%1\n%2 · %3").arg(entry->title, type, path.join(" / ")), list_);
         item->setData(Qt::UserRole, id.toString());
     }
@@ -121,7 +123,7 @@ void MiniPanel::selectField() {
     auto* item = list_->currentItem();
     const auto* entry = item ? app_.model()->entry(QUuid::fromString(item->data(Qt::UserRole).toString())) : nullptr;
     if (entry) {
-        field_->addItem(entry->type == model::EntryType::ApiToken ? QStringLiteral("Токен") : QStringLiteral("Пароль"), int(paste::Field::Secret));
+        field_->addItem(entry->type == model::EntryType::PlainValue ? QStringLiteral("Значение") : entry->type == model::EntryType::ApiToken ? QStringLiteral("Токен") : QStringLiteral("Пароль"), int(paste::Field::Secret));
         if (entry->type == model::EntryType::Credentials) field_->addItem(QStringLiteral("Логин"), int(paste::Field::Login));
         const int preferred=field_->findData(int(defaultField_));
         if(preferred>=0) field_->setCurrentIndex(preferred);

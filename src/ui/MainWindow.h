@@ -66,6 +66,7 @@ public slots:
     void changeMasterPassword();
     void showAbout();
     void showSettings();
+    void openDocument(model::Id);
 #ifdef Q_OS_WIN
     void exportToEnvironment();
     void removeExportedVariables();

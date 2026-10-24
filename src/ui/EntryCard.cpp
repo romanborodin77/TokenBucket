@@ -37,6 +37,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     copyPhrase_ = new QPushButton(QStringLiteral("Копировать фразу ключа"), this);
     sshToFile_ = new QPushButton(QStringLiteral("Сохранить ключ в файл…"), this); sshToFile_->setObjectName(QStringLiteral("sshToFileButton"));
     more_ = new QPushButton(QStringLiteral("Дополнительно…"), this); more_->setObjectName(QStringLiteral("cardMore"));
+    document_=new QPushButton(QStringLiteral("Открыть строки…"),this); document_->setObjectName("textFileOpen"); layout->addWidget(document_);
     for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) layout->addWidget(button);
     layout->addWidget(more_); layout->addSpacing(10); layout->addWidget(metadata_); layout->addStretch(1);
     layout->addWidget(error_);
@@ -58,6 +59,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(sshToFile_, &QPushButton::clicked, this, &EntryCard::saveSshToFile);
     connect(edit_, &QPushButton::clicked, this, &EntryCard::editRequested);
     connect(more_, &QPushButton::clicked, this, &EntryCard::moreRequested);
+    connect(document_,&QPushButton::clicked,this,[this] {if(app_.gate()==Application::Gate::Ready && !app_.busy()) emit documentRequested(id_);});
     connect(&app_, &Application::busyChanged, this, &EntryCard::updateEnabled);
     // Инвариант: модель может быть очищена из QtConcurrent-потока (lock) — указатели на Entry
     // не живут через диалоги/циклы событий.
@@ -66,7 +68,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
 }
 void EntryCard::updateEnabled() {
     const bool allowed = app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id_);
-    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_}) button->setEnabled(allowed);
+    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_,document_}) button->setEnabled(allowed);
 }
 void EntryCard::hideNowForTest() {
     hideTimer_.stop(); const auto* entry=app_.gate()==Application::Gate::Ready?app_.model()->entry(id_):nullptr;
@@ -106,6 +108,7 @@ void EntryCard::showEntry(model::Id id) {
     if (!entry->tags.isEmpty()) flags << entry->tags.join(QStringLiteral(", "));
     flags_->setText(flags.join(QStringLiteral(" · ")));
     const bool plain=entry->type==model::EntryType::PlainValue,file=entry->type==model::EntryType::TextFile;
+    document_->setVisible(file);
     valueLabel_->setText(plain?QStringLiteral("ЗНАЧЕНИЕ"):file?QStringLiteral("ДОКУМЕНТ"):QStringLiteral("СЕКРЕТ"));
     value_->setAccessibleName(plain?QStringLiteral("Значение"):file?QStringLiteral("Сведения о документе"):QStringLiteral("Секретное значение"));
     value_->setFocusPolicy(plain && !entry->reverify?Qt::StrongFocus:Qt::NoFocus);

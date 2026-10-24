@@ -26,6 +26,7 @@ signals:
     void copyRequested(const QString& text);          // буфером владеет MainWindow (единый ClipboardGuard)
     void editRequested();
     void moreRequested();
+    void documentRequested(model::Id);
 protected:
     bool eventFilter(QObject*, QEvent*) override;     // клик мимо карточки мгновенно прячет секрет
     void changeEvent(QEvent*) override;
@@ -41,7 +42,7 @@ private:
     QLabel *title_{}, *identity_{}, *flags_{}, *metadata_{}, *error_{},*valueLabel_{};
     QPlainTextEdit* value_{};
     QPushButton *reveal_{}, *copySecret_{}, *copyLogin_{}, *copyPhrase_{}, *sshToFile_{};
-    QPushButton *edit_{}, *more_{};
+    QPushButton *edit_{}, *more_{}, *document_{};
     QTimer hideTimer_;
 };
 }

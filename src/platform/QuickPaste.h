@@ -12,12 +12,14 @@ inline const QString* fieldValue(const model::Entry& e, Field field) {
     if (e.type == model::EntryType::Credentials)
         return field == Field::Login ? &e.login : &e.password;
     if (e.type == model::EntryType::ApiToken && field == Field::Secret) return &e.token;
+    if (e.type == model::EntryType::PlainValue && field == Field::Secret) return &e.plainValue;
     return nullptr;
 }
 inline bool eligibleForAutoPaste(const model::Entry& e, Field field = Field::Secret) {
     const auto* s = fieldValue(e, field);
     return s && !s->isEmpty() && !s->contains(QLatin1Char('\n'))
-        && !s->contains(QLatin1Char('\r')) && !s->contains(QChar::Null);
+        && !s->contains(QLatin1Char('\r')) && !s->contains(QChar::Null)
+        && !s->contains(QChar(0x2028)) && !s->contains(QChar(0x2029));
 }
 #ifdef Q_OS_WIN
 // Идентичность и foreground проверяются отдельно; SendInput не даёт атомарной адресности.

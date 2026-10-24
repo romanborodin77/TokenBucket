@@ -7,6 +7,7 @@
 #include "EntryAccess.h"
 #include "EntryLabels.h"
 #include "EntryCard.h"
+#include "TextFileDialog.h"
 #include "AboutDialog.h"
 #include "../io/Import.h"
 #include "TrayController.h"
@@ -276,6 +277,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(list_, &QListWidget::itemClicked, this, &MainWindow::openCardDialog);
     connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
     connect(card_, &EntryCard::editRequested, this, &MainWindow::editSelected);
+    connect(card_,&EntryCard::documentRequested,this,&MainWindow::openDocument);
     connect(card_, &EntryCard::moreRequested, this, [this] {
         const auto* more = card_->findChild<QPushButton*>(QStringLiteral("cardMore"));
         showEntryMenu(more->mapToGlobal(QPoint(0, more->height())));
@@ -1074,6 +1076,26 @@ void MainWindow::updateSwitchActionText() {
     if (changePwAction_) changePwAction_->setVisible(app_.mode() != Application::Mode::Hello);
 }
 void MainWindow::showAbout() { ui::AboutDialog dialog(this); dialog.exec(); }
+void MainWindow::openDocument(model::Id id) {
+    if(!ready() || editing_) return;
+    const auto* e=app_.model()->entry(id); if(!e || e->type!=model::EntryType::TextFile) return;
+    QScopedValueRollback guard(editing_,true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true);
+    const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    TextFileDialog dialog(app_,id,clipboard_,this); dialog.setRevealSeconds(appliedPreferences_.revealSeconds);
+    connect(&dialog,&TextFileDialog::requestVisibilityChange,this,[this](model::Id id,int line,bool visible) {
+        commitEntry([&](model::VaultModel& model) {
+            const auto* current=model.entry(id); if(!current || current->type!=model::EntryType::TextFile) return QStringLiteral("Документ недоступен.");
+            auto changed=*current;
+            if(visible) {if(!changed.textFile.visibleLines.contains(line)) changed.textFile.visibleLines.append(line); std::sort(changed.textFile.visibleLines.begin(),changed.textFile.visibleLines.end());}
+            else changed.textFile.visibleLines.removeAll(line);
+            return model.setEntry(changed);
+        },id);
+    });
+    dialog.exec();
+}
 #ifdef Q_OS_WIN
 bool MainWindow::canExportEnv() const {
     if (!ready()) return false;
@@ -1091,7 +1113,7 @@ void MainWindow::exportToEnvironment() {
     // событий, за которые автолок или QtConcurrent-операция могут очистить модель — указатель
     // entry стал бы висячим. Дальше работаем только с копией и после каждого диалога
     // перепроверяем, что шлюз готов и поколение не сменилось (страж как в saveSshToFile).
-    const QString secret = entry->type == model::EntryType::ApiToken ? entry->token : entry->password;
+    const QString secret = *paste::fieldValue(*entry,paste::Field::Secret);
     // NUL в секрете недопустим: и env-блок CreateProcessW, и REG_SZ в реестре молча усекают
     // строку на нём — для security-фичи отказываемся явно, а не отдаём усечённое значение.
     if (secret.contains(QChar(u'\0'))) { report(QStringLiteral("Секрет содержит недопустимые символы для переменной окружения.")); return; }

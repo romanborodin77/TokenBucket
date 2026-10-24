@@ -23,6 +23,15 @@ UINT WINAPI fakeInput(UINT count, LPINPUT input, int) {
 class TestPaste : public QObject {
     Q_OBJECT
 private slots:
+    void plainValueHasItsOwnPasteField() {
+        model::Entry e; e.type=model::EntryType::PlainValue; e.plainValue="192.0.2.10"; e.token="inactive";
+        QCOMPARE(paste::fieldValue(e,paste::Field::Secret),&e.plainValue);
+        QVERIFY(paste::eligibleForAutoPaste(e)); QVERIFY(!paste::eligibleForAutoPaste(e,paste::Field::Login));
+        for(const QString value:{QString(),QString("a\nb"),QString("a\rb"),QString("a")+QChar::Null,QString("a")+QChar(0x2028),QString("a")+QChar(0x2029)}) {
+            e.plainValue=value; QVERIFY(!paste::eligibleForAutoPaste(e));
+        }
+        e.type=model::EntryType::TextFile; QVERIFY(!paste::fieldValue(e,paste::Field::Secret));
+    }
     void nullIsNotAutoPasted() {
         model::Entry e; e.type = model::EntryType::ApiToken;
         e.token = QStringLiteral("before") + QChar::Null + QStringLiteral("after");
