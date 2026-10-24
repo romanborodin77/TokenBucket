@@ -1,7 +1,10 @@
 #include <QtTest>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QDir>
+#include <QScopeGuard>
 #include <memory>
+#include <stdexcept>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <aclapi.h>
@@ -11,34 +14,114 @@
 #endif
 #include "../src/vault/VaultStore.h"
 #include "../src/platform/FileOps.h"
+#include "../src/vault/Container.h"
+#include "FaultFileOps.h"
 using namespace tb::store;
-namespace {
-struct FaultOps : FileOps {
-    bool failWrite = false;
-    int failRenameCall = 0;     // 1 = backup.tmp -> bak, 2 = tmp -> main
-    int renameCalls = 0;
-    int writeCalls = 0, corruptWriteCall = 0, failWriteCall = 0;
-    bool writeAll(const QString& p, const QByteArray& b) override {
-        ++writeCalls;
-        if (failWrite || writeCalls == failWriteCall) return false;
-        QFile f(p); if (!f.open(QIODevice::WriteOnly)) return false;
-        if (writeCalls == corruptWriteCall) return f.write("partial") == 7 && f.flush();
-        return f.write(b) == b.size() && f.flush();
-    }
-    bool renameReplace(const QString& from, const QString& to) override {
-        ++renameCalls;
-        if (renameCalls == failRenameCall) return false;
-        if (QFile::exists(to)) QFile::remove(to);   // имитация атомарной замены
-        return QFile::rename(from, to);
-    }
-    bool removeFile(const QString& p) override { return QFile::remove(p); }
-};
-}
 class TestStore : public QObject {
     Q_OBJECT
     std::unique_ptr<QTemporaryDir> dir_;
 private slots:
     void init() { dir_ = std::make_unique<QTemporaryDir>(); QVERIFY(dir_->isValid()); }
+    void restorePreservesCurrentAndBackupUntilUnlock() {
+        VaultStore store(dir_->path()); QString error;
+        QVERIFY(store.save("older",&error)); QVERIFY(store.save("current",&error));
+        const auto result=store.restoreBackup("current","older",[] {return false;});
+        QVERIFY2(result.committed,qPrintable(result.error)); QVERIFY(result.error.isEmpty());
+        QByteArray bytes;
+        QCOMPARE(store.loadBytes(store.mainPath(),&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("older"));
+        QCOMPARE(store.loadBytes(store.backupPath(),&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("older"));
+        QCOMPARE(store.loadBytes(result.safetyPath,&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("current"));
+        QVERIFY(!store.save("not-yet-unlocked",&error));
+        store.acceptVerified("older"); QVERIFY(store.save("after-unlock",&error));
+    }
+    void restoreFailures_data() {
+        QTest::addColumn<int>("fault");
+        const char* names[]={"wrong-main","changed-backup","missing-backup","oversize-backup","cancel-before-write",
+            "cancel-after-safety","cancel-before-rename","fail-safety-write","fail-candidate-write","corrupt-safety",
+            "corrupt-candidate","fail-rename","safety-collision","candidate-collision","backup-changed-after-write",
+            "main-changed-after-write","cancel-during-rename","post-commit-corruption","symlink-backup","unverified-main","missing-main","post-commit-callback-exception"};
+        for(int i=0;i<int(std::size(names));++i) QTest::newRow(names[i])<<i;
+    }
+    void restoreFailures() {
+        QFETCH(int,fault);
+        VaultStore original(dir_->path()); QString error;
+        QVERIFY(original.save("older",&error)); QVERIFY(original.save("current",&error));
+        FaultOps ops; VaultStore store(dir_->path(),ops);
+        if(fault!=19) store.acceptVerified("current");
+        bool canceled=fault==4,renamed=false; QString collided;
+        QByteArray expectedMain="current",mainAfter="current",backupAfter="older";
+        if(fault==0) expectedMain="different-main";
+        if(fault==1) {
+            QVERIFY(QFile::remove(store.backupPath())); QVERIFY(realFileOps().writeAll(store.backupPath(),"changed")); backupAfter="changed";
+        }
+        if(fault==2) QVERIFY(QFile::remove(store.backupPath()));
+        if(fault==20) QVERIFY(QFile::remove(store.mainPath()));
+        if(fault==3) {
+            QFile file(store.backupPath()); QVERIFY(file.open(QIODevice::WriteOnly)); QVERIFY(file.resize(tb::container::MaxFileBytes+1));
+        }
+        if(fault==5 || fault==6) ops.beforeWrite=[&](const QString&) {if(ops.writeCalls==(fault==5?1:2)) canceled=true;};
+        if(fault==7 || fault==8) ops.failWriteCall=fault==7?1:2;
+        if(fault==9 || fault==10) ops.corruptWriteCall=fault==9?1:2;
+        if(fault==11) ops.failRenameCall=1;
+        if(fault==12 || fault==13) ops.beforeWrite=[&](const QString& path) {
+            if(ops.writeCalls==(fault==12?1:2)) {collided=path; QVERIFY(realFileOps().writeAll(path,"foreign-collision"));}
+        };
+        if(fault==14 || fault==15) {
+            ops.beforeWrite=[&](const QString&) {
+                if(ops.writeCalls==2) {
+                    const auto path=fault==14?store.backupPath():store.mainPath();
+                    QVERIFY(QFile::remove(path)); QVERIFY(realFileOps().writeAll(path,"external-change"));
+                }
+            };
+            if(fault==14) backupAfter="external-change"; else mainAfter="external-change";
+        }
+        if(fault==16) {ops.beforeRename=[&](const QString&,const QString&) {canceled=true;}; mainAfter="older";}
+        if(fault==17) {
+            ops.afterRename=[&](const QString&,const QString& path) {QVERIFY(QFile::remove(path)); QVERIFY(realFileOps().writeAll(path,"post-commit"));};
+            mainAfter="post-commit";
+        }
+        if(fault==21) {ops.afterRename=[&](const QString&,const QString&) {renamed=true;}; mainAfter="older";}
+        if(fault==18) {
+            const auto target=dir_->filePath("linked-backup.tb"); QVERIFY(QFile::rename(store.backupPath(),target));
+#ifdef Q_OS_WIN
+            QVERIFY2(CreateSymbolicLinkW(reinterpret_cast<LPCWSTR>(store.backupPath().utf16()),
+                reinterpret_cast<LPCWSTR>(target.utf16()),SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE),"File symlink creation requires Windows Developer Mode or symlink privilege");
+#else
+            QVERIFY(QFile::link(target,store.backupPath()));
+#endif
+        }
+        const auto result=store.restoreBackup(expectedMain,"older",[&] {
+            if(fault==21 && renamed) throw std::runtime_error("synthetic post-commit exception");
+            return canceled;
+        });
+        QCOMPARE(result.committed,fault==16 || fault==17 || fault==21); QVERIFY(!result.error.isEmpty());
+        QByteArray bytes;
+        if(fault==20) QCOMPARE(store.loadBytes(store.mainPath(),&bytes),VaultStore::Load::Missing);
+        else {QCOMPARE(store.loadBytes(store.mainPath(),&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,mainAfter);}
+        if(fault==2) QCOMPARE(store.loadBytes(store.backupPath(),&bytes),VaultStore::Load::Missing);
+        else if(fault==3) QCOMPARE(QFileInfo(store.backupPath()).size(),tb::container::MaxFileBytes+1);
+        else if(fault==18) QCOMPARE(store.loadBytes(store.backupPath(),&bytes),VaultStore::Load::IoError);
+        else {QCOMPARE(store.loadBytes(store.backupPath(),&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,backupAfter);}
+        if(!collided.isEmpty()) {QFile file(collided); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(),QByteArray("foreign-collision"));}
+        const auto leftovers=QDir(dir_->path()).entryList({"vault.tb.restore-*.tmp"},QDir::Files);
+        QCOMPARE(leftovers.size(),fault==13?1:0);
+        if(!result.safetyPath.isEmpty()) {
+            QCOMPARE(store.loadBytes(result.safetyPath,&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("current"));
+        }
+        ops=FaultOps{};
+        if(!result.committed && fault!=15 && fault!=18 && fault!=19 && fault!=20) QVERIFY2(store.save("after-failure",&error),qPrintable(error));
+    }
+    void repeatedRestoreRequiresVerificationAndKeepsBothSafetyFiles() {
+        VaultStore store(dir_->path()); QString error;
+        QVERIFY(store.save("older",&error)); QVERIFY(store.save("current",&error));
+        const auto first=store.restoreBackup("current","older",[] {return false;}); QVERIFY(first.committed);
+        QVERIFY(!store.restoreBackup("older","older",[] {return false;}).committed);
+        store.acceptVerified("older");
+        const auto second=store.restoreBackup("older","older",[] {return false;}); QVERIFY(second.committed);
+        QVERIFY(first.safetyPath!=second.safetyPath);
+        QByteArray bytes; QCOMPARE(store.loadBytes(first.safetyPath,&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("current"));
+        QCOMPARE(store.loadBytes(second.safetyPath,&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("older"));
+    }
     void saveCreatesMainAndRotatesBackup() {
         VaultStore s(dir_->path());
         QString err;
@@ -139,9 +222,24 @@ private slots:
         QCOMPARE(store.loadBytes(store.backupPath(), &data), VaultStore::Load::Ok); QCOMPARE(data, QByteArray("first"));
         QVERIFY(!QFile::exists(store.tmpPath()));
     }
+    void windowsHeldMainPreventsRestoreWithoutLosingSafety() {
+        VaultStore store(dir_->path()); QString error;
+        QVERIFY(store.save("older",&error)); QVERIFY(store.save("current",&error));
+        HANDLE file=CreateFileW(reinterpret_cast<LPCWSTR>(store.mainPath().utf16()),GENERIC_READ,
+            FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        QVERIFY(file!=INVALID_HANDLE_VALUE);
+        const auto close=qScopeGuard([&] {CloseHandle(file);});
+        const auto result=store.restoreBackup("current","older",[] {return false;});
+        QVERIFY(!result.committed); QVERIFY(!result.error.isEmpty()); QVERIFY(!result.safetyPath.isEmpty());
+        QByteArray bytes; QCOMPARE(store.loadBytes(store.mainPath(),&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("current"));
+        QCOMPARE(store.loadBytes(store.backupPath(),&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("older"));
+        QCOMPARE(store.loadBytes(result.safetyPath,&bytes),VaultStore::Load::Ok); QCOMPARE(bytes,QByteArray("current"));
+        QVERIFY(QDir(dir_->path()).entryList({"vault.tb.restore-*.tmp"},QDir::Files).isEmpty());
+    }
     void windowsProtectedDacl() {
         VaultStore store(dir_->path()); QString err;
         QVERIFY(store.save("first", &err)); QVERIFY(store.save("second", &err));
+        const auto restored=store.restoreBackup("second","first",[] {return false;}); QVERIFY2(restored.committed,qPrintable(restored.error));
         HANDLE token = nullptr;
         QVERIFY(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
         DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
@@ -149,7 +247,7 @@ private slots:
         const bool tokenOk = GetTokenInformation(token, TokenUser, data.data(), size, &size);
         CloseHandle(token); QVERIFY(tokenOk);
         const PSID user = reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid;
-        for (const auto& path : {dir_->path(), store.mainPath(), store.backupPath()}) {
+        for (const auto& path : {dir_->path(), store.mainPath(), store.backupPath(),restored.safetyPath}) {
             PACL acl = nullptr; PSECURITY_DESCRIPTOR sd = nullptr;
             QCOMPARE(GetNamedSecurityInfoW(const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(path.utf16())),
                 SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &acl, nullptr, &sd), DWORD(ERROR_SUCCESS));
