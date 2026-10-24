@@ -8,16 +8,219 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
+#include <QDir>
+#include <QScopeGuard>
 #include "../src/app/Application.h"
 #include "../src/ui/SetupDialog.h"
 #include "../src/ui/UnlockDialog.h"
 #include "../src/vault/Container.h"
 #include "../src/vault/Crypto.h"
+#include "FaultFileOps.h"
 using namespace tb;
 class TestApp : public QObject {
     Q_OBJECT
     QTemporaryDir dir_;
+    static QByteArray readFile(const QString& path) {
+        QFile file(path); if(!file.open(QIODevice::ReadOnly)) return {}; return file.readAll();
+    }
 private slots:
+    void backupUsesItsOldPasswordAndSafetyUsesCurrentPassword() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.switchToPassword("new-valid-password",&error));
+        const auto current=readFile(app.storePathForTest()); QVERIFY(!current.isEmpty());
+        QVERIFY(!app.prepareBackupRestore("new-valid-password",&error));
+        QCOMPARE(readFile(app.storePathForTest()),current); QVERIFY(app.checkPassword("new-valid-password",&error));
+        QVERIFY(app.prepareBackupRestore("valid-password",&error));
+        const auto result=app.restorePreparedBackup(); QVERIFY2(result.committed,qPrintable(result.error));
+        QVERIFY(!app.unlock("new-valid-password",&error)); QVERIFY(app.unlock("valid-password",&error));
+        const auto safety=readFile(result.safetyPath); QCOMPARE(safety,current);
+        QTemporaryDir recovered; QVERIFY(store::ensurePrivateDir(recovered.path()));
+        QVERIFY(store::realFileOps().writeAll(recovered.filePath("vault.tb"),safety));
+        Application safetyApp(recovered.path()); QVERIFY(safetyApp.unlock("new-valid-password",&error));
+        QCOMPARE(safetyApp.model()->nodes().size(),1); QVERIFY(safetyApp.save(&error));
+    }
+    void backupPreparationFailures_data() {
+        QTest::addColumn<int>("fault");
+        const char* names[]={"wrong-password","damaged-aead","invalid-cbor","oversize","bad-header","backup-swapped",
+            "explicit-cancel","cancel-during-prepare","lock-during-prepare","lock-after-prepare","busy-reentry","main-swapped"};
+        for(int i=0;i<int(std::size(names));++i) QTest::newRow(names[i])<<i;
+    }
+    void backupPreparationFailures() {
+        QFETCH(int,fault);
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        const auto path=app.storePathForTest(),backup=path+".bak";
+        const auto before=readFile(path),model=app.model()->toCbor(); QVERIFY(!before.isEmpty());
+        const auto replace=[&](const QString& file,const QByteArray& bytes) {
+            return QFile::remove(file) && store::realFileOps().writeAll(file,bytes);
+        };
+        if(fault==1) {auto damaged=readFile(backup); damaged[damaged.size()-1]^=char(1); QVERIFY(replace(backup,damaged));}
+        if(fault==2) {
+            const auto bad=container::packPassword("valid-password",QByteArray(1,char(0xff)),nullptr); QVERIFY(!bad.isEmpty()); QVERIFY(replace(backup,bad));
+        }
+        if(fault==3) {QFile file(backup); QVERIFY(file.open(QIODevice::WriteOnly)); QVERIFY(file.resize(container::MaxFileBytes+1));}
+        if(fault==4) QVERIFY(replace(backup,"bad-header"));
+        if(fault==3 || fault==4) {
+            QCOMPARE(app.backupMode(&error),Application::Mode::None); QVERIFY(!error.isEmpty());
+        }
+        bool timerRan=false;
+        if(fault==7 || fault==8 || fault==10) QTimer::singleShot(0,&app,[&] {
+            timerRan=true;
+            if(fault==7) app.cancelBackupRestore();
+            else if(fault==8) app.lock();
+            else {
+                QString nested; QVERIFY(!app.prepareBackupRestore("valid-password",&nested)); QVERIFY(!nested.isEmpty());
+                QCOMPARE(app.backupMode(&nested),Application::Mode::None); QVERIFY(!nested.isEmpty());
+                QVERIFY(!app.restorePreparedBackup().committed);
+            }
+        });
+        const bool prepared=app.prepareBackupRestore(fault==0?QByteArray("wrong-password-789"):QByteArray("valid-password"),&error);
+        if(fault==7 || fault==8 || fault==10) QVERIFY(timerRan);
+        const bool shouldPrepare=fault==5 || fault==6 || fault==9 || fault==10 || fault==11;
+        QCOMPARE(prepared,shouldPrepare);
+        if(!prepared) QVERIFY(!error.isEmpty());
+        if(fault==10) {
+            QCOMPARE(app.model()->toCbor(),model); QCOMPARE(readFile(path),before);
+            QVERIFY(app.checkPassword("valid-password",&error)); app.cancelBackupRestore();
+        }
+        if(fault==5) {auto changed=readFile(backup); changed[changed.size()-1]^=char(1); QVERIFY(replace(backup,changed));}
+        if(fault==6) app.cancelBackupRestore();
+        if(fault==9) app.lock();
+        QByteArray expected=before;
+        if(fault==11) {expected[expected.size()-1]^=char(1); QVERIFY(replace(path,expected));}
+        const auto result=app.restorePreparedBackup(); QVERIFY(!result.committed); QVERIFY(!result.error.isEmpty());
+        QCOMPARE(readFile(path),expected); QVERIFY(!app.busy());
+        if(fault==8 || fault==9) {
+            QCOMPARE(app.gate(),Application::Gate::NeedUnlock); QVERIFY(app.model()->nodes().isEmpty());
+            QVERIFY(app.unlock("valid-password",&error));
+        } else {QCOMPARE(app.gate(),Application::Gate::Ready); QCOMPARE(app.model()->toCbor(),model);}
+        if(fault==0 || fault==6 || fault==7 || fault==8 || fault==9) {
+            QVERIFY(app.prepareBackupRestore("valid-password",&error)); QVERIFY(app.restorePreparedBackup().committed);
+        }
+    }
+    void backupCommitFailures_data() {
+        QTest::addColumn<int>("fault");
+        QTest::newRow("safety-write")<<0; QTest::newRow("rename")<<1;
+        QTest::newRow("lock-before-candidate")<<2; QTest::newRow("lock-during-rename")<<3;
+        QTest::newRow("cancel-during-rename")<<4; QTest::newRow("post-commit-corruption")<<5; QTest::newRow("success")<<6;
+    }
+    void backupCommitFailures() {
+        QFETCH(int,fault);
+        QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        const auto before=readFile(app.storePathForTest()),backup=readFile(app.storePathForTest()+".bak");
+        QVERIFY(app.prepareBackupRestore("valid-password",&error));
+        QCOMPARE(readFile(app.storePathForTest()),before); QCOMPARE(app.model()->nodes().size(),2);
+        ops=FaultOps{}; bool callbackRan=false,callbackOnWorker=false;
+        const auto interrupt=[&] {
+            callbackRan=true; callbackOnWorker=QThread::currentThread()!=qApp->thread();
+            QVERIFY(callbackOnWorker);
+            QVERIFY(QMetaObject::invokeMethod(&app,[&] {if(fault==4) app.cancelBackupRestore(); else app.lock();},Qt::BlockingQueuedConnection));
+        };
+        if(fault==0) ops.failWriteCall=1;
+        if(fault==1) ops.failRenameCall=1;
+        if(fault==2) ops.beforeWrite=[&](const QString&) {if(ops.writeCalls==2) interrupt();};
+        if(fault==3 || fault==4) ops.beforeRename=[&](const QString&,const QString&) {interrupt();};
+        if(fault==5) ops.afterRename=[&](const QString&,const QString& path) {
+            QVERIFY(QFile::remove(path)); QVERIFY(store::realFileOps().writeAll(path,"post-commit-corruption"));
+        };
+        const auto result=app.restorePreparedBackup(); const bool committed=fault>=3;
+        QCOMPARE(result.committed,committed); QCOMPARE(result.error.isEmpty(),fault==6); QVERIFY(!app.busy());
+        if(fault>=2 && fault<=4) {QVERIFY(callbackRan); QVERIFY(callbackOnWorker);}
+        QCOMPARE(readFile(app.storePathForTest()+".bak"),backup);
+        QCOMPARE(readFile(app.storePathForTest()),fault==5?QByteArray("post-commit-corruption"):committed?backup:before);
+        QCOMPARE(app.gate(),fault>=2?Application::Gate::NeedUnlock:Application::Gate::Ready);
+        if(fault>=2) QVERIFY(app.model()->nodes().isEmpty());
+        if(!result.safetyPath.isEmpty()) QCOMPARE(readFile(result.safetyPath),before);
+        ops=FaultOps{};
+        if(fault==0 || fault==1 || fault==2) {
+            if(app.gate()==Application::Gate::NeedUnlock) QVERIFY(app.unlock("valid-password",&error));
+            QVERIFY(app.prepareBackupRestore("valid-password",&error)); QVERIFY(app.restorePreparedBackup().committed);
+        }
+        if(fault!=5) {QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->nodes().size(),1); QVERIFY(app.save(&error));}
+    }
+#ifdef Q_OS_WIN
+    void canceledHelloBackupCannotRecreateAuthorization_data() {
+        QTest::addColumn<bool>("lockSession"); QTest::newRow("cancel-only")<<false; QTest::newRow("lock")<<true;
+    }
+    void canceledHelloBackupCannotRecreateAuthorization() {
+        QFETCH(bool,lockSession);
+        QTemporaryDir dir; QSemaphore release;
+        std::atomic<bool> block{false},entered{false},onWorker{false};
+        Application app(dir.path(),nullptr,[&](void*,const QString&) {
+            onWorker=QThread::currentThread()!=qApp->thread();
+            if(block) {
+                if(!onWorker) return platform::hello::Result::Failed;
+                entered=true; release.acquire();
+            }
+            return platform::hello::Result::Verified;
+        });
+        QString error; QVERIFY(app.createHelloVault(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        const auto before=readFile(app.storePathForTest()); block=true;
+        QTimer driver; driver.setInterval(1);
+        connect(&driver,&QTimer::timeout,&app,[&] {
+            if(entered) {driver.stop(); if(lockSession) app.lock(); else app.cancelBackupRestore(); release.release();}
+        });
+        driver.start(); QVERIFY(!app.prepareHelloBackupRestore(nullptr,&error)); driver.stop(); block=false;
+        QVERIFY(entered); QVERIFY(onWorker); QVERIFY(!error.isEmpty()); QVERIFY(!app.busy());
+        QVERIFY(!app.restorePreparedBackup().committed); QCOMPARE(readFile(app.storePathForTest()),before);
+        QCOMPARE(app.gate(),lockSession?Application::Gate::NeedUnlock:Application::Gate::Ready);
+        if(lockSession) QVERIFY(app.unlockHello(&error));
+        QVERIFY(app.prepareHelloBackupRestore(nullptr,&error)); QVERIFY(app.restorePreparedBackup().committed);
+        QVERIFY(app.unlockHello(&error)); QCOMPARE(app.model()->nodes().size(),1);
+    }
+    void backupCanUseDifferentUnlockMode_data() {
+        QTest::addColumn<bool>("helloBackup"); QTest::newRow("hello-copy-password-current")<<true; QTest::newRow("password-copy-hello-current")<<false;
+    }
+    void backupCanUseDifferentUnlockMode() {
+        QFETCH(bool,helloBackup);
+        QTemporaryDir dir; std::atomic<platform::hello::Result> answer{platform::hello::Result::Verified};
+        Application app(dir.path(),nullptr,[&](void*,const QString&) {return answer.load();}); QString error;
+        if(helloBackup) QVERIFY(app.createHelloVault(&error)); else QVERIFY(app.createPasswordVault("valid-password",&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        if(helloBackup) QVERIFY(app.switchToPassword("valid-password",&error)); else QVERIFY(app.switchToHello(&error));
+        QCOMPARE(app.backupMode(&error),helloBackup?Application::Mode::Hello:Application::Mode::Password);
+        const auto before=readFile(app.storePathForTest());
+        if(helloBackup) {
+            QVERIFY(!app.prepareBackupRestore("valid-password",&error)); answer=platform::hello::Result::Canceled;
+            QVERIFY(!app.prepareHelloBackupRestore(nullptr,&error)); QCOMPARE(readFile(app.storePathForTest()),before);
+            answer=platform::hello::Result::Verified; QVERIFY(app.prepareHelloBackupRestore(nullptr,&error));
+        } else {QVERIFY(!app.prepareHelloBackupRestore(nullptr,&error)); QVERIFY(app.prepareBackupRestore("valid-password",&error));}
+        const auto result=app.restorePreparedBackup(); QVERIFY2(result.committed,qPrintable(result.error)); QVERIFY(result.error.isEmpty());
+        QCOMPARE(app.unlockMode(),helloBackup?Application::Mode::Hello:Application::Mode::Password);
+        if(helloBackup) QVERIFY(app.unlockHello(&error)); else QVERIFY(app.unlock("valid-password",&error));
+        QCOMPARE(app.model()->nodes().size(),1); QVERIFY(app.save(&error));
+    }
+#endif
+    void authenticatedBackupRestoresAndRequiresUnlock() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group,{},"Original").isEmpty()); QVERIFY(app.save(&error));
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(app.save(&error));
+        QCOMPARE(app.backupMode(&error),Application::Mode::Password);
+        QVERIFY(!app.restorePreparedBackup().committed);
+        QVERIFY2(app.prepareBackupRestore("valid-password",&error),qPrintable(error));
+        const auto result=app.restorePreparedBackup();
+        QVERIFY2(result.committed,qPrintable(result.error)); QVERIFY(result.error.isEmpty());
+        QCOMPARE(app.gate(),Application::Gate::NeedUnlock); QVERIFY(app.model()->nodes().isEmpty());
+        QVERIFY(app.unlock("valid-password",&error));
+        QCOMPARE(app.model()->nodes().size(),1); QCOMPARE(app.model()->nodes().value(group).name,QStringLiteral("Original"));
+        QVERIFY(app.save(&error));
+    }
     void initTestCase() {
 #ifdef Q_OS_WIN
         qputenv("QT_QPA_FONTDIR", qEnvironmentVariable("WINDIR").toUtf8() + "/Fonts");

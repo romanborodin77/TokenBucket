@@ -118,7 +118,7 @@ std::optional<PreparedBackup> preparedBackup_;
 
 Для выбора первого запроса пароля/Hello backupMode выполняет строгое ограниченное чтение в worker через действующий waitFor/busy, возвращает None с причиной при ошибке/невалидном заголовке/изменении поколения. Он не пишет файлы и не готовит авторизованного кандидата. BackupInfo остаётся только метаданными A3. Заголовок — подсказка выбора способа, не проверка содержимого. Точная авторизация выполняется prepare*; режим копии может отличаться от текущего. Если файл сменился между подсказкой и prepare, фактическая проверка выбранного режима должна отказать.
 
-- [ ] **1. RED:** настоящий парольный контейнер, две версии модели, затем восстановление:
+- [x] **1. RED:** настоящий парольный контейнер, две версии модели, затем восстановление:
 
 ```cpp
 QTemporaryDir dir;
@@ -142,8 +142,8 @@ QCOMPARE(app.model()->nodes().value(group).name, QStringLiteral("Original"));
 QVERIFY(app.save(&error));
 ```
 
-- [ ] **2. Проверить RED:** test_app. Дополнить подготовкой с неверным/старым паролем после switchToPassword; валидной AEAD с невалидным CBOR; большим/битым/подменённым кандидатом; canceled prepare; повторным prepare/restore при busy; lock до фиксации и во время финальной замены; подтверждением, что prepare не меняет main/file_/verified/модель. Для гонки финальной замены в Application нужен существующий FileOps seam: добавить необязательный последний аргумент конструктора `store::FileOps& ops = store::realFileOps()` после HelloRequest на Windows, после parent на других платформах. Передать его Store; прежние вызовы совместимы. В тесте — FaultOps из B1 с настоящими временными файлами, а не новый публичный тестовый метод. Callback финального rename из worker вызывает `Application::lock` через BlockingQueuedConnection; GUI обслуживает этот вызов своим waitFor, поэтому гонка воспроизводится до возврата rename. Callback не исполнять с BlockingQueuedConnection на том же GUI-потоке.
-- [ ] **3. Реализация:** подготовка проверяет Ready/!busy, сбрасывает прежнего кандидата, снимает generation и строгие снимки; KDF/AEAD/fromCbor выполняются QtConcurrent с прежним локальным ожиданием. Использовать SecureBytes для пароля/открытого CBOR; подготовленный объект хранит только шифротекст/режим/поколение. После ожидания проверяются gate/generation; кандидат принимается только при успехе. Нельзя передать кандидат через Outcome.file текущего execute: тот меняет file_ даже при adopt=false. Использовать отдельный узкий результат подготовки с тем же waitFor/busy и guard сброса busy/пароля на каждом выходе.
+- [x] **2. Проверить RED:** test_app. Дополнить подготовкой с неверным/старым паролем после switchToPassword; валидной AEAD с невалидным CBOR; большим/битым/подменённым кандидатом; canceled prepare; повторным prepare/restore при busy; lock до фиксации и во время финальной замены; подтверждением, что prepare не меняет main/file_/verified/модель. Для гонки финальной замены в Application нужен существующий FileOps seam: добавить необязательный последний аргумент конструктора `store::FileOps& ops = store::realFileOps()` после HelloRequest на Windows, после parent на других платформах. Передать его Store; прежние вызовы совместимы. В тесте — FaultOps из B1 с настоящими временными файлами, а не новый публичный тестовый метод. Callback финального rename из worker вызывает `Application::lock` через BlockingQueuedConnection; GUI обслуживает этот вызов своим waitFor, поэтому гонка воспроизводится до возврата rename. Callback не исполнять с BlockingQueuedConnection на том же GUI-потоке.
+- [x] **3. Реализация:** подготовка проверяет Ready/!busy, сбрасывает прежнего кандидата, снимает generation и строгие снимки; KDF/AEAD/fromCbor выполняются QtConcurrent с прежним локальным ожиданием. Использовать SecureBytes для пароля/открытого CBOR; подготовленный объект хранит только шифротекст/режим/поколение. После ожидания проверяются gate/generation; кандидат принимается только при успехе. Нельзя передать кандидат через Outcome.file текущего execute: тот меняет file_ даже при adopt=false. Использовать отдельный узкий результат подготовки с тем же waitFor/busy и guard сброса busy/пароля на каждом выходе.
 
 ```cpp
 if (!canStart(Gate::Ready, error)) return false;
@@ -154,8 +154,8 @@ const auto expected = generation();
 ```
 
 restorePreparedBackup потребляет кандидат один раз, проверяет mode/generation/Ready и делает B1 с callback сравнения generation. Успешная замена обновляет hint_ по проверенному режиму и всегда вызывает lock; ключ/модель старого сеанса уничтожаются. При lock, совпавшем с rename, committed сохраняется истинным, gate остаётся NeedUnlock и сообщение описывает совершённую замену без возвращения Ready. Никакое private acceptVerified не вызывается до полноценной последующей unlock. Отказ до фиксации оставляет Ready только если пользователь сам не заблокировал приложение. lock и cancelBackupRestore уничтожают подготовленный снимок.
-- [ ] **4. GREEN:** test_app/test_store и прежние password/Hello/lateHello/save tests. Windows Hello — внедрённый HelloRequest и собственный тестовый контейнер; не биометрия владельца. Проверить восстановление копии другого режима и необходимость её старого пароля, повторную попытку после ошибки, работоспособность последующего save и возврат к зашифрованной страховочной копии в новом временном Application.
-- [ ] **5. Commit:** `Authenticate backup restoration without reopening a stale session`.
+- [x] **4. GREEN:** test_app/test_store и прежние password/Hello/lateHello/save tests. Windows Hello — внедрённый HelloRequest и собственный тестовый контейнер; не биометрия владельца. Проверить восстановление копии другого режима и необходимость её старого пароля, повторную попытку после ошибки, работоспособность последующего save и возврат к зашифрованной страховочной копии в новом временном Application.
+- [x] **5. Commit:** `Authenticate backup restoration without reopening a stale session`.
 
 ### Task 3: B3. Подтверждение в настройках и полный маршрут
 

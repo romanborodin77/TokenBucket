@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <atomic>
+#include <optional>
 #include "../model/VaultModel.h"
 #include "../vault/SecureBytes.h"
 #include "../vault/VaultStore.h"
@@ -31,12 +32,20 @@ public:
         QDateTime modified;
     };
     BackupInfo backupInfo() const;
+    Mode backupMode(QString* error);
+    bool prepareBackupRestore(const QByteArray& backupPassword,QString* error);
+#ifdef Q_OS_WIN
+    bool prepareHelloBackupRestore(void* hwnd,QString* error);
+#endif
+    void cancelBackupRestore();
+    store::RestoreResult restorePreparedBackup();
 #ifdef Q_OS_WIN
     using HelloRequest = std::function<platform::hello::Result(void*, const QString&)>;
     explicit Application(const QString& dataDir, QObject* parent = nullptr,
-                         HelloRequest hello = platform::hello::request);
+                         HelloRequest hello = platform::hello::request,
+                         store::FileOps& ops=store::realFileOps());
 #else
-    explicit Application(const QString& dataDir, QObject* parent = nullptr);
+    explicit Application(const QString& dataDir, QObject* parent = nullptr,store::FileOps& ops=store::realFileOps());
 #endif
     Gate gate() const { return gate_; }
     Mode mode() const { return mode_; }
@@ -68,6 +77,14 @@ signals:
     void busyChanged(bool busy);
 private:
     struct Outcome;
+    struct PreparedBackup {
+        QByteArray main,backup;
+        Mode mode=Mode::None;
+        quint64 generation=0,request=0;
+    };
+    std::optional<PreparedBackup> preparedBackup_;
+    std::atomic<quint64> backupRequest_{0};
+    bool prepareBackup(Mode mode,const QByteArray& password,void* hwnd,QString* error);
     // Запуск job в QtConcurrent с модальным прогрессом и применением результата в
     // GUI-потоке: adopt=true — операция переводит хранилище в Ready (создание/
     // разблокировка/импорт/смена режима), false — только сохранение поверх текущего.

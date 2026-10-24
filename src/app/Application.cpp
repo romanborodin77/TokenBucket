@@ -5,6 +5,7 @@
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QFileInfo>
+#include <QScopeGuard>
 #include <stdexcept>
 namespace tb {
 Application::BackupInfo Application::backupInfo() const {
@@ -45,10 +46,10 @@ struct Application::Outcome {
     }
 };
 #ifdef Q_OS_WIN
-Application::Application(const QString& dir, QObject* parent, HelloRequest hello)
-    : QObject(parent), store_(dir), hello_(std::move(hello)) {
+Application::Application(const QString& dir, QObject* parent, HelloRequest hello,store::FileOps& ops)
+    : QObject(parent), store_(dir,ops), hello_(std::move(hello)) {
 #else
-Application::Application(const QString& dir, QObject* parent) : QObject(parent), store_(dir) {
+Application::Application(const QString& dir, QObject* parent,store::FileOps& ops) : QObject(parent), store_(dir,ops) {
 #endif
     if (!crypto::init()) throw std::runtime_error("Не удалось инициализировать криптографию.");
     const auto initial = waitFor(QtConcurrent::run([this] {
@@ -61,6 +62,119 @@ Application::Application(const QString& dir, QObject* parent) : QObject(parent),
     hint_ = initial.second == container::ModeHello ? Mode::Hello : Mode::Password;
 }
 bool Application::validPassword(const QByteArray& pw) { return pw.size() >= 12 && pw.size() <= 1024 && pw.isValidUtf8(); }
+Application::Mode Application::backupMode(QString* error) {
+    if(!canStart(Gate::Ready,error)) return Mode::None;
+    const auto expected=generation();
+    struct Header {Mode mode=Mode::None; QString error;};
+    auto result=std::make_shared<Header>();
+    busy_=true;
+    const auto done=qScopeGuard([&] {busy_=false; emit busyChanged(false);});
+    emit busyChanged(true);
+    try {waitFor(QtConcurrent::run([this,result] {
+        QByteArray bytes;
+        if(store_.loadBytes(store_.backupPath(),&bytes)!=store::VaultStore::Load::Ok) {
+            result->error=QStringLiteral("Резервная копия недоступна."); return false;
+        }
+        const auto mode=container::readMode(bytes);
+        if(mode==container::ModePassword) result->mode=Mode::Password;
+        else if(mode==container::ModeHello) result->mode=Mode::Hello;
+        else result->error=QStringLiteral("Неподдерживаемый или повреждённый заголовок резервной копии.");
+        return result->mode!=Mode::None;
+    }));} catch(...) {result->error=QStringLiteral("Не удалось прочитать резервную копию.");}
+    if(generation()!=expected || gate_!=Gate::Ready) result->error=QStringLiteral("Чтение копии отменено блокировкой.");
+    if(error) *error=result->error;
+    return result->error.isEmpty()?result->mode:Mode::None;
+}
+bool Application::prepareBackupRestore(const QByteArray& password,QString* error) {
+    return prepareBackup(Mode::Password,password,nullptr,error);
+}
+#ifdef Q_OS_WIN
+bool Application::prepareHelloBackupRestore(void* hwnd,QString* error) {
+    return prepareBackup(Mode::Hello,{},hwnd,error);
+}
+#endif
+void Application::cancelBackupRestore() {preparedBackup_.reset(); ++backupRequest_;}
+bool Application::prepareBackup(Mode mode,const QByteArray& password,void* hwnd,QString* error) {
+    if(!canStart(Gate::Ready,error)) return false;
+    cancelBackupRestore();
+    if(mode==Mode::Password && !validPassword(password)) return fail(error,"Недопустимый пароль резервной копии.");
+    const auto expected=generation(),request=backupRequest_.load(); const auto current=file_;
+    struct Preparation {PreparedBackup snapshot; QString error; bool ok=false;};
+    auto result=std::make_shared<Preparation>(); auto secret=std::make_shared<SecureBytes>(password);
+    busy_=true;
+    const auto done=qScopeGuard([&] {secret->clear(); busy_=false; emit busyChanged(false);});
+    emit busyChanged(true);
+    try {waitFor(QtConcurrent::run([this,result,secret,current,expected,request,mode,hwnd] {
+        const auto canceled=[&] {return generation()!=expected || backupRequest_.load()!=request;};
+        auto& snapshot=result->snapshot;
+        if(canceled()) return false;
+        if(store_.loadBytes(store_.mainPath(),&snapshot.main)!=store::VaultStore::Load::Ok || snapshot.main!=current) {
+            result->error=QStringLiteral("Основной файл изменился или недоступен. Откройте хранилище заново."); return false;
+        }
+        if(store_.loadBytes(store_.backupPath(),&snapshot.backup)!=store::VaultStore::Load::Ok) {
+            result->error=QStringLiteral("Резервная копия недоступна."); return false;
+        }
+        const auto actual=container::readMode(snapshot.backup);
+        if(actual!=(mode==Mode::Password?container::ModePassword:container::ModeHello)) {
+            result->error=QStringLiteral("Способ разблокировки копии изменился или её заголовок повреждён. Повторите действие."); return false;
+        }
+#ifdef Q_OS_WIN
+        if(mode==Mode::Hello && hello_(hwnd,QStringLiteral("Подтвердите восстановление резервной копии TokenBucket"))!=platform::hello::Result::Verified) {
+            result->error=QStringLiteral("Проверка Windows Hello не выполнена."); return false;
+        }
+#else
+        Q_UNUSED(hwnd);
+        if(mode==Mode::Hello) {result->error=QStringLiteral("Копия Windows Hello требует Windows."); return false;}
+#endif
+        if(canceled()) return false;
+        Outcome validation;
+        bool opened=false;
+        if(mode==Mode::Password) opened=validation.open(container::openPassword(snapshot.backup,secret->bytes()));
+#ifdef Q_OS_WIN
+        else opened=validation.open(container::openHello(snapshot.backup));
+#endif
+        secret->clear();
+        if(!opened) {result->error=validation.error; return false;}
+        snapshot.mode=mode; snapshot.generation=expected; snapshot.request=request;
+        result->ok=!canceled(); return result->ok;
+    }));} catch(...) {result->error=QStringLiteral("Не удалось проверить резервную копию.");}
+    if(generation()!=expected || backupRequest_.load()!=request || gate_!=Gate::Ready)
+        result->error=QStringLiteral("Подготовка восстановления отменена.");
+    if(!result->ok || !result->error.isEmpty()) {
+        if(error) *error=result->error.isEmpty()?QStringLiteral("Подготовка восстановления отменена."):result->error;
+        return false;
+    }
+    preparedBackup_=std::move(result->snapshot);
+    if(error) error->clear(); return true;
+}
+store::RestoreResult Application::restorePreparedBackup() {
+    QString error;
+    if(!canStart(Gate::Ready,&error)) return {false,{},error};
+    if(!preparedBackup_) return {false,{},QStringLiteral("Сначала проверьте резервную копию.")};
+    auto prepared=std::move(*preparedBackup_); preparedBackup_.reset();
+    if(prepared.generation!=generation() || prepared.request!=backupRequest_.load() || prepared.mode==Mode::None)
+        return {false,{},QStringLiteral("Подготовка восстановления устарела.")};
+    // Состояние commit живёт вне future и сохраняется при поздней ошибке ожидания.
+    auto result=std::make_shared<store::RestoreResult>();
+    busy_=true;
+    const auto done=qScopeGuard([&] {busy_=false; emit busyChanged(false);});
+    emit busyChanged(true);
+    try {waitFor(QtConcurrent::run([this,prepared,result] {
+        *result=store_.restoreBackup(prepared.main,prepared.backup,[&] {
+            return generation()!=prepared.generation || backupRequest_.load()!=prepared.request;
+        });
+        return true;
+    }));} catch(...) {
+        result->error=result->committed?QStringLiteral("Файл восстановлен, но завершить операцию не удалось. Сеанс будет заблокирован.")
+            :QStringLiteral("Не удалось выполнить восстановление.");
+    }
+    const bool interrupted=generation()!=prepared.generation || backupRequest_.load()!=prepared.request;
+    if(result->committed) {
+        hasVault_=true; hint_=prepared.mode; lock();
+        if(interrupted && result->error.isEmpty()) result->error=QStringLiteral("Копия восстановлена. Сеанс остаётся заблокированным после отмены.");
+    }
+    return *result;
+}
 std::unique_ptr<QLockFile> Application::acquireInstanceLock(const QString& dir, QString* err) {
     if (err) err->clear();
     if (!store::ensurePrivateDir(dir)) { fail(err, "Не удалось ограничить доступ к каталогу данных."); return {}; }
@@ -149,6 +263,7 @@ bool Application::save(QString* err) {
     }, mode_, false, err);
 }
 void Application::lock() {
+    cancelBackupRestore();
     model_.clear(); dataKey_.reset(); file_.clear(); mode_ = Mode::None;
     ++generation_;
     gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
