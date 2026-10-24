@@ -9,6 +9,8 @@
 #include <QTemporaryDir>
 #include <QSettings>
 #include <windows.h>
+#include <sddl.h>
+#include <QScopeGuard>
 #include "../src/platform/EnvOps.h"
 #include "../src/ui/EnvExportDialog.h"
 using namespace tb;
@@ -19,6 +21,30 @@ class TestEnv : public QObject {
     QSettings preferences_{settingsDir_.filePath("prefs.ini"),QSettings::IniFormat};
     QSettings run_{settingsDir_.filePath("run.ini"),QSettings::IniFormat};
 private slots:
+    void inaccessibleNativeAutostartIsUnknown() {
+        const auto path=QStringLiteral("Software\\TokenBucketTests\\%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+        HKEY key=nullptr;
+        QCOMPARE(RegCreateKeyExW(HKEY_CURRENT_USER,reinterpret_cast<LPCWSTR>(path.utf16()),0,nullptr,0,KEY_ALL_ACCESS,nullptr,&key,nullptr),LONG(ERROR_SUCCESS));
+        QByteArray original; DWORD size=0;
+        RegGetKeySecurity(key,DACL_SECURITY_INFORMATION,nullptr,&size); original.resize(size);
+        QCOMPARE(RegGetKeySecurity(key,DACL_SECURITY_INFORMATION,reinterpret_cast<PSECURITY_DESCRIPTOR>(original.data()),&size),LONG(ERROR_SUCCESS));
+        const auto cleanup=qScopeGuard([&] {
+            RegSetKeySecurity(key,DACL_SECURITY_INFORMATION,reinterpret_cast<PSECURITY_DESCRIPTOR>(original.data()));
+            RegCloseKey(key); RegDeleteKeyW(HKEY_CURRENT_USER,reinterpret_cast<LPCWSTR>(path.utf16()));
+        });
+        QSettings run("HKEY_CURRENT_USER\\"+path,QSettings::NativeFormat); QString error;
+        QCOMPARE(platform::autostart::enabled(run,&error),std::optional<bool>(false));
+        const wchar_t value[]=L"synthetic-command";
+        QCOMPARE(RegSetValueExW(key,L"TokenBucket",0,REG_SZ,reinterpret_cast<const BYTE*>(value),sizeof(value)),LONG(ERROR_SUCCESS));
+        QCOMPARE(platform::autostart::enabled(run,&error),std::optional<bool>(true));
+        PSECURITY_DESCRIPTOR denied=nullptr;
+        QVERIFY(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(D;;0x1;;;WD)(A;;KA;;;WD)",SDDL_REVISION_1,&denied,nullptr));
+        const auto freeDescriptor=qScopeGuard([&] {LocalFree(denied);});
+        QCOMPARE(RegSetKeySecurity(key,DACL_SECURITY_INFORMATION,denied),LONG(ERROR_SUCCESS));
+        HKEY probe=nullptr;
+        QCOMPARE(RegOpenKeyExW(HKEY_CURRENT_USER,reinterpret_cast<LPCWSTR>(path.utf16()),0,KEY_QUERY_VALUE,&probe),LONG(ERROR_ACCESS_DENIED));
+        QVERIFY(!platform::autostart::enabled(run,&error).has_value()); QVERIFY(!error.isEmpty());
+    }
     void validName() {
         QVERIFY(platform::envops::validName(QStringLiteral("TOKEN")));
         QVERIFY(platform::envops::validName(QStringLiteral("_hidden")));

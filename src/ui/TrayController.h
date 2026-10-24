@@ -25,6 +25,7 @@ public:
     static bool setNotificationsEnabled(bool on,QSettings* preferences=nullptr,QString* error=nullptr);
     // Подсказка текущего состояния — для тестов и диагностики (без секретов).
     QString toolTip() const { return tray_.toolTip(); }
+    bool available() const { return tray_.isVisible() && QSystemTrayIcon::isSystemTrayAvailable(); }
 signals:
     void showRequested();
     void lockRequested();

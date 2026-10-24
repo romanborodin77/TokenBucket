@@ -29,6 +29,10 @@ private slots:
         QTest::newRow("session-lock-hidden-ready")<<5;
         QTest::newRow("quit-during-settings")<<6;
         QTest::newRow("hidden-ready-without-tray")<<7;
+        QTest::newRow("locked-system-tray-without-own-icon")<<8;
+        QTest::newRow("ready-system-tray-without-own-icon")<<9;
+        QTest::newRow("tray-disappears-while-locked")<<10;
+        QTest::newRow("tray-disappears-with-hidden-ready")<<11;
     }
     void startupAndExitRoutes() {
         QFETCH(int,route);
@@ -37,7 +41,7 @@ private slots:
         QTemporaryDir dir; Application core(dir.path()); QString error;
         if(route!=2) {
             QVERIFY(core.createPasswordVault("valid-password",&error));
-            if(route!=5 && route!=6 && route!=7) core.lock();
+            if(route!=5 && route!=6 && route!=7 && route!=9 && route!=11) core.lock();
         }
         QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
         preferences.setValue("trayNotifications",false);
@@ -56,7 +60,12 @@ private slots:
                 if(auto* dialog=qobject_cast<SetupDialog*>(widget);dialog && dialog->isVisible()) setup=dialog;
                 if(auto* dialog=qobject_cast<ui::SettingsDialog*>(widget);dialog && dialog->isVisible()) settings=dialog;
             }
-            if(route==0 || route==1) {
+            if(route==10 || route==11) {
+                if(stage==0 && wait.elapsed()>=100 && (route==10 || (main && !main->isVisible()))) {
+                    stage=1; auto* icon=tray->findChild<QSystemTrayIcon*>(); QVERIFY(icon); icon->hide();
+                } else if(stage==1 && route==10 && unlock) {completed=true; unlock->reject();}
+                else if(stage==1 && route==11 && main && main->isVisible()) {completed=true; main->requestExit();}
+            } else if(route==0 || route==1) {
                 if(stage==0) {
                     if(unlock) {prematureUnlock=true; emit tray->quitRequested(); return;}
                     if(wait.elapsed()>=100 && core.gate()==Application::Gate::NeedUnlock) {
@@ -71,7 +80,7 @@ private slots:
                     visibleAfterUnlock=true; completed=true; stage=3; main->requestExit();
                 }
             } else if(route==2 && setup) {completed=true; setup->reject();}
-            else if((route==3 || route==4) && unlock) {completed=true; unlock->reject();}
+            else if((route==3 || route==4 || route==8) && unlock) {completed=true; unlock->reject();}
             else if(route==5) {
                 if(stage==0 && main && core.gate()==Application::Gate::Ready) {
                     hidden=!main->isVisible(); stage=1; wait.restart();
@@ -85,13 +94,17 @@ private slots:
                     stage=1; QTimer::singleShot(0,main,&ui::MainWindow::showSettings);
                 } else if(stage==1 && settings) {completed=true; stage=2; emit tray->quitRequested();}
                 else if(stage==2 && unlock) {prematureUnlock=true; emit tray->quitRequested();}
-            } else if(route==7 && main && main->isVisible() && core.gate()==Application::Gate::Ready) {
+            } else if((route==7 || route==9) && main && main->isVisible() && core.gate()==Application::Gate::Ready) {
                 completed=true; main->requestExit();
             }
         });
         watchdog.start(); driver.start();
         const bool trayPresent=route!=3 && route!=7;
-        const int result=ui::runSession(core,preferences,route!=4 && route!=6,&run,[trayPresent] {return trayPresent;});
+        const int result=ui::runSession(core,preferences,route!=4 && route!=6,&run,[&] {
+            if(route==8 || route==9) if(auto* tray=core.findChild<ui::TrayController*>("sessionTray"))
+                if(auto* icon=tray->findChild<QSystemTrayIcon*>()) icon->hide();
+            return trayPresent;
+        });
         driver.stop(); watchdog.stop();
         QCOMPARE(result,0); QVERIFY(!timedOut); QVERIFY(!prematureUnlock); QVERIFY(completed);
         if(route==0 || route==1 || route==5) QVERIFY(hidden);

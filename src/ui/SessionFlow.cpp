@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPointer>
+#include <QTimer>
 #include <QtConcurrent/QtConcurrentRun>
 namespace tb::ui {
 bool runVaultOperation(tb::Application& core, const std::function<bool(void*, QString*)>& operation, QString* err,QWidget* parent) {
@@ -34,6 +35,17 @@ int runSession(Application& core,QSettings& settings,bool startHidden,QSettings*
     QPointer<QEventLoop> waitLoop;
     bool waitForTrayOpen=startHidden && core.gate()==Application::Gate::NeedUnlock,quitting=false;
     tb::ui::TrayController tray(core,&core,&settings); tray.setObjectName("sessionTray");
+    const auto systemTrayAvailable=std::move(trayAvailable);
+    trayAvailable=[&tray,systemTrayAvailable] {return (!systemTrayAvailable || systemTrayAvailable()) && tray.available();};
+    QTimer trayWatch; trayWatch.setInterval(1000);
+    // У исчезновения собственного значка нет общего сигнала Qt: скрытый сеанс должен остаться доступен.
+    QObject::connect(&trayWatch,&QTimer::timeout,&tray,[&] {
+        if(quitting || trayAvailable()) return;
+        waitForTrayOpen=false;
+        if(waitLoop) waitLoop->quit();
+        if(mainWindow && core.gate()==Application::Gate::Ready && !mainWindow->isVisible()) mainWindow->show();
+    });
+    trayWatch.start();
     QObject::connect(&tray, &tb::ui::TrayController::showRequested, &core, [&] {
         if(quitting) return;
         waitForTrayOpen=false; startHidden=false;

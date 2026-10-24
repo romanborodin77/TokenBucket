@@ -403,7 +403,7 @@ void MainWindow::restoreBackup() {
         result=core->restorePreparedBackup(); if(err) *err=result.error;
         return result.committed && result.error.isEmpty();
     },&error,this);
-    if(!self) return;
+    if(!self || self->exiting_) return;
     if(!result.committed) {if(dialog && dialog->isVisible()) dialog->setOperationError(error); return;}
     const auto message=(result.error.isEmpty()?QStringLiteral("Резервная копия восстановлена. Хранилище заблокировано."):result.error)
         +QStringLiteral("\n\nСтраховочная копия: %1").arg(result.safetyPath);

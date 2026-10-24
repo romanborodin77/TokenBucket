@@ -1,4 +1,5 @@
 #include <QtTest>
+#include "FaultFileOps.h"
 #include <QProcess>
 #include <QScopeGuard>
 #include <cstdio>
@@ -151,18 +152,30 @@ private slots:
         QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("marker"));
         QVERIFY(!panel.isVisible());
     }
+    void backupRecoveryUsesCopyModeAndReturnsToNormalUnlock_data() {
+        QTest::addColumn<bool>("quitOnRename");
+        QTest::newRow("normal-unlock")<<false; QTest::newRow("quit-after-committed-rename")<<true;
+    }
     void backupRecoveryUsesCopyModeAndReturnsToNormalUnlock() {
-        QTemporaryDir dir;
-        Application core(dir.path(),nullptr,[](void*,const QString&) {return platform::hello::Result::Verified;}); QString error;
+        QFETCH(bool,quitOnRename);
+        QTemporaryDir dir; FaultOps ops;
+        Application core(dir.path(),nullptr,[](void*,const QString&) {return platform::hello::Result::Verified;},ops); QString error;
         QVERIFY(core.createPasswordVault("valid-password",&error));
         const auto group=QUuid::createUuid();
         QVERIFY(core.model()->addNode(group,{},"Original").isEmpty()); QVERIFY(core.save(&error));
         QVERIFY(core.model()->addNode(QUuid::createUuid(),{},"Newer").isEmpty()); QVERIFY(core.switchToHello(&error));
         QCOMPARE(core.mode(),Application::Mode::Hello); QCOMPARE(core.backupMode(&error),Application::Mode::Password);
+        const auto readFile=[](const QString& path) {QFile file(path); return file.open(QIODevice::ReadOnly)?file.readAll():QByteArray();};
+        const auto before=readFile(core.storePathForTest()),backup=readFile(core.storePathForTest()+".bak");
         QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
         preferences.setValue("trayNotifications",false);
         QTimer driver,watchdog; driver.setInterval(10); watchdog.setSingleShot(true); watchdog.setInterval(15000);
-        int stage=0; bool timedOut=false,completed=false,restoredData=false,copyPasswordPrompt=false;
+        int stage=0; bool timedOut=false,completed=false,restoredData=false,copyPasswordPrompt=false,quitSent=false,postQuitDialog=false;
+        if(quitOnRename) ops.afterRename=[&](const QString& from,const QString& to) {
+            if(to==core.storePathForTest() && from.contains(".restore-")) QMetaObject::invokeMethod(&core,[&] {
+                quitSent=true; if(auto* tray=core.findChild<ui::TrayController*>("sessionTray")) emit tray->quitRequested();
+            },Qt::BlockingQueuedConnection);
+        };
         connect(&watchdog,&QTimer::timeout,&core,[&] {
             timedOut=true; if(auto* tray=core.findChild<ui::TrayController*>("sessionTray")) emit tray->quitRequested();
         });
@@ -191,6 +204,7 @@ private slots:
                 }
             } else if(stage==4) {
                 if(auto* outcome=qobject_cast<QMessageBox*>(modal);outcome && outcome->button(QMessageBox::Ok)) {
+                    postQuitDialog=quitSent;
                     stage=5; outcome->button(QMessageBox::Ok)->click();
                 }
             } else if(stage==6 && main && main->isVisible() && core.gate()==Application::Gate::Ready && !core.busy()) {
@@ -202,7 +216,12 @@ private slots:
         driver.start(); watchdog.start();
         const int result=ui::runSession(core,preferences,false,&run,[] {return true;});
         driver.stop(); watchdog.stop();
-        QCOMPARE(result,0); QVERIFY(!timedOut); QVERIFY(completed); QVERIFY(copyPasswordPrompt); QVERIFY(restoredData);
+        QCOMPARE(result,0); QVERIFY(!timedOut); QVERIFY(copyPasswordPrompt);
+        if(quitOnRename) {
+            QVERIFY(quitSent); QVERIFY(!postQuitDialog); QCOMPARE(readFile(core.storePathForTest()),backup);
+            const auto copies=QDir(dir.path()).entryList({"vault.tb.before-restore-*"},QDir::Files);
+            QCOMPARE(copies.size(),1); QCOMPARE(readFile(dir.filePath(copies.first())),before);
+        } else {QVERIFY(completed); QVERIFY(restoredData);}
         QCOMPARE(core.gate(),Application::Gate::NeedUnlock);
     }
     void quickPasteFullRoute() {

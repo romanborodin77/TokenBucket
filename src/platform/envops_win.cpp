@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QSettings>
+#include <QScopeGuard>
 #include <windows.h>
 #include <vector>
 namespace tb::platform::envops {
@@ -158,11 +159,29 @@ QString commandForTest() {
 }
 std::optional<bool> enabled(QSettings& run,QString* error) {
     if(error) error->clear();
-    QSettings reader(run.fileName(),run.format()); reader.setFallbacksEnabled(run.fallbacksEnabled()); reader.sync();
-    if(reader.status()!=QSettings::NoError) {
+    const auto unknown=[&]() -> std::optional<bool> {
         if(error) *error=QStringLiteral("Не удалось прочитать состояние автозапуска.");
         return std::nullopt;
+    };
+    if(!run.group().isEmpty()) return unknown();
+    if(run.format()==QSettings::NativeFormat || run.format()==QSettings::Registry32Format || run.format()==QSettings::Registry64Format) {
+        // Qt NativeFormat не отличает отказ чтения реестра от отсутствующего значения.
+        const auto prefix=QStringLiteral("\\HKEY_CURRENT_USER\\"),path=run.fileName();
+        if(!path.startsWith(prefix,Qt::CaseInsensitive)) return unknown();
+        const auto subkey=path.mid(prefix.size()); HKEY key=nullptr;
+        const REGSAM view=run.format()==QSettings::Registry32Format?KEY_WOW64_32KEY
+            :run.format()==QSettings::Registry64Format?KEY_WOW64_64KEY:0;
+        const auto opened=RegOpenKeyExW(HKEY_CURRENT_USER,reinterpret_cast<LPCWSTR>(subkey.utf16()),0,KEY_QUERY_VALUE|view,&key);
+        if(opened==ERROR_FILE_NOT_FOUND || opened==ERROR_PATH_NOT_FOUND) return false;
+        if(opened!=ERROR_SUCCESS) return unknown();
+        const auto close=qScopeGuard([&] {RegCloseKey(key);}); DWORD size=0;
+        const auto queried=RegQueryValueExW(key,L"TokenBucket",nullptr,nullptr,nullptr,&size);
+        if(queried==ERROR_SUCCESS || queried==ERROR_MORE_DATA) return true;
+        if(queried==ERROR_FILE_NOT_FOUND) return false;
+        return unknown();
     }
+    QSettings reader(run.fileName(),run.format()); reader.setFallbacksEnabled(run.fallbacksEnabled()); reader.sync();
+    if(reader.status()!=QSettings::NoError) return unknown();
     return reader.contains("TokenBucket");
 }
 bool setEnabled(bool on,QSettings& run,QString* error) {
