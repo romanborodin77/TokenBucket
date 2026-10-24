@@ -3,6 +3,7 @@
 class QLineEdit;
 class QRadioButton;
 class QLabel;
+class QSettings;
 namespace tb::ui {
 // Диалог выдачи секрета в переменную окружения (спека 2026-10-20-envexport-design):
 // Temporary — запустить выбранную программу с переменной в её окружении (секрет
@@ -13,7 +14,7 @@ class EnvExportDialog : public QDialog {
     Q_OBJECT
 public:
     enum class Mode { Temporary, Permanent };
-    explicit EnvExportDialog(QWidget* parent = nullptr);
+    explicit EnvExportDialog(QWidget* parent = nullptr,QSettings* preferences=nullptr);
     QString name() const;
     Mode mode() const;
     QString program() const;

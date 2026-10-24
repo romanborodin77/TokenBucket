@@ -116,7 +116,7 @@ private slots:
         if (initial) QVERIFY(platform::autostart::setEnabled(true, run_, &err));
     }
     void dialogValidation() {
-        ui::EnvExportDialog dialog;
+        ui::EnvExportDialog dialog(nullptr,&preferences_);
         auto* name = dialog.findChild<QLineEdit*>(QStringLiteral("envVarName"));
         auto* program = dialog.findChild<QLineEdit*>(QStringLiteral("envProgram"));
         auto* permanent = dialog.findChild<QRadioButton*>(QStringLiteral("envModePermanent"));
@@ -140,7 +140,7 @@ private slots:
         QCOMPARE(int(dialog.result()), int(QDialog::Accepted));
         QCOMPARE(dialog.mode(), ui::EnvExportDialog::Mode::Permanent);
         QCOMPARE(dialog.name(), QStringLiteral("TB_TEST_ENV"));
-        ui::EnvExportDialog second;
+        ui::EnvExportDialog second(nullptr,&preferences_);
         second.findChild<QLineEdit*>(QStringLiteral("envVarName"))->setText(QStringLiteral("TB_SECOND"));
         second.findChild<QLineEdit*>(QStringLiteral("envProgram"))->setText(QStringLiteral("C:/tools/app.exe"));
         second.findChild<QLineEdit*>(QStringLiteral("envArguments"))->setText(QStringLiteral("--flag \"a b\""));

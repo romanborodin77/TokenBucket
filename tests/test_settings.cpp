@@ -13,16 +13,168 @@
 #include <QKeySequenceEdit>
 #include <QStackedWidget>
 #include <QSignalSpy>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTimer>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/SettingsDialog.h"
+#include "../src/ui/MiniPanel.h"
 #include "../src/ui/Theme.h"
+#include "../src/ui/EnvExportDialog.h"
+#include "../src/platform/EnvOps.h"
 using namespace tb;
 class TestSettings : public QObject {
     Q_OBJECT
+#ifdef Q_OS_WIN
+    static QKeySequence freeHotkey(const QKeySequence& excluded={}) {
+        for(int key=Qt::Key_F6;key<=Qt::Key_F11;++key) {
+            const QKeySequence sequence(Qt::CTRL|Qt::ALT|Qt::SHIFT|Qt::Key(key));
+            if(sequence==excluded) continue;
+            const auto parsed=paste::parseHotkey(sequence);
+            if(parsed && RegisterHotKey(nullptr,0x4f18,parsed->modifiers,parsed->key)) {
+                UnregisterHotKey(nullptr,0x4f18); return sequence;
+            }
+        }
+        return {};
+    }
+#endif
 private slots:
+#ifdef Q_OS_WIN
+    void orderedFailuresAndRetry_data() {
+        QTest::addColumn<int>("fault");
+        QTest::newRow("invalid-before-any-write")<<0;
+        QTest::newRow("hotkey-conflict-before-other-writes")<<1;
+        QTest::newRow("run-failure-after-hotkey")<<2;
+        QTest::newRow("preference-failure-after-run")<<3;
+        QTest::newRow("unchanged-does-not-write")<<4;
+    }
+    void orderedFailuresAndRetry() {
+        QFETCH(int,fault);
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        const auto initial=freeHotkey(); QVERIFY(!initial.isEmpty());
+        const auto replacement=freeHotkey(initial); QVERIFY(!replacement.isEmpty());
+        const auto prefsParent=dir.filePath("prefs"),runParent=dir.filePath("run");
+        QVERIFY(QDir().mkdir(prefsParent)); QVERIFY(QDir().mkdir(runParent));
+        QSettings preferences(prefsParent+"/ui.ini",QSettings::IniFormat),run(runParent+"/run.ini",QSettings::IniFormat);
+        preferences.setValue("hotkey",initial.toString(QKeySequence::PortableText));
+        preferences.setValue("secretRevealSeconds",15); preferences.sync();
+        run.sync();
+        ui::MainWindow window(app,nullptr,&preferences,&run);
+        bool blockedHotkey=false;
+        const auto release=qScopeGuard([&] {
+            UnregisterHotKey(nullptr,0x4f18);
+            if(blockedHotkey) UnregisterHotKey(nullptr,0x4f19);
+        });
+        if(fault==1) {
+            const auto key=paste::parseHotkey(replacement); QVERIFY(key);
+            blockedHotkey=RegisterHotKey(nullptr,0x4f19,key->modifiers,key->key); QVERIFY(blockedHotkey);
+        }
+        const auto block=[&](QSettings& settings,const QString& parent) {
+            if(QFile::exists(settings.fileName()) && !QFile::remove(settings.fileName())) return false;
+            if(!QDir().rmdir(parent)) return false;
+            QFile file(parent); return file.open(QIODevice::WriteOnly);
+        };
+        if(fault==2 || fault==4) QVERIFY(block(run,runParent));
+        if(fault==3 || fault==4) QVERIFY(block(preferences,prefsParent));
+        bool visited=false;
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            if(fault!=4) {
+                dialog->findChild<QKeySequenceEdit*>("hotkey")->setKeySequence(fault==0?QKeySequence("F12"):fault==3?initial:replacement);
+                dialog->findChild<QCheckBox*>("autostart")->setChecked(true);
+                dialog->findChild<QCheckBox*>("trayNotifications")->setChecked(false);
+                dialog->findChild<QComboBox*>("secretRevealSeconds")->setCurrentIndex(0);
+                dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+                QVERIFY(dialog->isVisible());
+                QVERIFY(!dialog->findChild<QLabel*>("settingsError")->text().isEmpty());
+                QCOMPARE(window.findChild<QTimer*>("secretHideTimer")->interval(),15000);
+                QCOMPARE(dialog->draft().revealSeconds,5);
+                if(fault<=1) {
+                    QCOMPARE(preferences.value("hotkey").toString(),initial.toString(QKeySequence::PortableText));
+                    QVERIFY(!run.contains("TokenBucket")); QVERIFY(!preferences.contains("trayNotifications"));
+                } else {
+                    const auto keyName=fault==2?QStringLiteral("Сочетание клавиш"):QStringLiteral("Запускать вместе с Windows");
+                    QVERIFY(dialog->findChild<QLabel*>("settingsError")->text().contains(keyName));
+                    if(fault==2) {
+                        QCOMPARE(preferences.value("hotkey").toString(),replacement.toString(QKeySequence::PortableText));
+                        QVERIFY(QFile::remove(runParent)); QVERIFY(QDir().mkdir(runParent));
+                    } else {
+                        QCOMPARE(run.value("TokenBucket").toString(),platform::autostart::commandForTest());
+                        QVERIFY(QFile::remove(prefsParent)); QVERIFY(QDir().mkdir(prefsParent));
+                    }
+                    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+                    QVERIFY(!dialog->isVisible());
+                    QCOMPARE(preferences.value("secretRevealSeconds").toInt(),5);
+                    QCOMPARE(run.value("TokenBucket").toString(),platform::autostart::commandForTest());
+                }
+            } else {
+                QVERIFY(!dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->isEnabled());
+                QVERIFY(QMetaObject::invokeMethod(dialog,"saveRequested")); QVERIFY(!dialog->isVisible());
+                QVERIFY(!QFile::exists(preferences.fileName())); QVERIFY(!QFile::exists(run.fileName()));
+            }
+            visited=true; if(dialog->isVisible()) dialog->reject();
+        });
+        QTimer::singleShot(3000,&window,[] {if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();});
+        window.showSettings(); QVERIFY(visited);
+        const auto registered=paste::parseHotkey(fault==2?replacement:initial); QVERIFY(registered);
+        QVERIFY(!RegisterHotKey(nullptr,0x4f18,registered->modifiers,registered->key));
+        if(fault==2) {
+            const auto old=paste::parseHotkey(initial); QVERIFY(old);
+            QVERIFY(RegisterHotKey(nullptr,0x4f18,old->modifiers,old->key)); UnregisterHotKey(nullptr,0x4f18);
+        }
+    }
+    void environmentOptionUsesInjectedCheckedPreferences() {
+        QTemporaryDir dir; const auto parent=dir.filePath("blocked");
+        QFile file(parent); QVERIFY(file.open(QIODevice::WriteOnly)); file.close();
+        QSettings preferences(parent+"/env.ini",QSettings::IniFormat);
+        ui::EnvExportDialog dialog(nullptr,&preferences);
+        auto* clear=dialog.findChild<QCheckBox*>("clearOnExit"); QVERIFY(clear);
+        clear->setChecked(true); QVERIFY(!clear->isChecked());
+        QVERIFY(!dialog.findChild<QLabel*>("validationError")->text().isEmpty());
+        QVERIFY(QFile::remove(parent)); QVERIFY(QDir().mkdir(parent));
+        clear->setChecked(true); QVERIFY(clear->isChecked());
+        QSettings reader(preferences.fileName(),preferences.format());
+        QVERIFY(platform::envops::clearOnExitEnabled(&reader));
+    }
+#endif
+    void saveAppliesAndReopens() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat);
+        preferences.setValue("secretRevealSeconds",15); preferences.sync();
+        QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&preferences,&run);
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            window.popupQuickPanel();
+            for(auto* widget:QApplication::topLevelWidgets())
+                if(auto* panel=qobject_cast<ui::MiniPanel*>(widget)) QVERIFY(!panel->isVisible());
+            dialog->findChild<QComboBox*>("secretRevealSeconds")->setCurrentIndex(0);
+            dialog->findChild<QCheckBox*>("trayNotifications")->setChecked(false);
+            dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+            if(dialog->isVisible()) dialog->reject();
+        });
+        window.showSettings();
+        QCOMPARE(preferences.value("secretRevealSeconds").toInt(),5);
+        QCOMPARE(preferences.value("trayNotifications").toBool(),false);
+        QCOMPARE(window.findChild<QTimer*>("secretHideTimer")->interval(),5000);
+#ifdef Q_OS_WIN
+        window.popupQuickPanel();
+        bool popupVisible=false;
+        for(auto* widget:QApplication::topLevelWidgets())
+            if(auto* panel=qobject_cast<ui::MiniPanel*>(widget)) popupVisible|=panel->isVisible();
+        QVERIFY(popupVisible);
+#endif
+        bool reopened=false;
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
+            QCOMPARE(dialog->draft().revealSeconds,5); QCOMPARE(dialog->draft().notifications,false);
+            reopened=true; dialog->reject();
+        });
+        window.showSettings(); QVERIFY(reopened);
+    }
     void draftNavigationAndCancel_data() {
         QTest::addColumn<int>("dismiss");
         QTest::newRow("cancel")<<0; QTest::newRow("escape")<<1; QTest::newRow("cross")<<2;
@@ -112,7 +264,8 @@ private slots:
         QVERIFY(app.createPasswordVault("test-password-123",&error));
         QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat);
         preferences.setValue("secretRevealSeconds",15); preferences.sync();
-        ui::MainWindow window(app,nullptr,&preferences); bool visited=false;
+        QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&preferences,&run); bool visited=false;
         QTimer::singleShot(0,&window,[&] {
             auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog);
             dialog->findChild<QComboBox*>("secretRevealSeconds")->setCurrentIndex(0); visited=true;
@@ -127,7 +280,8 @@ private slots:
         QVERIFY(app.createPasswordVault("test-password-123",&error));
         QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat);
         preferences.setValue("secretRevealSeconds",15); preferences.sync();
-        ui::MainWindow window(app,nullptr,&preferences);
+        QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&preferences,&run);
         auto* action=window.findChild<QAction*>("openSettings"); QVERIFY(action);
         QFile file(preferences.fileName()); QVERIFY(file.open(QIODevice::ReadOnly));
         const auto before=file.readAll(); file.close();
@@ -149,8 +303,9 @@ int main(int argc,char** argv) {
         QTemporaryDir dir; Application vault(dir.path()); QString error;
         if(!vault.createPasswordVault("test-password-123",&error)) return 2;
         QSettings preferences(dir.filePath("demo.ini"),QSettings::IniFormat);
+        QSettings run(dir.filePath("demo-run.ini"),QSettings::IniFormat);
         ui::theme::apply(qt.arguments().contains("--dark")?ui::theme::Mode::Dark:ui::theme::Mode::Light);
-        ui::MainWindow window(vault,nullptr,&preferences);
+        ui::MainWindow window(vault,nullptr,&preferences,&run);
         QTimer::singleShot(0,&window,[&] {
             if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
                 dialog->setWindowTitle(QStringLiteral("Настройки — вымышленные данные"));

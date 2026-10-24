@@ -5,6 +5,7 @@
 #include <QDate>
 #include <optional>
 #include "../app/Application.h"
+#include "../app/Preferences.h"
 #include "../platform/ClipboardGuard.h"
 #include <memory>
 namespace tb::platform { class QuickPaste; }
@@ -25,7 +26,8 @@ class EntryCard;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(Application& app, QWidget* parent = nullptr, QSettings* uiPreferences = nullptr);
+    explicit MainWindow(Application& app, QWidget* parent = nullptr, QSettings* uiPreferences = nullptr,
+                        QSettings* runPreferences = nullptr);
     ~MainWindow() override;
     void refreshAll();
     bool moveNodeTo(model::Id node, model::Id newParent);
@@ -59,11 +61,9 @@ public slots:
     void importVault();
     void switchUnlockMode();
     void changeMasterPassword();
-    void configureIdleTimeout();
     void showAbout();
     void showSettings();
 #ifdef Q_OS_WIN
-    void changeHotkey();
     void exportToEnvironment();
     void removeExportedVariables();
 #endif
@@ -85,6 +85,12 @@ private:
     void saveUiState();
     QSettings uiSettings_{QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket")};
     QSettings* preferences_{};
+    prefs::Values appliedPreferences_;
+#ifdef Q_OS_WIN
+    QSettings runSettings_{QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"),QSettings::NativeFormat};
+    QSettings* runPreferences_{};
+#endif
+    prefs::ApplyResult applyPreferences(const prefs::Values&);
     QSplitter* splitter_{};
     QBoxLayout *headerLayout_{}, *filterLayout_{};
     QLabel* emptyHint_{};

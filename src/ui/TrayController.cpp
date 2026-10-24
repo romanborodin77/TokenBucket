@@ -7,7 +7,7 @@
 #include <QMenu>
 #include <QSettings>
 namespace tb::ui {
-TrayController::TrayController(Application& app, QObject* parent) : QObject(parent), app_(app), tray_(this) {
+TrayController::TrayController(Application& app, QObject* parent,QSettings* preferences) : QObject(parent), app_(app), preferences_(preferences), tray_(this) {
     menu_ = new QMenu; // без родителя-виджета: удаляем сами
     menu_->addAction(QStringLiteral("Показать окно"), this, &TrayController::showRequested);
     panelAction_ = menu_->addAction(QStringLiteral("Панель быстрой вставки"), this, [this] { if (onPanel_) onPanel_(); });
@@ -43,7 +43,7 @@ bool TrayController::setNotificationsEnabled(bool on,QSettings* preferences,QStr
     return prefs::writeValue(preferences?*preferences:settings,QStringLiteral("trayNotifications"),on,error);
 }
 void TrayController::notify(const QString& text) {
-    if (!notificationsEnabled() || !tray_.isVisible()) return;
+    if (!notificationsEnabled(preferences_) || !tray_.isVisible()) return;
     tray_.showMessage(QStringLiteral("TokenBucket"), text, QIcon(brand::icon(32)), 4000);
 }
 void TrayController::refresh() {

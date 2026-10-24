@@ -13,7 +13,7 @@ namespace ui {
 class TrayController : public QObject {
     Q_OBJECT
 public:
-    explicit TrayController(Application& app, QObject* parent = nullptr);
+    explicit TrayController(Application& app, QObject* parent = nullptr,QSettings* preferences=nullptr);
     ~TrayController() override;
     // Вызывается для «Панель быстрой вставки»: main дёргает MainWindow::popupQuickPanel,
     // пока окно живо (панель принадлежит окну).
@@ -34,6 +34,7 @@ private slots:
 private:
     void refresh();
     Application& app_;
+    QSettings* preferences_{};
     QSystemTrayIcon tray_;
     QMenu* menu_;
     QAction* panelAction_ = nullptr;

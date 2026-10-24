@@ -13,7 +13,6 @@
 #include <QGridLayout>
 #include <QTimer>
 #include <QAction>
-#include <QActionGroup>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCursor>
@@ -36,7 +35,6 @@
 #include <QScopeGuard>
 #include <QSettings>
 #include <QSignalBlocker>
-#include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -60,7 +58,6 @@
 #include "../platform/QuickPaste.h"
 #include "../platform/EnvOps.h"
 #include "EnvExportDialog.h"
-#include <QKeySequenceEdit>
 #include <QTimer>
 #endif
 #include <algorithm>
@@ -89,8 +86,15 @@ protected:
     }
 };
 }
-MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferences)
+MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferences,QSettings* runPreferences)
     : QMainWindow(parent), preferences_(uiPreferences ? uiPreferences : &uiSettings_), app_(app) {
+    appliedPreferences_=prefs::read(*preferences_);
+#ifdef Q_OS_WIN
+    runPreferences_=runPreferences?runPreferences:&runSettings_;
+    appliedPreferences_.autostart=platform::autostart::enabled(*runPreferences_);
+#else
+    Q_UNUSED(runPreferences);
+#endif
     setWindowTitle(QStringLiteral("TokenBucket"));
     auto* vault = menuBar()->addMenu(QStringLiteral("&Хранилище"));
     auto* projects = menuBar()->addMenu(QStringLiteral("&Проекты и группы"));
@@ -131,52 +135,6 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     }
 #endif
     changePwAction_ = action(settings, QStringLiteral("Сменить мастер-пароль…"), &MainWindow::changeMasterPassword);
-    settings->addAction(QStringLiteral("Автоблокировка…"), this, &MainWindow::configureIdleTimeout);
-    {   // Тема: Fusion + палитры, применение сразу ко всему приложению; отметка пункта — группой.
-        auto* themeMenu = settings->addMenu(QStringLiteral("Тема"));
-        auto* group = new QActionGroup(this);
-        const QList<QPair<theme::Mode, QString>> modes = {
-            {theme::Mode::System, QStringLiteral("Как в системе")},
-            {theme::Mode::Light, QStringLiteral("Светлая")},
-            {theme::Mode::Dark, QStringLiteral("Тёмная")}};
-        const auto active = theme::load();
-        for (const auto& [mode, text] : modes) {
-            auto* item = themeMenu->addAction(text, this, [mode] {
-                QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-                settings.setValue(QStringLiteral("theme"),
-                    mode == theme::Mode::Dark ? QStringLiteral("dark")
-                    : mode == theme::Mode::Light ? QStringLiteral("light") : QStringLiteral("system"));
-                theme::apply(mode);
-            });
-            item->setCheckable(true); item->setChecked(mode == active);
-            group->addAction(item);
-        }
-    }
-#ifdef Q_OS_WIN
-    settings->addAction(QStringLiteral("Горячая клавиша быстрой вставки…"), this, &MainWindow::changeHotkey);
-    settings->addAction(QStringLiteral("Удалить переменные TokenBucket…"), this, &MainWindow::removeExportedVariables);
-    {
-        // Опция выхода: стирать установленные нами переменные окружения при завершении
-        // программы, чтобы секреты не оставались в реестре (QSettings env-clear-on-exit).
-        auto* autoStart = settings->addAction(QStringLiteral("Запускать вместе с Windows"));
-        autoStart->setCheckable(true); autoStart->setObjectName(QStringLiteral("autoStart"));
-        autoStart->setChecked(platform::autostart::enabled());
-        connect(autoStart, &QAction::toggled, this, [this, autoStart](bool on) {
-            QString error;
-            if (platform::autostart::setEnabled(on, &error)) return;
-            QMessageBox::warning(this, QStringLiteral("TokenBucket"), error);
-            QSignalBlocker block(autoStart); autoStart->setChecked(!on); // состояние пункта следует за реестром
-        });
-        auto* notifications = settings->addAction(QStringLiteral("Уведомления в области уведомлений"));
-        notifications->setCheckable(true); notifications->setObjectName(QStringLiteral("trayNotifications"));
-        notifications->setChecked(TrayController::notificationsEnabled());
-        connect(notifications, &QAction::toggled, this, [](bool on) { TrayController::setNotificationsEnabled(on); });
-        auto* clearOnExit = settings->addAction(QStringLiteral("Стирать переменные окружения при выходе"));
-        clearOnExit->setCheckable(true); clearOnExit->setObjectName(QStringLiteral("envClearOnExit"));
-        clearOnExit->setChecked(platform::envops::clearOnExitEnabled());
-        connect(clearOnExit, &QAction::toggled, this, [](bool on) { platform::envops::setClearOnExitEnabled(on); });
-    }
-#endif
     updateSwitchActionText();
     auto* help = menuBar()->addMenu(QStringLiteral("&Справка"));
     auto* about = help->addAction(QStringLiteral("О программе…"), this, &MainWindow::showAbout);
@@ -340,25 +298,21 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
 #ifdef Q_OS_WIN
     hotkey_ = std::make_unique<platform::QuickPaste>(app_, clipboard_, this);
     connect(hotkey_.get(), &platform::QuickPaste::conflictDetected, this, [this](const QString& combo) {
-        QTimer::singleShot(0, this, [this, combo] {
-            QMessageBox::warning(this, QStringLiteral("TokenBucket"),
-                QStringLiteral("Горячая клавиша %1 занята или не поддерживается. Выберите Ctrl/Alt/Win с буквой, цифрой, Space или F1–F11.").arg(combo));
-            changeHotkey();
-        });
+        report(QStringLiteral("Горячая клавиша %1 не зарегистрирована. Выберите сочетание в настройках.").arg(combo));
     });
-    hotkey_->setDefaultField(prefs::read(*preferences_).defaultField);
-    hotkey_->start(nullptr);
+    hotkey_->setDefaultField(appliedPreferences_.defaultField);
+    QString hotkeyError; hotkey_->start(appliedPreferences_.hotkey,&hotkeyError);
 #endif
-    const auto preferences=prefs::read(*preferences_);
-    card_->setRevealSeconds(preferences.revealSeconds);
-    clipboard_.setClearSeconds(preferences.clipboardSeconds);
+    card_->setRevealSeconds(appliedPreferences_.revealSeconds);
+    clipboard_.setClearSeconds(appliedPreferences_.clipboardSeconds);
     refreshAll(); restoreUiState();
 }
 MainWindow::~MainWindow() { saveUiState(); }
 void MainWindow::showSettings() {
     if(!ready()) return;
     card_->hideNowForTest();
-    SettingsDialog dialog(prefs::read(*preferences_),app_.backupInfo(),
+    appliedPreferences_.clearEnvironmentOnExit=prefs::read(*preferences_).clearEnvironmentOnExit;
+    SettingsDialog dialog(appliedPreferences_,app_.backupInfo(),
 #ifdef Q_OS_WIN
         hotkey_->sequence().toString(QKeySequence::NativeText),
 #else
@@ -366,14 +320,67 @@ void MainWindow::showSettings() {
 #endif
         this);
     dialog.setUnlockMode(app_.mode(),helloAvailable_);
-    connect(&dialog,&SettingsDialog::changePasswordRequested,this,&MainWindow::changeMasterPassword);
-    connect(&dialog,&SettingsDialog::changeUnlockModeRequested,this,&MainWindow::switchUnlockMode);
+    connect(&dialog,&SettingsDialog::saveRequested,this,[&] {
+        if(!ready()) {dialog.reject(); return;}
+        const auto result=applyPreferences(dialog.draft());
+        if(ready()) dialog.setApplyResult(result,appliedPreferences_);
+    });
+    connect(&dialog,&SettingsDialog::changePasswordRequested,this,[&] {
+        changeMasterPassword(); if(ready()) dialog.setUnlockMode(app_.mode(),helloAvailable_);
+    });
+    connect(&dialog,&SettingsDialog::changeUnlockModeRequested,this,[&] {
+        switchUnlockMode(); if(ready()) dialog.setUnlockMode(app_.mode(),helloAvailable_);
+    });
 #ifdef Q_OS_WIN
     const bool suspended=hotkey_->suspended(); hotkey_->setSuspended(true);
     const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
     connect(&dialog,&SettingsDialog::clearEnvironmentRequested,this,&MainWindow::removeExportedVariables);
 #endif
     dialog.exec();
+}
+prefs::ApplyResult MainWindow::applyPreferences(const prefs::Values& requested) {
+    prefs::ApplyResult result;
+    result.error=prefs::validate(requested);
+    if(!result.error.isEmpty()) {result.failedKey=QStringLiteral("hotkey"); return result;}
+    const auto allowed=[&](const QString& key) {
+        if(ready()) return true;
+        result.failedKey=key; result.error=QStringLiteral("Хранилище заблокировано или занято."); return false;
+    };
+#ifdef Q_OS_WIN
+    if(requested.hotkey!=appliedPreferences_.hotkey) {
+        if(!allowed("hotkey")) return result;
+        if(!hotkey_->changeSequence(requested.hotkey,*preferences_,&result.error)) {result.failedKey="hotkey"; return result;}
+        appliedPreferences_.hotkey=requested.hotkey; result.appliedKeys<<"hotkey"; refreshStatus();
+    }
+    if(appliedPreferences_.autostart && requested.autostart && requested.autostart!=appliedPreferences_.autostart) {
+        if(!allowed("autostart")) return result;
+        if(!platform::autostart::setEnabled(*requested.autostart,*runPreferences_,&result.error)) {result.failedKey="autostart"; return result;}
+        appliedPreferences_.autostart=requested.autostart; result.appliedKeys<<"autostart";
+    }
+#endif
+    const auto persist=[&](const QString& key,const auto& value,auto& current,const QVariant& stored,auto effect) {
+        if(value==current) return true;
+        if(!allowed(key)) return false;
+        if(!prefs::writeValue(*preferences_,key,stored,&result.error)) {result.failedKey=key; return false;}
+        current=value; result.appliedKeys<<key; effect(); return true;
+    };
+    if(!persist("theme",requested.theme,appliedPreferences_.theme,requested.theme,[&] {
+        theme::apply(requested.theme=="dark"?theme::Mode::Dark:requested.theme=="light"?theme::Mode::Light:theme::Mode::System);
+    })) return result;
+    if(!persist("trayNotifications",requested.notifications,appliedPreferences_.notifications,requested.notifications,[] {})) return result;
+    if(!persist("idleTimeoutMinutes",requested.idleMinutes,appliedPreferences_.idleMinutes,requested.idleMinutes,[&] {emit idleTimeoutChanged(requested.idleMinutes);})) return result;
+    if(!persist("secretRevealSeconds",requested.revealSeconds,appliedPreferences_.revealSeconds,requested.revealSeconds,[&] {card_->setRevealSeconds(requested.revealSeconds);})) return result;
+    if(!persist("clipboardClearSeconds",requested.clipboardSeconds,appliedPreferences_.clipboardSeconds,requested.clipboardSeconds,[&] {clipboard_.setClearSeconds(requested.clipboardSeconds);})) return result;
+#ifdef Q_OS_WIN
+    if(!persist("quickPasteDefaultField",requested.defaultField,appliedPreferences_.defaultField,
+        requested.defaultField==paste::Field::Login?"login":"secret",[&] {hotkey_->setDefaultField(requested.defaultField);})) return result;
+#endif
+    const auto closing=requested.closeBehavior==prefs::CloseBehavior::Exit?"exit":requested.closeBehavior==prefs::CloseBehavior::LockHide?"lock-hide":"hide";
+    if(!persist("closeBehavior",requested.closeBehavior,appliedPreferences_.closeBehavior,closing,[] {})) return result;
+#ifdef Q_OS_WIN
+    if(!persist("env-clear-on-exit",requested.clearEnvironmentOnExit,appliedPreferences_.clearEnvironmentOnExit,requested.clearEnvironmentOnExit,[] {})) return result;
+#endif
+    refreshStatus(); return result;
 }
 void MainWindow::setIdleTimer(IdleTimer* timer) { idleTimer_ = timer; refreshStatus(); }
 void MainWindow::refreshStatus() {
@@ -989,27 +996,6 @@ void MainWindow::updateSwitchActionText() {
 }
 void MainWindow::showAbout() { ui::AboutDialog dialog(this); dialog.exec(); }
 #ifdef Q_OS_WIN
-void MainWindow::changeHotkey() {
-    if (!hotkey_) return;
-    QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("Горячая клавиша быстрой вставки"));
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* label = new QLabel(QStringLiteral("Сочетание для вызова панели быстрой вставки:"), &dialog); label->setWordWrap(true);
-    auto* edit = new QKeySequenceEdit(&dialog); edit->setObjectName(QStringLiteral("hotkeyEdit"));
-    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    edit->setKeySequence(QKeySequence(settings.value(QStringLiteral("hotkey"), QStringLiteral("Ctrl+Alt+Space")).toString()));
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Сохранить"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
-    layout->addWidget(label); layout->addWidget(edit); layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    if (dialog.exec() != QDialog::Accepted) return;
-    const QKeySequence chosen = edit->keySequence();
-    if (chosen.isEmpty()) { QMessageBox::warning(this, QStringLiteral("TokenBucket"), QStringLiteral("Сочетание не задано.")); return; }
-    QString error;
-    if (!hotkey_->changeSequence(chosen, settings, &error) && !error.isEmpty()) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
-    refreshStatus();
-}
 bool MainWindow::canExportEnv() const {
     if (!ready()) return false;
     const auto* entry = app_.model()->entry(selectedEntry());
@@ -1032,8 +1018,10 @@ void MainWindow::exportToEnvironment() {
     if (secret.contains(QChar(u'\0'))) { report(QStringLiteral("Секрет содержит недопустимые символы для переменной окружения.")); return; }
     if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("выдача секрета в переменную окружения"))) return;
     if (!ready() || app_.generation() != generation) return;
-    EnvExportDialog dialog(this);
-    if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
+    EnvExportDialog dialog(this,preferences_);
+    const int outcome=dialog.exec();
+    appliedPreferences_.clearEnvironmentOnExit=prefs::read(*preferences_).clearEnvironmentOnExit;
+    if (outcome != QDialog::Accepted || !ready() || app_.generation() != generation) return;
     QString error;
     if (dialog.mode() == EnvExportDialog::Mode::Temporary) {
         if (!platform::envops::startWithVariable(dialog.program(), dialog.arguments(), dialog.name(), secret, &error)) {
@@ -1052,30 +1040,31 @@ void MainWindow::exportToEnvironment() {
     if (!platform::envops::setUserVariable(dialog.name(), secret, &error)) {
         QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
     }
-    platform::envops::rememberExported(dialog.name());
+    if(!platform::envops::rememberExported(dialog.name(),preferences_,&error)) {
+        QMessageBox::critical(this,QStringLiteral("TokenBucket"),
+            QStringLiteral("Переменная установлена, но её имя не сохранено для очистки: %1. %2").arg(dialog.name(),error)); return;
+    }
     QMessageBox::information(this, QStringLiteral("TokenBucket"),
         QStringLiteral("Переменная %1 установлена. Новые процессы увидят её после перезапуска оболочки/проводника или выхода из системы.").arg(dialog.name()));
 }
 void MainWindow::removeExportedVariables() {
-    const QStringList names = platform::envops::exportedNames();
+    if(!ready()) return;
+    const auto generation=app_.generation();
+    const QStringList names = platform::envops::exportedNames(preferences_);
     if (names.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("TokenBucket"),
             QStringLiteral("Переменные окружения, установленные TokenBucket, не найдены."));
         return;
     }
-    bool ok = false;
-    const QString name = QInputDialog::getItem(this, QStringLiteral("Удаление переменных TokenBucket"),
-        QStringLiteral("Пользовательская переменная:"), names, 0, false, &ok);
-    if (!ok || name.isEmpty()) return;
     if (QMessageBox::question(this, QStringLiteral("TokenBucket"),
-            QStringLiteral("Удалить пользовательскую переменную «%1»?").arg(name),
+            QStringLiteral("Удалить %1 пользовательских переменных, учтённых TokenBucket?").arg(names.size()),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
-    QString error;
-    if (!platform::envops::deleteKnownUserVariable(name, &error)) {
-        QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
-    }
-    platform::envops::forgetExported(name);
-    statusBar()->showMessage(QStringLiteral("Переменная %1 удалена.").arg(name), 5000);
+    if(!ready() || app_.generation()!=generation) return;
+    const int removed=platform::envops::clearAllExported(preferences_);
+    const int remaining=platform::envops::exportedNames(preferences_).size();
+    const auto message=QStringLiteral("Удалено: %1. Осталось в учёте: %2.").arg(removed).arg(remaining);
+    if(remaining) QMessageBox::warning(this,QStringLiteral("TokenBucket"),message);
+    else QMessageBox::information(this,QStringLiteral("TokenBucket"),message);
 }
 #endif
 void MainWindow::resizeEvent(QResizeEvent* event) {
@@ -1106,22 +1095,7 @@ void MainWindow::applyIdleTimeout(int minutes) {
     minutes = qBound(1, minutes, 60);
     QString error;
     if(!prefs::writeValue(*preferences_,QStringLiteral("idleTimeoutMinutes"),minutes,&error)) {report(error); return;}
+    appliedPreferences_.idleMinutes=minutes;
     emit idleTimeoutChanged(minutes);
-}
-void MainWindow::configureIdleTimeout() {
-    QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("Автоблокировка"));
-    auto* layout = new QVBoxLayout(&dialog);
-    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    auto* label = new QLabel(QStringLiteral("Блокировать хранилище после N минут бездействия."), &dialog); label->setWordWrap(true);
-    auto* spin = new QSpinBox(&dialog); spin->setRange(1, 60);
-    spin->setValue(qBound(1, settings.value(QStringLiteral("idleTimeoutMinutes"), 5).toInt(), 60));
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Сохранить"));
-    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
-    layout->addWidget(label); layout->addWidget(spin); layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    if (dialog.exec() != QDialog::Accepted) return;
-    applyIdleTimeout(spin->value());
 }
 }

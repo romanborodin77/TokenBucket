@@ -117,7 +117,8 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
     connect(idle,&QSpinBox::valueChanged,this,&SettingsDialog::updateDraft);
     connect(hotkey,&QKeySequenceEdit::keySequenceChanged,this,&SettingsDialog::updateDraft);
 #ifndef Q_OS_WIN
-    for(QWidget* widget:QList<QWidget*>{autostart,hotkey,clearEnvironment_}) {
+    for(QWidget* widget:QList<QWidget*>{autostart,hotkey,clearEnvironment_,
+        findChild<QComboBox*>("quickPasteDefaultField"),findChild<QCheckBox*>("env-clear-on-exit")}) {
         widget->setEnabled(false); widget->setToolTip(QStringLiteral("Доступно только в Windows."));
     }
 #endif

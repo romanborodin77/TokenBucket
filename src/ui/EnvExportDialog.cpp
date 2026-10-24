@@ -11,8 +11,9 @@
 #include <QRadioButton>
 #include <QStackedWidget>
 #include <QVBoxLayout>
+#include <QSignalBlocker>
 namespace tb::ui {
-EnvExportDialog::EnvExportDialog(QWidget* parent) : QDialog(parent) {
+EnvExportDialog::EnvExportDialog(QWidget* parent,QSettings* preferences) : QDialog(parent) {
     setWindowTitle(QStringLiteral("TokenBucket — переменная окружения"));
     auto* layout = new QVBoxLayout(this);
     auto* form = new QFormLayout;
@@ -54,8 +55,12 @@ EnvExportDialog::EnvExportDialog(QWidget* parent) : QDialog(parent) {
     // при завершении программы (см. main.cpp, точка выхода).
     auto* clearOnExit = new QCheckBox(QStringLiteral("Стирать переменные TokenBucket при выходе из программы"), permPage);
     clearOnExit->setObjectName(QStringLiteral("clearOnExit"));
-    clearOnExit->setChecked(tb::platform::envops::clearOnExitEnabled());
-    connect(clearOnExit, &QCheckBox::toggled, permPage, [](bool on) { tb::platform::envops::setClearOnExitEnabled(on); });
+    clearOnExit->setChecked(tb::platform::envops::clearOnExitEnabled(preferences));
+    connect(clearOnExit, &QCheckBox::toggled, this, [this,clearOnExit,preferences](bool on) {
+        QString error;
+        if(platform::envops::setClearOnExitEnabled(on,preferences,&error)) {error_->clear(); return;}
+        QSignalBlocker blocked(clearOnExit); clearOnExit->setChecked(!on); error_->setText(error);
+    });
     permLayout->addWidget(clearOnExit);
     pages->addWidget(permPage);
     layout->addWidget(pages);
@@ -66,7 +71,7 @@ EnvExportDialog::EnvExportDialog(QWidget* parent) : QDialog(parent) {
         const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Выбор программы"));
         if (!path.isEmpty()) program_->setText(path);
     });
-    error_ = new QLabel(this); error_->setWordWrap(true); error_->setObjectName(QStringLiteral("validationError"));
+    error_ = new QLabel(this); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); error_->setObjectName(QStringLiteral("validationError"));
     layout->addWidget(error_);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Продолжить"));
