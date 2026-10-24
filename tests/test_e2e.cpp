@@ -94,7 +94,8 @@ private slots:
         e.title = "protected"; e.token = "synthetic-protected-token"; e.reverify = true;
         QVERIFY(vault.model()->setEntry(e).isEmpty());
         ClipboardGuard clip; ui::MiniPanel panel(vault, clip);
-        QApplication::clipboard()->setText("marker");
+        ClipboardGuard marker;
+        QVERIFY2(marker.copySecret("marker",&error),qPrintable(error));
         panel.popup();
         panel.findChild<QLineEdit*>("miniSearch")->setText("protected");
         QString reopenedStatus;
@@ -135,7 +136,8 @@ private slots:
         e.title = "cancel"; e.token = "must-not-publish";
         QVERIFY(vault.model()->setEntry(e).isEmpty());
         ClipboardGuard clip; ui::MiniPanel panel(vault, clip);
-        QApplication::clipboard()->setText("marker"); panel.popup();
+        ClipboardGuard marker;
+        QVERIFY2(marker.copySecret("marker",&error),qPrintable(error)); panel.popup();
         panel.findChild<QLineEdit*>("miniSearch")->setText("cancel");
         const auto sequence = GetClipboardSequenceNumber();
         QVERIFY(QTest::qWaitFor([&] { return OpenClipboard(reinterpret_cast<HWND>(panel.winId())); }, 1000));
@@ -218,7 +220,8 @@ private slots:
             QTest::keyClicks(search, "demo");
             if (route == 1) panel->findChild<QComboBox*>("miniField")->setCurrentIndex(1);
             if (route >= 4) {
-                QApplication::clipboard()->setText("negative-route-marker");
+                ClipboardGuard marker;
+                QVERIFY2(marker.copySecret("negative-route-marker",&error),qPrintable(error));
                 const auto sequence = GetClipboardSequenceNumber();
                 output += child.readAllStandardOutput(); const auto before = output;
                 INPUT shift{}; shift.type = INPUT_KEYBOARD; shift.ki.wVk = VK_SHIFT;
@@ -251,7 +254,8 @@ private slots:
             else if (route == 2) QTest::keyClick(panel->findChild<QListWidget*>("miniEntries"), Qt::Key_Return);
             else QTest::keyClick(search, Qt::Key_Return);
             const auto expected = (route == 1 ? e.login : route == 2 ? e.token : e.password).toUtf8().toBase64();
-            QTRY_VERIFY_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains("TEXT " + expected), 4000);
+            QTRY_VERIFY2_WITH_TIMEOUT((output += child.readAllStandardOutput()).contains("TEXT " + expected),
+                qPrintable(panel->findChild<QLabel*>("miniStatus")->text()),4000);
             QTest::qWait(100); output += child.readAllStandardOutput();
             QVERIFY(!output.contains("RETURN")); QVERIFY(!panel->isVisible());
             clip.clearIfOurs();

@@ -20,6 +20,7 @@
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/SettingsDialog.h"
 #include "../src/ui/MiniPanel.h"
+#include "../src/ui/SessionFlow.h"
 #include "../src/ui/Theme.h"
 #include "../src/ui/EnvExportDialog.h"
 #include "../src/platform/EnvOps.h"
@@ -354,19 +355,24 @@ private slots:
 int main(int argc,char** argv) {
     QApplication qt(argc,argv);
     if(qt.arguments().contains("--settings-demo")) {
+        qt.setQuitOnLastWindowClosed(false);
         QTemporaryDir dir; Application vault(dir.path()); QString error;
         if(!vault.createPasswordVault("test-password-123",&error)) return 2;
         QSettings preferences(dir.filePath("demo.ini"),QSettings::IniFormat);
         QSettings run(dir.filePath("demo-run.ini"),QSettings::IniFormat);
         ui::theme::apply(qt.arguments().contains("--dark")?ui::theme::Mode::Dark:ui::theme::Mode::Light);
-        ui::MainWindow window(vault,nullptr,&preferences,&run);
-        QTimer::singleShot(0,&window,[&] {
-            if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
-                dialog->setWindowTitle(QStringLiteral("Настройки — вымышленные данные"));
-                if(qt.arguments().contains("--compact")) dialog->resize(420,480);
+        if(!qt.arguments().contains("--tray")) QTimer::singleShot(0,&vault,[&] {
+            for(auto* widget:QApplication::topLevelWidgets()) if(auto* window=qobject_cast<ui::MainWindow*>(widget)) {
+                QTimer::singleShot(0,window,[&] {
+                    if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                        dialog->setWindowTitle(QStringLiteral("Настройки — вымышленные данные"));
+                        if(qt.arguments().contains("--compact")) dialog->resize(420,480);
+                    }
+                });
+                window->showSettings(); break;
             }
         });
-        window.showSettings(); return 0;
+        return ui::runSession(vault,preferences,qt.arguments().contains("--tray"),&run);
     }
     TestSettings test; return QTest::qExec(&test,argc,argv);
 }
