@@ -31,6 +31,9 @@ bool fail(QString* err, const char* text) { if (err) *err = QString::fromUtf8(te
 }
 struct Application::Outcome {
     bool ok = false;
+    bool wroteFile=false,legacyCurrent=false,upgradeApproved=false;
+    QByteArray previousFile;
+    QString safetyPath;
     QString error;
     QByteArray file;
     model::VaultModel model;
@@ -200,24 +203,51 @@ bool Application::canStart(Gate expected, QString* err) const {
     if (gate_ != expected) return fail(err, "Операция недоступна в текущем состоянии хранилища.");
     return true;
 }
-bool Application::execute(std::function<std::shared_ptr<Outcome>(quint64)> job, Mode mode, bool adopt, QString* err) {
+bool Application::schemaUpgradeRequired() const {return gate_==Gate::Ready && persistedVersion_<4;}
+bool Application::approveSchemaUpgrade(QString* error) {
+    if(!canStart(Gate::Ready,error)) return false;
+    if(schemaUpgradeRequired()) upgradeApproval_=generation();
+    return true;
+}
+bool Application::storeCandidate(Outcome& result,quint64 expected) {
+    const auto canceled=[&] {return generation()!=expected;};
+    if(canceled()) return fail(&result.error,"Запись отменена.");
+    if(result.legacyCurrent) {
+        if(!result.upgradeApproved) return fail(&result.error,"Требуется подтверждение обновления формата до v4.");
+        QByteArray safety;
+        if(!result.safetyPath.isEmpty() && (store_.loadBytes(result.safetyPath,&safety)!=store::VaultStore::Load::Ok || safety!=result.previousFile))
+            result.safetyPath.clear();
+        if(result.safetyPath.isEmpty()) result.safetyPath=store_.preserveBeforeUpgrade(result.previousFile,&result.error);
+        if(result.safetyPath.isEmpty()) return false;
+    }
+    if(canceled()) return fail(&result.error,"Запись отменена; страховочная копия сохранена.");
+    result.wroteFile=store_.save(result.file,&result.error,canceled);
+    return result.wroteFile;
+}
+bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err) {
     const quint64 generation = generation_;
+    auto result=std::make_shared<Outcome>();
+    result->previousFile=file_; result->legacyCurrent=hasVault_ && persistedVersion_<4;
+    result->upgradeApproved=upgradeApproval_ && *upgradeApproval_==generation; result->safetyPath=upgradeSafetyPath_;
     busy_ = true; emit busyChanged(true);
-    std::shared_ptr<Outcome> result;
-    try { result = waitFor(QtConcurrent::run([this, generation, job = std::move(job)] {
-        if (generation != generation_) return std::make_shared<Outcome>();
-        return job(generation);
+    try { waitFor(QtConcurrent::run([this, generation, job = std::move(job),result] {
+        if (generation != generation_) return false;
+        job(*result,generation); return true;
     })); }
-    catch (...) { result = std::make_shared<Outcome>(); result->error = QStringLiteral("Не удалось выполнить операцию хранилища."); }
+    catch (...) { result->ok=false; result->error = QStringLiteral("Не удалось выполнить операцию хранилища."); }
     bool ok = result->ok;
-    const bool changed = ok && !result->file.isEmpty();
-    if (ok && !result->file.isEmpty()) { hasVault_ = true; hint_ = mode; }
-    if (generation != generation_) {
-        ok = false; result->error = QStringLiteral("Операция отменена блокировкой хранилища.");
+    const bool changed = result->wroteFile || (ok && !result->file.isEmpty());
+    if(!result->safetyPath.isEmpty()) upgradeSafetyPath_=result->safetyPath;
+    if(result->wroteFile) {hasVault_=true; hint_=mode; persistedVersion_=4;}
+    if (generation != generation_ || (result->wroteFile && !ok)) {
+        ok = false;
+        result->error = result->wroteFile?QStringLiteral("Файл записан. Операция была прервана после фиксации; сеанс остаётся заблокированным.")
+            :QStringLiteral("Операция отменена блокировкой хранилища.");
+        if(result->wroteFile) {mode_=Mode::None; lock();}
         gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
     } else if (ok) {
-        if (!result->file.isEmpty()) file_ = std::move(result->file);
-        if (adopt) { model_ = std::move(result->model); dataKey_ = std::move(result->key); mode_ = mode; gate_ = Gate::Ready; }
+        if (!result->file.isEmpty()) {file_ = std::move(result->file); hasVault_=true; hint_=mode;}
+        if (adopt) {persistedVersion_=result->wroteFile?4:result->model.decodedVersion(); model_ = std::move(result->model); dataKey_ = std::move(result->key); mode_ = mode; gate_ = Gate::Ready;}
     }
     if (err) *err = ok ? QString() : result->error;
     result.reset();
@@ -229,32 +259,30 @@ bool Application::createPasswordVault(const QByteArray& pw, QString* err) {
     if (!canStart(Gate::NeedSetup, err)) return false;
     if (!validPassword(pw)) return fail(err, "Пароль: минимум 12 и максимум 1024 байта UTF-8.");
     auto secret = std::make_shared<SecureBytes>(pw);
-    return execute([this, secret](quint64 expected) {
-        auto result = std::make_shared<Outcome>();
-        result->key = std::make_unique<SecureKey>();
+    return execute([this, secret](Outcome& result,quint64 expected) {
+        result.key = std::make_unique<SecureKey>();
         // Секреты сериализуются сразу в защищённый буфер (без обычной кучи) и
         // оттуда уходят в шифратор контейнера.
-        cbor::SecureBuffer cbor(result->model.toCborSecure());
-        result->file = cbor.size() > container::MaxPlainBytes
-            ? QByteArray() : container::packPassword(secret->bytes(), cbor.data(), cbor.size(), result->key.get());
+        cbor::SecureBuffer cbor(result.model.toCborSecure());
+        result.file = cbor.size() > container::MaxPlainBytes
+            ? QByteArray() : container::packPassword(secret->bytes(), cbor.data(), cbor.size(), result.key.get());
         secret->clear();
-        if (generation() != expected) return result;
-        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
-        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось создать хранилище.");
-        return result;
+        if (generation() != expected) return;
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось создать хранилище.");
+
     }, Mode::Password, true, err);
 }
 bool Application::unlock(const QByteArray& pw, QString* err) {
     if (!canStart(Gate::NeedUnlock, err)) return false;
     if (!validPassword(pw)) return fail(err, "Пароль: минимум 12 и максимум 1024 байта UTF-8.");
     auto secret = std::make_shared<SecureBytes>(pw);
-    return execute([this, secret](quint64) {
-        auto result = std::make_shared<Outcome>();
-        if (store_.loadBytes(store_.mainPath(), &result->file) != store::VaultStore::Load::Ok)
-            result->error = QStringLiteral("Не удалось прочитать файл хранилища.");
-        else if (result->open(container::openPassword(result->file, secret->bytes()))) store_.acceptVerified(result->file);
+    return execute([this, secret](Outcome& result,quint64) {
+        if (store_.loadBytes(store_.mainPath(), &result.file) != store::VaultStore::Load::Ok)
+            result.error = QStringLiteral("Не удалось прочитать файл хранилища.");
+        else if (result.open(container::openPassword(result.file, secret->bytes()))) store_.acceptVerified(result.file);
         secret->clear();
-        return result;
+
     }, Mode::Password, true, err);
 }
 bool Application::save(QString* err) {
@@ -263,18 +291,18 @@ bool Application::save(QString* err) {
     if (plain->size() > container::MaxPlainBytes) return fail(err, "Содержимое хранилища превышает 64 МиБ.");
     auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
     const auto file = file_;
-    return execute([this, plain, key, file](quint64 expected) mutable {
-        auto result = std::make_shared<Outcome>();
-        result->file = container::reseal(file, *key, plain->data(), plain->size());
+    return execute([this, plain, key, file](Outcome& result,quint64 expected) mutable {
+        result.file = container::reseal(file, *key, plain->data(), plain->size());
         plain.reset(); // освобождает sodium-буфер немедленно, не дожидаясь конца лямбды
-        if (generation() != expected) return result;
-        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
-        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сохранить хранилище.");
-        return result;
+        if (generation() != expected) return;
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось сохранить хранилище.");
+
     }, mode_, false, err);
 }
 void Application::lock() {
     cancelBackupRestore();
+    upgradeApproval_.reset();
     model_.clear(); dataKey_.reset(); file_.clear(); mode_ = Mode::None;
     ++generation_;
     gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
@@ -316,22 +344,21 @@ bool Application::importContainer(const QByteArray& bytes, const QByteArray& imp
     auto source = std::make_shared<SecureBytes>(bytes);
     auto fileSecret = std::make_shared<SecureBytes>(importPw);
     auto localSecret = std::make_shared<SecureBytes>(newLocalPw);
-    return execute([this, source, fileSecret, localSecret](quint64 expected) {
-        auto result = std::make_shared<Outcome>();
+    return execute([this, source, fileSecret, localSecret](Outcome& result,quint64 expected) {
         auto opened = container::openPassword(source->bytes(), fileSecret->bytes());
         SecureBytes plain(std::move(opened.cbor));
-        if (opened.status != container::Status::Ok) { result->error = QStringLiteral("Неверный пароль файла импорта или файл повреждён."); return result; }
-        if (result->model.fromCbor(plain.bytes(), &result->error) != model::VaultModel::ParseStatus::Ok) return result;
+        if (opened.status != container::Status::Ok) { result.error = QStringLiteral("Неверный пароль файла импорта или файл повреждён."); return; }
+        if (result.model.fromCbor(plain.bytes(), &result.error) != model::VaultModel::ParseStatus::Ok) return;
         plain.clear();
-        if (generation() != expected) return result;
-        result->key = std::make_unique<SecureKey>();
-        cbor::SecureBuffer cbor(result->model.toCborSecure());
-        result->file = cbor.size() > container::MaxPlainBytes
-            ? QByteArray() : container::packPassword(localSecret->bytes(), cbor.data(), cbor.size(), result->key.get());
-        if (generation() != expected) return result;
-        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
-        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось импортировать хранилище.");
-        return result;
+        if (generation() != expected) return;
+        result.key = std::make_unique<SecureKey>();
+        cbor::SecureBuffer cbor(result.model.toCborSecure());
+        result.file = cbor.size() > container::MaxPlainBytes
+            ? QByteArray() : container::packPassword(localSecret->bytes(), cbor.data(), cbor.size(), result.key.get());
+        if (generation() != expected) return;
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось импортировать хранилище.");
+
     }, Mode::Password, true, err);
 }
 bool Application::switchToPassword(const QByteArray& newPw, QString* err) {
@@ -339,34 +366,32 @@ bool Application::switchToPassword(const QByteArray& newPw, QString* err) {
     if (!validPassword(newPw)) return fail(err, "Новый мастер-пароль: минимум 12 и максимум 1024 байта UTF-8.");
     auto snapshot = std::make_shared<model::VaultModel>(model_);
     auto secret = std::make_shared<SecureBytes>(newPw);
-    return execute([this, snapshot, secret](quint64 expected) {
-        auto result = std::make_shared<Outcome>();
-        result->model = *snapshot;
-        result->key = std::make_unique<SecureKey>();
-        cbor::SecureBuffer cbor(result->model.toCborSecure());
-        if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
-        result->file = container::packPassword(secret->bytes(), cbor.data(), cbor.size(), result->key.get());
-        if (generation() != expected) return result;
-        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
-        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сменить режим разблокировки.");
-        return result;
+    return execute([this, snapshot, secret](Outcome& result,quint64 expected) {
+        result.model = *snapshot;
+        result.key = std::make_unique<SecureKey>();
+        cbor::SecureBuffer cbor(result.model.toCborSecure());
+        if (cbor.size() > container::MaxPlainBytes) { result.error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return; }
+        result.file = container::packPassword(secret->bytes(), cbor.data(), cbor.size(), result.key.get());
+        if (generation() != expected) return;
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось сменить режим разблокировки.");
+
     }, Mode::Password, true, err);
 }
 #ifdef Q_OS_WIN
 bool Application::switchToHello(QString* err) {
     if (!canStart(Gate::Ready, err)) return false;
     auto snapshot = std::make_shared<model::VaultModel>(model_);
-    return execute([this, snapshot](quint64 expected) {
-        auto result = std::make_shared<Outcome>();
-        result->model = *snapshot;
-        result->key = std::make_unique<SecureKey>();
-        cbor::SecureBuffer cbor(result->model.toCborSecure());
-        if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
-        result->file = container::packHello(cbor.data(), cbor.size(), result->key.get());
-        if (generation() != expected) return result;
-        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
-        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось сменить режим разблокировки.");
-        return result;
+    return execute([this, snapshot](Outcome& result,quint64 expected) {
+        result.model = *snapshot;
+        result.key = std::make_unique<SecureKey>();
+        cbor::SecureBuffer cbor(result.model.toCborSecure());
+        if (cbor.size() > container::MaxPlainBytes) { result.error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return; }
+        result.file = container::packHello(cbor.data(), cbor.size(), result.key.get());
+        if (generation() != expected) return;
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось сменить режим разблокировки.");
+
     }, Mode::Hello, true, err);
 }
 #endif
@@ -375,58 +400,56 @@ bool Application::checkPassword(const QByteArray& pw, QString* err) {
     if (mode_ != Mode::Password || !validPassword(pw)) return fail(err, "Неверный мастер-пароль.");
     auto secret = std::make_shared<SecureBytes>(pw); const auto file = file_;
     auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
-    return execute([this, secret, file, key](quint64) {
-        auto result = std::make_shared<Outcome>(); QByteArray current;
+    return execute([this, secret, file, key](Outcome& result,quint64) {
+         QByteArray current;
         const auto loaded = store_.loadBytes(store_.mainPath(), &current);
         if (loaded == store::VaultStore::Load::Ok && current != file)
-            result->error = QStringLiteral("Файл хранилища изменился вне приложения. Закройте приложение и откройте хранилище заново.");
+            result.error = QStringLiteral("Файл хранилища изменился вне приложения. Закройте приложение и откройте хранилище заново.");
         else if (loaded == store::VaultStore::Load::Ok) {
             auto opened = container::openPassword(current, secret->bytes()); SecureBytes plain(std::move(opened.cbor));
-            result->ok = opened.status == container::Status::Ok && opened.dataKey == *key;
-            if (!result->ok) result->error = QStringLiteral("Неверный мастер-пароль.");
-        } else result->error = QStringLiteral("Не удалось прочитать файл хранилища. Откройте хранилище заново.");
-        secret->clear(); return result;
+            result.ok = opened.status == container::Status::Ok && opened.dataKey == *key;
+            if (!result.ok) result.error = QStringLiteral("Неверный мастер-пароль.");
+        } else result.error = QStringLiteral("Не удалось прочитать файл хранилища. Откройте хранилище заново.");
+        secret->clear();
     }, Mode::Password, false, err);
 }
 #ifdef Q_OS_WIN
 bool Application::verifyHello(void* hwnd, QString* err) {
     if (!canStart(Gate::Ready, err)) return false;
     if (mode_ != Mode::Hello) return fail(err, "Хранилище не использует Windows Hello.");
-    return execute([this, hwnd](quint64) {
-        auto result = std::make_shared<Outcome>(); result->ok = hello_(hwnd, QStringLiteral("Подтвердите доступ к секрету")) == platform::hello::Result::Verified;
-        if (!result->ok) result->error = QStringLiteral("Проверка Windows Hello не выполнена."); return result;
+    return execute([this, hwnd](Outcome& result,quint64) {
+         result.ok = hello_(hwnd, QStringLiteral("Подтвердите доступ к секрету")) == platform::hello::Result::Verified;
+        if (!result.ok) result.error = QStringLiteral("Проверка Windows Hello не выполнена.");
     }, Mode::Hello, false, err);
 }
 bool Application::createHelloVault(QString* err, void* hwnd) {
     if (!canStart(Gate::NeedSetup, err)) return false;
-    return execute([this, hwnd](quint64 expected) {
-        auto result = std::make_shared<Outcome>();
+    return execute([this, hwnd](Outcome& result,quint64 expected) {
         if (hello_(hwnd, QStringLiteral("Создание хранилища TokenBucket")) != platform::hello::Result::Verified) {
-            result->error = QStringLiteral("Проверка Windows Hello не выполнена."); return result;
+            result.error = QStringLiteral("Проверка Windows Hello не выполнена."); return;
         }
-        if (generation() != expected) return result;
-        result->key = std::make_unique<SecureKey>();
-        cbor::SecureBuffer cbor(result->model.toCborSecure());
-        if (cbor.size() > container::MaxPlainBytes) { result->error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return result; }
-        result->file = container::packHello(cbor.data(), cbor.size(), result->key.get());
-        if (generation() != expected) return result;
-        result->ok = !result->file.isEmpty() && store_.save(result->file, &result->error);
-        if (!result->ok && result->error.isEmpty()) result->error = QStringLiteral("Не удалось создать хранилище Windows Hello.");
-        return result;
+        if (generation() != expected) return;
+        result.key = std::make_unique<SecureKey>();
+        cbor::SecureBuffer cbor(result.model.toCborSecure());
+        if (cbor.size() > container::MaxPlainBytes) { result.error = QStringLiteral("Содержимое хранилища превышает 64 МиБ."); return; }
+        result.file = container::packHello(cbor.data(), cbor.size(), result.key.get());
+        if (generation() != expected) return;
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось создать хранилище Windows Hello.");
+
     }, Mode::Hello, true, err);
 }
 bool Application::unlockHello(QString* err, void* hwnd) {
     if (!canStart(Gate::NeedUnlock, err)) return false;
-    return execute([this, hwnd](quint64 expected) {
-        auto result = std::make_shared<Outcome>();
+    return execute([this, hwnd](Outcome& result,quint64 expected) {
         if (hello_(hwnd, QStringLiteral("Разблокировка TokenBucket")) != platform::hello::Result::Verified) {
-            result->error = QStringLiteral("Проверка Windows Hello не выполнена."); return result;
+            result.error = QStringLiteral("Проверка Windows Hello не выполнена."); return;
         }
-        if (generation() != expected) return result;
-        if (store_.loadBytes(store_.mainPath(), &result->file) != store::VaultStore::Load::Ok)
-            result->error = QStringLiteral("Не удалось прочитать файл хранилища.");
-        else if (result->open(container::openHello(result->file))) store_.acceptVerified(result->file);
-        return result;
+        if (generation() != expected) return;
+        if (store_.loadBytes(store_.mainPath(), &result.file) != store::VaultStore::Load::Ok)
+            result.error = QStringLiteral("Не удалось прочитать файл хранилища.");
+        else if (result.open(container::openHello(result.file))) store_.acceptVerified(result.file);
+
     }, Mode::Hello, true, err);
 }
 #endif

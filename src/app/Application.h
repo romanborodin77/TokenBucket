@@ -56,6 +56,9 @@ public:
     bool createPasswordVault(const QByteArray& pw, QString* err);
     bool unlock(const QByteArray& pw, QString* err);
     bool save(QString* err);
+    bool schemaUpgradeRequired() const;
+    bool approveSchemaUpgrade(QString* error);
+    QString upgradeSafetyPath() const { return upgradeSafetyPath_; }
     bool checkPassword(const QByteArray& pw, QString* err);
     void lock();
     QByteArray exportContainer(const QByteArray& exportPw, QString* err);
@@ -89,12 +92,16 @@ private:
     // GUI-потоке: adopt=true — операция переводит хранилище в Ready (создание/
     // разблокировка/импорт/смена режима), false — только сохранение поверх текущего.
     // Поколение сверяется до применения: результат отменённой операции выбрасывается.
-    bool execute(std::function<std::shared_ptr<Outcome>(quint64)> job, Mode mode, bool adopt, QString* err);
+    bool execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err);
+    bool storeCandidate(Outcome& result,quint64 expected);
     bool canStart(Gate expected, QString* err) const;
     store::VaultStore store_;
     model::VaultModel model_;
     std::unique_ptr<SecureKey> dataKey_;
     QByteArray file_;
+    int persistedVersion_=4;
+    std::optional<quint64> upgradeApproval_;
+    QString upgradeSafetyPath_;
     Gate gate_ = Gate::NeedSetup;
     Mode mode_ = Mode::None, hint_ = Mode::None;
     std::atomic<quint64> generation_{0};

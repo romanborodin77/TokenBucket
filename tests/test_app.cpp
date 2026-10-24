@@ -10,6 +10,11 @@
 #include <QLabel>
 #include <QDir>
 #include <QScopeGuard>
+#include <QCborMap>
+#include <QCborArray>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 #include "../src/app/Application.h"
 #include "../src/ui/SetupDialog.h"
 #include "../src/ui/UnlockDialog.h"
@@ -23,7 +28,193 @@ class TestApp : public QObject {
     static QByteArray readFile(const QString& path) {
         QFile file(path); if(!file.open(QIODevice::ReadOnly)) return {}; return file.readAll();
     }
+    static QByteArray legacyV3() {
+        crypto::init(); const auto group=QUuid::createUuid(),id=QUuid::createUuid();
+        QCborMap node; node[QStringLiteral("id")]=group.toString(QUuid::WithoutBraces);
+        node[QStringLiteral("p")]=QString(); node[QStringLiteral("n")]=QStringLiteral("Legacy");
+        QCborMap entry; entry[QStringLiteral("id")]=id.toString(QUuid::WithoutBraces);
+        entry[QStringLiteral("g")]=group.toString(QUuid::WithoutBraces); entry[QStringLiteral("type")]=0;
+        entry[QStringLiteral("title")]=QStringLiteral("Legacy token"); entry[QStringLiteral("tok")]=QByteArray("synthetic-legacy-token");
+        QCborMap root; root[QStringLiteral("v")]=3; root[QStringLiteral("nodes")]=QCborArray{node}; root[QStringLiteral("entries")]=QCborArray{entry};
+        return container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr);
+    }
 private slots:
+    void legacySaveRequiresExplicitConsent() {
+        QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); const auto bytes=legacyV3(); QVERIFY(!bytes.isEmpty());
+        const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+        Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error));
+        QCOMPARE(app.model()->decodedVersion(),3);
+        QVERIFY(!app.save(&error)); QVERIFY(!error.isEmpty()); QCOMPARE(readFile(path),bytes);
+        QVERIFY(app.schemaUpgradeRequired()); QVERIFY(app.approveSchemaUpgrade(&error)); QVERIFY(app.save(&error));
+        const auto safety=app.upgradeSafetyPath(); QVERIFY(!safety.isEmpty()); QCOMPARE(readFile(safety),bytes);
+        QVERIFY(!readFile(path).contains("synthetic-legacy-token")); QVERIFY(!app.schemaUpgradeRequired());
+        QVERIFY(app.save(&error)); QCOMPARE(app.upgradeSafetyPath(),safety); QCOMPARE(readFile(safety),bytes);
+        app.lock(); QVERIFY(app.unlock("valid-password",&error)); QVERIFY(!app.schemaUpgradeRequired());
+        QCOMPARE(app.model()->decodedVersion(),4);
+    }
+    void legacyWriterRoutes_data() {
+        QTest::addColumn<int>("route"); QTest::newRow("save")<<0; QTest::newRow("password")<<1; QTest::newRow("import")<<2;
+#ifdef Q_OS_WIN
+        QTest::newRow("hello")<<3;
+#endif
+    }
+    void legacyWriterRoutes() {
+        QFETCH(int,route); QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path()));
+        const auto bytes=legacyV3(); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,[](void*,const QString&) {return platform::hello::Result::Verified;});
+#else
+        Application app(dir.path());
+#endif
+        QString error; QVERIFY(app.unlock("valid-password",&error));
+        const auto write=[&] {
+            if(route==1) return app.switchToPassword("new-valid-password",&error);
+            if(route==2) return app.importContainer(bytes,"valid-password","new-valid-password",&error);
+#ifdef Q_OS_WIN
+            if(route==3) return app.switchToHello(&error);
+#endif
+            return app.save(&error);
+        };
+        QVERIFY(!write()); QCOMPARE(readFile(path),bytes); QVERIFY(app.approveSchemaUpgrade(&error));
+        QVERIFY2(write(),qPrintable(error)); const auto safety=app.upgradeSafetyPath(); QVERIFY(!safety.isEmpty()); QCOMPARE(readFile(safety),bytes);
+        QVERIFY(QCborValue::fromCbor(container::openPassword(readFile(safety),"valid-password").cbor).toMap().value(QStringLiteral("v")).toInteger()==3);
+        app.lock();
+#ifdef Q_OS_WIN
+        if(route==3) QVERIFY(app.unlockHello(&error)); else
+#endif
+        QVERIFY(app.unlock(route==0?"valid-password":"new-valid-password",&error));
+        QCOMPARE(app.model()->decodedVersion(),4); QCOMPARE(app.model()->entries().size(),1);
+        QCOMPARE(app.model()->entries().cbegin()->token,QString("synthetic-legacy-token"));
+    }
+    void upgradeFailures_data() {
+        QTest::addColumn<int>("fault");
+        const char* names[]={"safety-write","safety-corrupt","main-changed","lock-in-safety","lock-in-temporary",
+            "temporary-write","final-rename","lock-after-final-rename","approval-revoked","cached-copy-removed","main-changed-during-write",
+            "symlink-main","lock-inside-final-rename"};
+        for(int i=0;i<int(std::size(names));++i) QTest::newRow(names[i])<<i;
+    }
+    void upgradeFailures() {
+        QFETCH(int,fault); QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path()));
+        const auto bytes=legacyV3(); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes)); FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.unlock("valid-password",&error)); QVERIFY(app.approveSchemaUpgrade(&error));
+        const auto changed=container::packPassword("valid-password",app.model()->toCbor(),nullptr);
+        const auto replace=[&] {return QFile::remove(path) && store::realFileOps().writeAll(path,changed);};
+        if(fault==0) ops.failWriteCall=1;
+        if(fault==1) ops.corruptWriteCall=1;
+        if(fault==2) QVERIFY(replace());
+        if(fault==3 || fault==4) ops.beforeWrite=[&](const QString& target) {
+            if((fault==3 && target.contains(".before-upgrade-")) || (fault==4 && target.endsWith("vault.tb.tmp")))
+                QMetaObject::invokeMethod(&app,&Application::lock,Qt::BlockingQueuedConnection);
+        };
+        if(fault==5 || fault==9) ops.failWriteCall=2;
+        if(fault==6) ops.failRenameCall=2;
+        if(fault==7) ops.afterRename=[&](const QString&,const QString& to) {
+            if(to==path) QMetaObject::invokeMethod(&app,&Application::lock,Qt::BlockingQueuedConnection);
+        };
+        if(fault==12) ops.beforeRename=[&](const QString&,const QString& to) {
+            if(to==path) QMetaObject::invokeMethod(&app,&Application::lock,Qt::BlockingQueuedConnection);
+        };
+        if(fault==8) {app.lock(); QVERIFY(app.unlock("valid-password",&error));}
+        bool changedDuringWrite=false;
+        if(fault==10) ops.beforeWrite=[&](const QString& target) {if(target.endsWith("vault.tb.tmp")) changedDuringWrite=replace();};
+        if(fault==11) {
+            const auto target=dir.filePath("other.tb"); QVERIFY(store::realFileOps().writeAll(target,bytes)); QVERIFY(QFile::remove(path));
+#ifdef Q_OS_WIN
+            QVERIFY(CreateSymbolicLinkW(reinterpret_cast<LPCWSTR>(path.utf16()),reinterpret_cast<LPCWSTR>(target.utf16()),SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE));
+#else
+            QVERIFY(QFile::link(target,path));
+#endif
+        }
+        const bool saved=app.save(&error); QVERIFY(!saved); QVERIFY(!error.isEmpty());
+        if(fault==7 || fault==12) {
+            QVERIFY(error.contains(QStringLiteral("Файл записан"))); QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+            QVERIFY(readFile(path)!=bytes); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),4);
+        } else QCOMPARE(readFile(path),(fault==2 || fault==10)?changed:bytes);
+        if(fault==10) QVERIFY(changedDuringWrite);
+        if(fault==11) QVERIFY(app.upgradeSafetyPath().isEmpty());
+        if(fault==9) {
+            const auto first=app.upgradeSafetyPath(); QVERIFY(!first.isEmpty()); QVERIFY(QFile::remove(first)); ops=FaultOps{};
+            QVERIFY(app.save(&error)); QVERIFY(app.upgradeSafetyPath()!=first); QCOMPARE(readFile(app.upgradeSafetyPath()),bytes);
+        }
+        if(fault==0 || fault==1 || fault==5 || fault==6) {
+            ops=FaultOps{}; QVERIFY2(app.save(&error),qPrintable(error)); QCOMPARE(readFile(app.upgradeSafetyPath()),bytes);
+        }
+    }
+    void exportingLegacyDoesNotUpgradeMain() {
+        QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); const auto bytes=legacyV3(); const auto path=dir.filePath("vault.tb");
+        QVERIFY(store::realFileOps().writeAll(path,bytes)); Application app(dir.path()); QString error;
+        QVERIFY(app.unlock("valid-password",&error)); const auto exported=app.exportContainer("export-password",&error); QVERIFY(!exported.isEmpty());
+        QCOMPARE(readFile(path),bytes); QVERIFY(app.schemaUpgradeRequired()); QVERIFY(app.upgradeSafetyPath().isEmpty());
+        model::VaultModel decoded; QCOMPARE(decoded.fromCbor(container::openPassword(exported,"export-password").cbor,&error),model::VaultModel::ParseStatus::Ok);
+        QCOMPARE(decoded.decodedVersion(),4); QVERIFY(!app.save(&error));
+    }
+    void lateModeSwitchKeepsActualHint_data() {
+        QTest::addColumn<bool>("hello"); QTest::newRow("password")<<false;
+#ifdef Q_OS_WIN
+        QTest::newRow("hello")<<true;
+#endif
+    }
+    void lateModeSwitchKeepsActualHint() {
+        QFETCH(bool,hello); QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,[](void*,const QString&) {return platform::hello::Result::Verified;},ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto path=app.storePathForTest();
+        ops.afterRename=[&](const QString&,const QString& to) {if(to==path) QMetaObject::invokeMethod(&app,&Application::lock,Qt::BlockingQueuedConnection);};
+#ifdef Q_OS_WIN
+        const bool changed=hello?app.switchToHello(&error):app.switchToPassword("new-valid-password",&error);
+#else
+        const bool changed=app.switchToPassword("new-valid-password",&error);
+#endif
+        QVERIFY(!changed); QVERIFY(error.contains(QStringLiteral("Файл записан"))); QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+        QCOMPARE(app.unlockMode(),hello?Application::Mode::Hello:Application::Mode::Password);
+#ifdef Q_OS_WIN
+        if(hello) QVERIFY(app.unlockHello(&error)); else
+#endif
+        QVERIFY(app.unlock("new-valid-password",&error));
+        QCOMPARE(app.model()->decodedVersion(),4);
+    }
+    void lateUnlockDoesNotClaimWrite() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto bytes=readFile(app.storePathForTest()); app.lock();
+        QTimer::singleShot(0,&app,&Application::lock); QVERIFY(!app.unlock("valid-password",&error));
+        QVERIFY(!error.contains(QStringLiteral("Файл записан"))); QCOMPARE(readFile(app.storePathForTest()),bytes);
+        QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+    }
+    void restoringLegacyRequiresNewUpgradeApproval() {
+        QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); const auto bytes=legacyV3(); const auto path=dir.filePath("vault.tb");
+        QVERIFY(store::realFileOps().writeAll(path,bytes)); Application app(dir.path()); QString error;
+        QVERIFY(app.unlock("valid-password",&error)); QVERIFY(app.approveSchemaUpgrade(&error)); QVERIFY(app.save(&error));
+        QCOMPARE(app.backupMode(&error),Application::Mode::Password); QVERIFY(app.prepareBackupRestore("valid-password",&error));
+        QVERIFY(app.restorePreparedBackup().committed); QCOMPARE(readFile(path),bytes);
+        QVERIFY(app.unlock("valid-password",&error)); QVERIFY(app.schemaUpgradeRequired()); QVERIFY(!app.save(&error));
+        QVERIFY(app.approveSchemaUpgrade(&error)); QVERIFY(app.save(&error));
+    }
+    void lockDuringTemporaryWritePreservesMain() {
+        QTemporaryDir dir; FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto before=readFile(app.storePathForTest());
+        QVERIFY(app.model()->addNode(QUuid::createUuid(),{},"Not committed").isEmpty());
+        bool locked=false;
+        ops.beforeWrite=[&](const QString& path) {
+            if(path.endsWith("vault.tb.tmp")) QMetaObject::invokeMethod(&app,[&] {locked=true; app.lock();},Qt::BlockingQueuedConnection);
+        };
+        QVERIFY(!app.save(&error)); QVERIFY(locked); QCOMPARE(readFile(app.storePathForTest()),before);
+        QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+    }
     void backupHintBindsCiphertextBeforeAuthentication() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("valid-password",&error));

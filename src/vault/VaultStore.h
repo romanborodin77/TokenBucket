@@ -19,12 +19,14 @@ public:
     QString tmpPath() const;
     // Вызывать только после проверки AEAD и разбора модели при разблокировке.
     void acceptVerified(const QByteArray& bytes) { verified_ = bytes; hasVerified_ = true; }
-    bool save(const QByteArray& bytes, QString* err);
+    bool save(const QByteArray& bytes, QString* err,const std::function<bool()>& canceled={});
+    QString preserveBeforeUpgrade(const QByteArray& expectedMain,QString* error);
     RestoreResult restoreBackup(const QByteArray& expectedMain,const QByteArray& expectedBackup,
                                 const std::function<bool()>& canceled);
     enum class Load { Ok, Missing, IoError };
     Load loadBytes(const QString& path, QByteArray* out) const;
 private:
+    QString preserveVerified(const QByteArray& expectedMain,const QString& purpose,QString* error);
     QString dir_;
     FileOps& ops_;
     QByteArray verified_;   // последний подтверждённый образ основного файла (шифротекст)

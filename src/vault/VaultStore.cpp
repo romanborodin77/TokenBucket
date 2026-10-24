@@ -66,7 +66,25 @@ VaultStore::Load VaultStore::loadBytes(const QString& path, QByteArray* out) con
     *out = std::move(bytes);
     return Load::Ok;
 }
-bool VaultStore::save(const QByteArray& bytes, QString* err) {
+QString VaultStore::preserveBeforeUpgrade(const QByteArray& expectedMain,QString* error) {
+    return preserveVerified(expectedMain,QStringLiteral("upgrade"),error);
+}
+QString VaultStore::preserveVerified(const QByteArray& expectedMain,const QString& purpose,QString* error) {
+    if(error) error->clear();
+    const auto fail=[&](const char* text) {if(error) *error=QString::fromUtf8(text); return QString();};
+    if(expectedMain.isEmpty() || expectedMain.size()>container::MaxFileBytes || !hasVerified_ || verified_!=expectedMain)
+        return fail("Основной файл не был проверен.");
+    if(!ensurePrivateDir(dir_)) return fail("Не удалось ограничить доступ к каталогу.");
+    QByteArray current;
+    if(loadBytes(mainPath(),&current)!=Load::Ok || current!=expectedMain) return fail("Основной файл изменился или недоступен.");
+    const auto path=mainPath()+QStringLiteral(".before-%1-%2-%3").arg(purpose,
+        QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmsszzz"),QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if(!ops_.writeAll(path,expectedMain)) return fail("Не удалось создать страховочную копию.");
+    if(loadBytes(path,&current)!=Load::Ok || current!=expectedMain) return fail("Проверка страховочной копии не прошла.");
+    if(loadBytes(mainPath(),&current)!=Load::Ok || current!=expectedMain) return fail("Основной файл изменился во время создания копии.");
+    return path;
+}
+bool VaultStore::save(const QByteArray& bytes, QString* err,const std::function<bool()>& canceled) {
     // Атомарное сохранение поверх проверенного файла (см. acceptVerified): запись во
     // временный файл с правами только владельца → перечитывание и сверка → копия
     // подтверждённой версии в .bak (тоже через tmp) → атомарная замена основного.
@@ -82,7 +100,9 @@ bool VaultStore::save(const QByteArray& bytes, QString* err) {
         if (err) *err = QString::fromUtf8(message);
         return false;
     };
+    const auto isCanceled=[&] {return canceled && canceled();};
     if (bytes.isEmpty() || bytes.size() > container::MaxFileBytes) return fail("Недопустимый размер файла хранилища.");
+    if(isCanceled()) return fail("Запись отменена до замены основного файла.");
     if (!ensurePrivateDir(dir_)) return fail("Не удалось ограничить доступ к каталогу.");
     QByteArray previous;
     const Load loaded = loadBytes(mainPath(), &previous);
@@ -90,15 +110,21 @@ bool VaultStore::save(const QByteArray& bytes, QString* err) {
     if (loaded == Load::Ok && (!hasVerified_ || previous != verified_))
         return fail("Основной файл изменился или не был проверен. Откройте хранилище заново.");
     if (loaded == Load::Missing && hasVerified_) return fail("Основной файл исчез. Сохранение отменено.");
+    if(isCanceled()) return fail("Запись отменена до замены основного файла.");
     ops_.removeFile(tmpPath()); ops_.removeFile(backupTmp);
     if (!ops_.writeAll(tmpPath(), bytes)) return fail("Не удалось записать временный файл.");
     QByteArray check;
     if (loadBytes(tmpPath(), &check) != Load::Ok || check != bytes) return fail("Проверка временного файла не прошла.");
+    if(isCanceled()) return fail("Запись отменена до замены основного файла.");
     if (loaded == Load::Ok) {
         if (!ops_.writeAll(backupTmp, previous)
-            || loadBytes(backupTmp, &check) != Load::Ok || check != previous
-            || !ops_.renameReplace(backupTmp, backupPath())) return fail("Не удалось сохранить резервную копию.");
+            || loadBytes(backupTmp, &check) != Load::Ok || check != previous) return fail("Не удалось сохранить резервную копию.");
+        if(isCanceled()) return fail("Запись отменена до замены основного файла.");
+        if(!ops_.renameReplace(backupTmp, backupPath())) return fail("Не удалось сохранить резервную копию.");
     }
+    const auto current=loadBytes(mainPath(),&check);
+    if(current!=loaded || (current==Load::Ok && check!=previous)) return fail("Основной файл изменился во время записи. Откройте хранилище заново.");
+    if(isCanceled()) return fail("Запись отменена до замены основного файла.");
     // Основной файл не переносится: отказ последней замены не требует отката.
     if (!ops_.renameReplace(tmpPath(), mainPath())) return fail("Не удалось заменить файл хранилища.");
     acceptVerified(bytes);

@@ -145,7 +145,7 @@ bool storeCandidate(const QByteArray& candidate, quint64 generation,
                     bool upgradeApproved, QString* error);
 ```
 
-- [ ] **1. RED:** в test_app создать собственный v3 TBVK вручную: QCborMap root с v=3, узлом Demo и одной ApiToken-записью; packPassword после crypto::init, запись только в QTemporaryDir через realFileOps. Проверить:
+- [x] **1. RED:** в test_app создать собственный v3 TBVK вручную: QCborMap root с v=3, узлом Demo и одной ApiToken-записью; packPassword после crypto::init, запись только в QTemporaryDir через realFileOps. Проверить:
 
 ```cpp
 Application app(dir.path()); QString error;
@@ -159,8 +159,8 @@ QVERIFY(!app.schemaUpgradeRequired());
 ```
 
 Байты прежнего файла сравнить со страховочной копией; её декодер читает root v3. Не использовать реальное хранилище для подготовки fixture.
-- [ ] **2. Run:** test_app/test_store/test_pwchange. Expected: save без согласования ещё не запрещён или нет пригодной копии. Данные FaultOps: отказ/порча safety write, изменённый main, reparse, lock до записи и lock в финальном rename. Нужны отдельные строки для save/importContainer/switchToPassword/switchToHello.
-- [ ] **3. Реализация:** запоминать версию проверенной загрузки в Application отдельно от версии писателя. Новый vault сразу v4. Согласование — только флаг поколения, без файловой записи. Все store_.save вызывающие пути направить через storeCandidate; для существующего v1–v3 main требовать согласование и проверенную уникальную копию vault.tb.before-upgrade-UTC-UUID в закрытом каталоге. Копия создаётся CREATE_NEW и перечитывается. Verified main обязан совпасть со снимком.
+- [x] **2. Run:** test_app/test_store/test_pwchange. Expected: save без согласования ещё не запрещён или нет пригодной копии. Данные FaultOps: отказ/порча safety write, изменённый main, reparse, lock до записи и lock в финальном rename. Нужны отдельные строки для save/importContainer/switchToPassword/switchToHello.
+- [x] **3. Реализация:** запоминать версию проверенной загрузки в Application отдельно от версии писателя. Новый vault сразу v4. Согласование — только флаг поколения, без файловой записи. Все store_.save вызывающие пути направить через storeCandidate; для существующего v1–v3 main требовать согласование и проверенную уникальную копию vault.tb.before-upgrade-UTC-UUID в закрытом каталоге. Копия создаётся CREATE_NEW и перечитывается. Verified main обязан совпасть со снимком.
 
 ```cpp
 if (generation()!=expected) return fail(error,"Операция отменена.");
@@ -173,8 +173,8 @@ return store_.save(candidate,error);
 ```
 
 В настоящей реализации legacyCurrent/currentCiphertext/safetyPath — снимки полей владельца, снятые до worker; не читать меняющуюся GUI-модель из worker. Outcome дополнить wroteFile: true только после фактического успешного save, не при unlock. После lock поздний wroteFile сообщает совершённую запись и сохраняет NeedUnlock; обычное чтение unlock не считается commit. Экспорт v4 не меняет локальный файл/версию. Сохранять копию до обновления при последующих сохранениях v4; не ротировать её вместе с .bak.
-- [ ] **4. GREEN:** все реальные временные v3→v4 маршруты, отмена согласования, повтор после отказа, блокировка до/во время commit, Hello через внедрённый ответ, восстановление v3 и v4 из существующего B2. Проверить DACL safety и отсутствие открытых значений на диске. Run test_store/test_app/test_pwchange и полный набор.
-- [ ] **5. Commit:** Preserve verified legacy vaults before schema upgrades.
+- [x] **4. GREEN:** все реальные временные v3→v4 маршруты, отмена согласования, повтор после отказа, блокировка до/во время commit, Hello через внедрённый ответ, восстановление v3 и v4 из существующего B2. Проверить DACL safety и отсутствие открытых значений на диске. Run test_store/test_app/test_pwchange и полный набор.
+- [x] **5. Commit:** Preserve verified legacy vaults before schema upgrades.
 
 ### Task 3: Пять компактных форм и безопасное отображение простых значений
 

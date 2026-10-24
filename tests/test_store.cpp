@@ -21,6 +21,14 @@ class TestStore : public QObject {
     Q_OBJECT
     std::unique_ptr<QTemporaryDir> dir_;
 private slots:
+    void preservesVerifiedUpgradeCopy() {
+        VaultStore store(dir_->path()); QString error; QVERIFY(store.save("legacy-ciphertext",&error));
+        const auto copy=store.preserveBeforeUpgrade("legacy-ciphertext",&error); QVERIFY2(!copy.isEmpty(),qPrintable(error));
+        QByteArray check; QCOMPARE(store.loadBytes(copy,&check),VaultStore::Load::Ok); QCOMPARE(check,QByteArray("legacy-ciphertext"));
+        QVERIFY(copy.contains(".before-upgrade-")); QVERIFY(store.save("new-ciphertext",&error));
+        QCOMPARE(store.loadBytes(copy,&check),VaultStore::Load::Ok); QCOMPARE(check,QByteArray("legacy-ciphertext"));
+        QVERIFY(store.preserveBeforeUpgrade("legacy-ciphertext",&error).isEmpty());
+    }
     void init() { dir_ = std::make_unique<QTemporaryDir>(); QVERIFY(dir_->isValid()); }
     void restorePreservesCurrentAndBackupUntilUnlock() {
         VaultStore store(dir_->path()); QString error;
@@ -240,6 +248,7 @@ private slots:
         VaultStore store(dir_->path()); QString err;
         QVERIFY(store.save("first", &err)); QVERIFY(store.save("second", &err));
         const auto restored=store.restoreBackup("second","first",[] {return false;}); QVERIFY2(restored.committed,qPrintable(restored.error));
+        store.acceptVerified("first"); const auto upgrade=store.preserveBeforeUpgrade("first",&err); QVERIFY(!upgrade.isEmpty());
         HANDLE token = nullptr;
         QVERIFY(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
         DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
@@ -247,7 +256,7 @@ private slots:
         const bool tokenOk = GetTokenInformation(token, TokenUser, data.data(), size, &size);
         CloseHandle(token); QVERIFY(tokenOk);
         const PSID user = reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid;
-        for (const auto& path : {dir_->path(), store.mainPath(), store.backupPath(),restored.safetyPath}) {
+        for (const auto& path : {dir_->path(), store.mainPath(), store.backupPath(),restored.safetyPath,upgrade}) {
             PACL acl = nullptr; PSECURITY_DESCRIPTOR sd = nullptr;
             QCOMPARE(GetNamedSecurityInfoW(const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(path.utf16())),
                 SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &acl, nullptr, &sd), DWORD(ERROR_SUCCESS));
