@@ -22,6 +22,8 @@ public:
     static constexpr int ExpiryWarningDays = 30; // горизонт подсветки «скоро истекает»
     static constexpr int MaxTags = 16;      // тегов на запись: верхняя граница UI-чипов и CBOR
     static constexpr int MaxTagChars = 32;  // длина одного тега в символах QString
+    static constexpr int CurrentVersion = 5; // версия писателя; старее — требует согласия на обновление
+    static constexpr int MaxViews = 50, MaxViewName = 64, MaxViewSearch = 256;
 
     QString addNode(Id id, Id parent, const QString& name);
     QString renameNode(Id id, const QString& name);
@@ -45,6 +47,10 @@ public:
     QStringList allTags() const;                                 // уникальные теги хранилища, отсортированы без учёта регистра
     QString renameTag(const QString& from, const QString& to);   // "" — успех, иначе текст ошибки
     QString removeTag(const QString& tag);                       // "" — успех, иначе текст ошибки
+    // Представления: setViews транзакционен — при любой ошибке список прежний.
+    const QList<SavedView>& views() const { return views_; }
+    QString setViews(const QList<SavedView>& views);
+    static QString viewError(const SavedView& view);
 
     QByteArray toCbor() const;      // эталон Qt: используется тестами для золотого сравнения
     cbor::SecureBuffer toCborSecure() const; // рабочий путь записи: секреты не проходят через обычную кучу
@@ -58,7 +64,8 @@ private:
     bool wouldCycle(Id node, Id newParent) const;
     static bool secretTooBig(const Entry& e);
     QString sourceError(const Entry& e) const;
-    int decodedVersion_=4;
+    int decodedVersion_=CurrentVersion;
+    QList<SavedView> views_;
     QHash<Id, Node> nodes_;
     QHash<Id, Entry> entries_;
 };

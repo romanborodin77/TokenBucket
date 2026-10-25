@@ -64,6 +64,17 @@ private slots:
         }
         if(fault==3) QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
     }
+    void v4VaultUpgradesToV5WithConsent() {
+        QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); crypto::init();
+        model::VaultModel source; const auto group=QUuid::createUuid(); QVERIFY(source.addNode(group,{},"Demo").isEmpty());
+        auto root=QCborValue::fromCbor(source.toCbor()).toMap(); root[QStringLiteral("v")]=4; root.remove(QStringLiteral("views"));
+        const auto bytes=container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr); const auto path=dir.filePath("vault.tb");
+        QVERIFY(store::realFileOps().writeAll(path,bytes));
+        Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),4);
+        QVERIFY(app.schemaUpgradeRequired()); QVERIFY(!app.save(&error)); QCOMPARE(readFile(path),bytes);
+        QVERIFY(app.approveSchemaUpgrade(&error)); QVERIFY(app.save(&error)); QCOMPARE(readFile(app.upgradeSafetyPath()),bytes);
+        app.lock(); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),5); QVERIFY(!app.schemaUpgradeRequired());
+    }
     void legacySaveRequiresExplicitConsent() {
         QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); const auto bytes=legacyV3(); QVERIFY(!bytes.isEmpty());
         const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
@@ -75,7 +86,7 @@ private slots:
         QVERIFY(!readFile(path).contains("synthetic-legacy-token")); QVERIFY(!app.schemaUpgradeRequired());
         QVERIFY(app.save(&error)); QCOMPARE(app.upgradeSafetyPath(),safety); QCOMPARE(readFile(safety),bytes);
         app.lock(); QVERIFY(app.unlock("valid-password",&error)); QVERIFY(!app.schemaUpgradeRequired());
-        QCOMPARE(app.model()->decodedVersion(),4);
+        QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion);
     }
     void legacyWriterRoutes_data() {
         QTest::addColumn<int>("route"); QTest::newRow("save")<<0; QTest::newRow("password")<<1; QTest::newRow("import")<<2;
@@ -108,7 +119,7 @@ private slots:
         if(route==3) QVERIFY(app.unlockHello(&error)); else
 #endif
         QVERIFY(app.unlock(route==0?"valid-password":"new-valid-password",&error));
-        QCOMPARE(app.model()->decodedVersion(),4); QCOMPARE(app.model()->entries().size(),1);
+        QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion); QCOMPARE(app.model()->entries().size(),1);
         QCOMPARE(app.model()->entries().cbegin()->token,QString("synthetic-legacy-token"));
     }
     void upgradeFailures_data() {
@@ -158,7 +169,7 @@ private slots:
         const bool saved=app.save(&error); QVERIFY(!saved); QVERIFY(!error.isEmpty());
         if(fault==7 || fault==12) {
             QVERIFY(error.contains(QStringLiteral("Файл записан"))); QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
-            QVERIFY(readFile(path)!=bytes); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),4);
+            QVERIFY(readFile(path)!=bytes); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion);
         } else QCOMPARE(readFile(path),(fault==2 || fault==10)?changed:bytes);
         if(fault==10) QVERIFY(changedDuringWrite);
         if(fault==11) QVERIFY(app.upgradeSafetyPath().isEmpty());
@@ -176,7 +187,7 @@ private slots:
         QVERIFY(app.unlock("valid-password",&error)); const auto exported=app.exportContainer("export-password",&error); QVERIFY(!exported.isEmpty());
         QCOMPARE(readFile(path),bytes); QVERIFY(app.schemaUpgradeRequired()); QVERIFY(app.upgradeSafetyPath().isEmpty());
         model::VaultModel decoded; QCOMPARE(decoded.fromCbor(container::openPassword(exported,"export-password").cbor,&error),model::VaultModel::ParseStatus::Ok);
-        QCOMPARE(decoded.decodedVersion(),4); QVERIFY(!app.save(&error));
+        QCOMPARE(decoded.decodedVersion(),model::VaultModel::CurrentVersion); QVERIFY(!app.save(&error));
     }
     void lateModeSwitchKeepsActualHint_data() {
         QTest::addColumn<bool>("hello"); QTest::newRow("password")<<false;
@@ -205,7 +216,7 @@ private slots:
         if(hello) QVERIFY(app.unlockHello(&error)); else
 #endif
         QVERIFY(app.unlock("new-valid-password",&error));
-        QCOMPARE(app.model()->decodedVersion(),4);
+        QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion);
     }
     void lateUnlockDoesNotClaimWrite() {
         QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));

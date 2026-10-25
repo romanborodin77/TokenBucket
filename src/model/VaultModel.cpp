@@ -210,7 +210,7 @@ QList<Id> VaultModel::search(const QString& needle) const {
 }
 QByteArray VaultModel::toCbor() const {
     QCborMap root;
-    root[u"v"_s] = 4;
+    root[u"v"_s] = CurrentVersion;
     QCborArray ns;
     for (auto& n : nodes_) { QCborMap m; m[u"id"_s] = idStr(n.id); m[u"p"_s] = n.parent.isNull() ? QString() : idStr(n.parent); m[u"n"_s] = n.name; ns << m; }
     root[u"nodes"_s] = ns;
@@ -237,14 +237,23 @@ QByteArray VaultModel::toCbor() const {
         es << m;
     }
     root[u"entries"_s] = es;
+    QCborArray vs;
+    for (const auto& v : views_) {
+        QCborMap m;
+        m[u"name"_s]=v.name; m[u"lib"_s]=v.library; m[u"group"_s]=v.group.isNull()?QString():idStr(v.group);
+        m[u"type"_s]=v.type; m[u"exp"_s]=v.expiry; m[u"sort"_s]=v.sort;
+        QCborArray tags; for (const auto& tag : v.tags) tags << tag; m[u"tags"_s]=tags;
+        m[u"q"_s]=v.search; vs << m;
+    }
+    root[u"views"_s] = vs;
     return QCborValue(root).toCbor();
 }
 // Защищённая сериализация: та же структура и тот же ПОРЯДОК ключей, что у toCbor()
 // (QCborMap сохраняет порядок вставки, а не сортирует), поэтому выход побайтово
 // совпадает с QCborValue::toCbor() — это фиксирует золотой тест.
 void VaultModel::encodeTo(cbor::CborWriter& w) const {
-    w.beginMap(3);
-    w.text(u"v"); w.uint(4);
+    w.beginMap(4);
+    w.text(u"v"); w.uint(CurrentVersion);
     w.text(u"nodes"); {
         w.beginArray(size_t(nodes_.size()));
         for (auto& n : nodes_) {
@@ -291,6 +300,20 @@ void VaultModel::encodeTo(cbor::CborWriter& w) const {
             w.text(u"sourceLine"); w.integer(e.sourceLine);
         }
     }
+    w.text(u"views"); {
+        w.beginArray(size_t(views_.size()));
+        for (const auto& v : views_) {
+            w.beginMap(8);
+            w.text(u"name"); w.text(v.name);
+            w.text(u"lib"); w.uint(quint64(v.library));
+            w.text(u"group"); w.text(v.group.isNull()?QString():idStr(v.group));
+            w.text(u"type"); w.integer(v.type);
+            w.text(u"exp"); w.uint(quint64(v.expiry));
+            w.text(u"sort"); w.uint(quint64(v.sort));
+            w.text(u"tags"); w.beginArray(size_t(v.tags.size())); for (const auto& tag : v.tags) w.text(tag);
+            w.text(u"q"); w.text(v.search);
+        }
+    }
 }
 std::size_t VaultModel::encodedSize() const {
     cbor::CborWriter counter; encodeTo(counter); return counter.position();
@@ -315,11 +338,12 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
     QCborValue v = QCborValue::fromCbor(reader);
     if (!v.isMap() || reader.lastError() != QCborError::NoError || reader.currentOffset() != cbor.size()) return bad();
     QCborMap root = v.toMap();
-    if (root.size() != 3 || !root.value(u"nodes"_s).isArray() || !root.value(u"entries"_s).isArray()) return bad();
-    // v2 = v1 + теги записей; v1 читается как записи без тегов. Неизвестная версия — отказ,
-    // чтобы новая программа не молча потеряла данные, а старая — не отбросила новые поля.
+    // v2 = v1 + теги записей; v1 читается как записи без тегов; v5 добавляет к корню views.
+    // Неизвестная версия — отказ, чтобы новая программа не молча потеряла данные, а старая —
+    // не отбросила новые поля.
     const qint64 version = root.value(u"v"_s).toInteger(-1);
-    if (version < 1 || version > 4) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
+    if (version < 1 || version > CurrentVersion) { if (err) *err = "Неподдерживаемая версия данных."; return ParseStatus::Bad; }
+    if (root.size() != (version >= 5 ? 4 : 3) || !root.value(u"nodes"_s).isArray() || !root.value(u"entries"_s).isArray()) return bad();
     VaultModel fresh;
     for (const auto& nv : root.value(u"nodes"_s).toArray()) {
         if (!nv.isMap()) return bad();
@@ -429,6 +453,29 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
         fresh.entries_.insert(e.id, e);
     }
     for(const auto& e:fresh.entries_) if(!fresh.sourceError(e).isEmpty()) return bad();
+    if (version >= 5) {
+        const auto badViews = [&] { if (err) *err = "Хранилище повреждено (представления)."; return ParseStatus::Bad; };
+        if (!root.value(u"views"_s).isArray()) return badViews();
+        QList<SavedView> views;
+        for (const auto& value : root.value(u"views"_s).toArray()) {
+            if (!value.isMap()) return badViews();
+            const auto m = value.toMap();
+            const bool shape = m.size() == 8 && m.value(u"name"_s).isString() && m.value(u"lib"_s).isInteger()
+                && m.value(u"group"_s).isString() && m.value(u"type"_s).isInteger() && m.value(u"exp"_s).isInteger()
+                && m.value(u"sort"_s).isInteger() && m.value(u"tags"_s).isArray() && m.value(u"q"_s).isString();
+            if (!shape) return badViews();
+            // Вне диапазона −99…99 — заведомо недопустимое 100, его отклонит viewError().
+            const auto small = [&](QStringView key) { const qint64 x = m.value(key).toInteger(); return x < -99 || x > 99 ? 100 : int(x); };
+            SavedView v; v.name = m.value(u"name"_s).toString(); v.library = small(u"lib");
+            const auto group = m.value(u"group"_s).toString();
+            if (!group.isEmpty()) { v.group = QUuid::fromString(group); if (v.group.isNull()) return badViews(); }
+            v.type = small(u"type"); v.expiry = small(u"exp");
+            v.sort = small(u"sort"); v.search = m.value(u"q"_s).toString();
+            for (const auto& tag : m.value(u"tags"_s).toArray()) { if (!tag.isString()) return badViews(); v.tags << tag.toString(); }
+            views << v;
+        }
+        if (!fresh.setViews(views).isEmpty()) return badViews();
+    }
     fresh.decodedVersion_=int(version);
     *this = std::move(fresh);
     return ParseStatus::Ok;
@@ -476,5 +523,22 @@ QString VaultModel::removeTag(const QString& tag) {
     }
     return found ? QString() : "Тег не найден.";
 }
-void VaultModel::clear() { nodes_.clear(); entries_.clear(); decodedVersion_=4; }
+void VaultModel::clear() { nodes_.clear(); entries_.clear(); views_.clear(); decodedVersion_=CurrentVersion; }
+QString VaultModel::viewError(const SavedView& v) {
+    const bool printable=std::all_of(v.name.cbegin(),v.name.cend(),[](QChar c) {return c.isPrint();});
+    if(v.name.trimmed().isEmpty() || v.name.size()>MaxViewName || !printable) return QStringLiteral("Имя представления: от 1 до 64 печатных символов.");
+    if(v.library<0 || v.library>2 || v.type<-1 || v.type>4 || v.expiry<0 || v.expiry>2 || v.sort<0 || v.sort>1)
+        return QStringLiteral("Недопустимые параметры представления.");
+    if(v.search.size()>MaxViewSearch) return QStringLiteral("Текст поиска представления длиннее 256 символов.");
+    if(normalizeTags(v.tags)!=v.tags || v.tags.size()>MaxTags) return QStringLiteral("Недопустимые теги представления.");
+    return {};
+}
+QString VaultModel::setViews(const QList<SavedView>& views) {
+    if(views.size()>MaxViews) return QStringLiteral("Не больше 50 представлений.");
+    for(int i=0;i<views.size();++i) {
+        if(const auto error=viewError(views[i]);!error.isEmpty()) return error;
+        for(int j=0;j<i;++j) if(views[j].name.compare(views[i].name,Qt::CaseInsensitive)==0) return QStringLiteral("Представление с таким именем уже есть.");
+    }
+    views_=views; return {};
+}
 }

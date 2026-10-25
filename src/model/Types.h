@@ -37,4 +37,17 @@ struct Entry {
     int sourceLine=-1;
     bool operator==(const Entry&) const = default;
 };
+// Сохранённое представление списка (F3): набор фильтров главного окна. Хранится внутри
+// зашифрованной модели (CBOR v5), потому что имена тегов, групп и текст поиска —
+// содержимое хранилища. Ссылка на удалённую группу или тег допустима: при применении
+// такие фильтры просто снимаются.
+struct SavedView {
+    QString name;
+    int library = 0;          // 0 — все, 1 — избранное, 2 — истекают; при непустой group — группа
+    Id group;
+    int type = -1, expiry = 0, sort = 0; // type −1 — все типы
+    QStringList tags;
+    QString search;
+    bool operator==(const SavedView&) const = default;
+};
 }

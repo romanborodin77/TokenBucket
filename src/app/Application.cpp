@@ -203,7 +203,7 @@ bool Application::canStart(Gate expected, QString* err) const {
     if (gate_ != expected) return fail(err, "Операция недоступна в текущем состоянии хранилища.");
     return true;
 }
-bool Application::schemaUpgradeRequired() const {return gate_==Gate::Ready && persistedVersion_<4;}
+bool Application::schemaUpgradeRequired() const {return gate_==Gate::Ready && persistedVersion_<model::VaultModel::CurrentVersion;}
 bool Application::approveSchemaUpgrade(QString* error) {
     if(!canStart(Gate::Ready,error)) return false;
     if(schemaUpgradeRequired()) upgradeApproval_=generation();
@@ -235,7 +235,7 @@ bool Application::storeCandidate(Outcome& result,quint64 expected) {
 bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err) {
     const quint64 generation = generation_;
     auto result=std::make_shared<Outcome>();
-    result->previousFile=file_; result->legacyCurrent=hasVault_ && persistedVersion_<4;
+    result->previousFile=file_; result->legacyCurrent=hasVault_ && persistedVersion_<model::VaultModel::CurrentVersion;
     result->upgradeApproved=upgradeApproval_ && *upgradeApproval_==generation; result->safetyPath=upgradeSafetyPath_;
     busy_ = true; emit busyChanged(true);
     try { waitFor(QtConcurrent::run([this, generation, job = std::move(job),result] {
@@ -246,7 +246,7 @@ bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, 
     bool ok = result->ok;
     const bool changed = result->wroteFile || (ok && !result->file.isEmpty());
     if(!result->safetyPath.isEmpty()) upgradeSafetyPath_=result->safetyPath;
-    if(result->wroteFile) {hasVault_=true; hint_=mode; persistedVersion_=4;}
+    if(result->wroteFile) {hasVault_=true; hint_=mode; persistedVersion_=model::VaultModel::CurrentVersion;}
     if (generation != generation_ || (result->wroteFile && !ok)) {
         ok = false;
         result->error = result->wroteFile?QStringLiteral("Файл записан. Операция была прервана после фиксации; сеанс остаётся заблокированным.")
@@ -255,7 +255,7 @@ bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, 
         gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
     } else if (ok) {
         if (!result->file.isEmpty()) {file_ = std::move(result->file); hasVault_=true; hint_=mode;}
-        if (adopt) {persistedVersion_=result->wroteFile?4:result->model.decodedVersion(); model_ = std::move(result->model); dataKey_ = std::move(result->key); mode_ = mode; gate_ = Gate::Ready;}
+        if (adopt) {persistedVersion_=result->wroteFile?model::VaultModel::CurrentVersion:result->model.decodedVersion(); model_ = std::move(result->model); dataKey_ = std::move(result->key); mode_ = mode; gate_ = Gate::Ready;}
     }
     if (err) *err = ok ? QString() : result->error;
     result.reset();

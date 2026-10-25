@@ -216,7 +216,7 @@ private slots:
         model::VaultModel bad; err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("теги")));
-        root[u"v"_s] = 5; // будущая версия не поддержана
+        root[u"v"_s] = 6; // будущая версия не поддержана
         err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
@@ -255,7 +255,7 @@ private slots:
         err.clear();
         QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("срок")));
-        root[u"v"_s] = 5;
+        root[u"v"_s] = 6;
         QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
     }
@@ -312,6 +312,46 @@ private slots:
         model::VaultModel empty;
         cbor::SecureBuffer emptyProduced = empty.toCborSecure();
         QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(emptyProduced.data()), qsizetype(emptyProduced.size())), empty.toCbor());
+    }
+    void savedViewsRoundtripV5() {
+        const auto g = QUuid::createUuid(); QVERIFY(m.addNode(g, {}, QStringLiteral("Demo")).isEmpty());
+        model::SavedView v; v.name = QStringLiteral("Истекают в CI"); v.group = g; v.type = 3; v.expiry = 1; v.sort = 1;
+        v.tags = {QStringLiteral("ci")}; v.search = QStringLiteral("ip");
+        model::SavedView all; all.name = QStringLiteral("Все"); // type=-1 — знаковое кодирование
+        QVERIFY(m.setViews({v, all}).isEmpty());
+        cbor::SecureBuffer produced = m.toCborSecure();
+        QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(produced.data()), qsizetype(produced.size())), m.toCbor());
+        model::VaultModel r; QString err; QCOMPARE(r.fromCbor(m.toCbor(), &err), model::VaultModel::ParseStatus::Ok);
+        QCOMPARE(r.views(), (QList<model::SavedView>{v, all})); QCOMPARE(r.decodedVersion(), 5);
+        QVERIFY(!m.setViews({v, v}).isEmpty());
+        model::SavedView twin = v; twin.name = QStringLiteral("истекают в ci"); QVERIFY(!m.setViews({v, twin}).isEmpty());
+        model::SavedView bad = v; bad.name.clear(); QVERIFY(!m.setViews({bad}).isEmpty());
+        bad = v; bad.type = 7; QVERIFY(!m.setViews({bad}).isEmpty());
+        bad = v; bad.search = QString(257, QLatin1Char('x')); QVERIFY(!m.setViews({bad}).isEmpty());
+        bad = v; bad.name = QStringLiteral("a") + QChar(0x0A) + QStringLiteral("b"); QVERIFY(!m.setViews({bad}).isEmpty());
+        QList<model::SavedView> many; for (int i = 0; i < 51; ++i) { auto x = all; x.name = QString::number(i); many << x; }
+        QVERIFY(!m.setViews(many).isEmpty());
+        QCOMPARE(m.views(), (QList<model::SavedView>{v, all}));
+    }
+    void savedViewsVersionGates() {
+        const auto g = QUuid::createUuid(); QVERIFY(m.addNode(g, {}, QStringLiteral("Demo")).isEmpty());
+        model::SavedView v; v.name = QStringLiteral("Вид"); QVERIFY(m.setViews({v}).isEmpty());
+        const auto good = QCborValue::fromCbor(m.toCbor()).toMap();
+        const auto parse = [](const QCborMap& root, model::VaultModel& target) { QString err; return target.fromCbor(QCborValue(root).toCbor(), &err); };
+        model::VaultModel target; QCOMPARE(parse(good, target), model::VaultModel::ParseStatus::Ok);
+        auto v4 = good; v4[QStringLiteral("v")] = 4; v4.remove(QStringLiteral("views"));
+        model::VaultModel old; QCOMPARE(parse(v4, old), model::VaultModel::ParseStatus::Ok); QVERIFY(old.views().isEmpty()); QCOMPARE(old.decodedVersion(), 4);
+        auto v4views = good; v4views[QStringLiteral("v")] = 4; QCOMPARE(parse(v4views, target), model::VaultModel::ParseStatus::Bad);
+        auto noViews = good; noViews.remove(QStringLiteral("views")); QCOMPARE(parse(noViews, target), model::VaultModel::ParseStatus::Bad);
+        auto notMap = good; notMap[QStringLiteral("views")] = QCborArray{1}; QCOMPARE(parse(notMap, target), model::VaultModel::ParseStatus::Bad);
+        auto extra = good; { auto a = extra[QStringLiteral("views")].toArray(); auto x = a.at(0).toMap(); x[QStringLiteral("zz")] = 1; a[0] = x; extra[QStringLiteral("views")] = a; }
+        QCOMPARE(parse(extra, target), model::VaultModel::ParseStatus::Bad);
+        auto wrongType = good; { auto a = wrongType[QStringLiteral("views")].toArray(); auto x = a.at(0).toMap(); x[QStringLiteral("lib")] = QStringLiteral("0"); a[0] = x; wrongType[QStringLiteral("views")] = a; }
+        QCOMPARE(parse(wrongType, target), model::VaultModel::ParseStatus::Bad);
+        auto dup = good; { auto a = dup[QStringLiteral("views")].toArray(); a.append(a.at(0)); dup[QStringLiteral("views")] = a; }
+        QCOMPARE(parse(dup, target), model::VaultModel::ParseStatus::Bad);
+        auto v6 = good; v6[QStringLiteral("v")] = 6; QCOMPARE(parse(v6, target), model::VaultModel::ParseStatus::Bad);
+        QCOMPARE(target.views().size(), 1); // отказы не меняют прежнюю модель
     }
     void secureCborRoundtrip() {
         model::Entry e = richEntry();

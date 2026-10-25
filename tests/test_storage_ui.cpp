@@ -147,7 +147,7 @@ private slots:
         else {
             QVERIFY(!app.schemaUpgradeRequired()); const auto copies=QDir(dir.path()).entryList({"vault.tb.before-upgrade-*"},QDir::Files); QCOMPARE(copies.size(),1); QFile copy(dir.filePath(copies.first())); QVERIFY(copy.open(QIODevice::ReadOnly)); const auto safety=copy.readAll(); QCOMPARE(safety,bytes);
             if(!hello && writer!=3) {QCOMPARE(container::openPassword(safety,"valid-password").status,container::Status::Ok); QCOMPARE(container::openPassword(safety,"changed-password").status,container::Status::WrongKey);}
-            app.lock(); QVERIFY(app.unlock(writer==3?QByteArray("valid-password"):QByteArray("changed-password"),&error)); QCOMPARE(app.model()->decodedVersion(),4);
+            app.lock(); QVERIFY(app.unlock(writer==3?QByteArray("valid-password"):QByteArray("changed-password"),&error)); QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion);
         }
     }
     void legacyExportIsV4WithoutChangingLocalFile() {
@@ -157,12 +157,12 @@ private slots:
         bool warned=false,fileSeen=false,timedOut=false; QTimer driver; driver.setInterval(10); connect(&driver,&QTimer::timeout,&window,[&] {
             auto* modal=QApplication::activeModalWidget();
             if(auto* auth=qobject_cast<QInputDialog*>(modal)) {auth->setTextValue("valid-password"); auth->accept();}
-            else if(auto* password=qobject_cast<ui::ExportDialog*>(modal)) {for(auto* label:password->findChildren<QLabel*>()) warned|=label->text().contains("v4"); password->findChild<QLineEdit*>("exportPassword")->setText("export-password"); password->findChild<QLineEdit*>("confirmExportPassword")->setText("export-password"); password->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();}
+            else if(auto* password=qobject_cast<ui::ExportDialog*>(modal)) {for(auto* label:password->findChildren<QLabel*>()) warned|=label->text().contains(QString("v%1").arg(model::VaultModel::CurrentVersion)); password->findChild<QLineEdit*>("exportPassword")->setText("export-password"); password->findChild<QLineEdit*>("confirmExportPassword")->setText("export-password"); password->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();}
             else if(auto* file=qobject_cast<QFileDialog*>(modal);file && !fileSeen) {fileSeen=true; file->selectFile(output); QMetaObject::invokeMethod(file,"accept",Qt::QueuedConnection);}
         });
         QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();}); driver.start(); watchdog.start(8000); window.exportVault(); driver.stop(); watchdog.stop();
         QVERIFY(!timedOut); QVERIFY(warned); QVERIFY(fileSeen); QFile main(path),file(output); QVERIFY(main.open(QIODevice::ReadOnly)); QCOMPARE(main.readAll(),bytes); QVERIFY(app.schemaUpgradeRequired());
-        QVERIFY(file.open(QIODevice::ReadOnly)); const auto opened=container::openPassword(file.readAll(),"export-password"); QCOMPARE(opened.status,container::Status::Ok); QCOMPARE(QCborValue::fromCbor(opened.cbor).toMap().value(QStringLiteral("v")).toInteger(),4);
+        QVERIFY(file.open(QIODevice::ReadOnly)); const auto opened=container::openPassword(file.readAll(),"export-password"); QCOMPARE(opened.status,container::Status::Ok); QCOMPARE(QCborValue::fromCbor(opened.cbor).toMap().value(QStringLiteral("v")).toInteger(),model::VaultModel::CurrentVersion);
     }
     void legacyHelloCancelLeavesFileUntouched() {
 #ifdef Q_OS_WIN

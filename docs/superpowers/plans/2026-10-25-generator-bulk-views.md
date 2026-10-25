@@ -119,7 +119,7 @@ const QList<SavedView>& views() const;
 QString setViews(const QList<SavedView>&); // "" — успех; транзакционно
 static QString viewError(const SavedView&);
 ```
-- [ ] **Step 1: RED** в `test_model.cpp`:
+- [x] **Step 1: RED** в `test_model.cpp`:
 ```cpp
 void savedViewsRoundtripV5() {
     VaultModel m; const auto g = QUuid::createUuid(); QVERIFY(m.addNode(g, {}, "Demo").isEmpty());
@@ -136,11 +136,11 @@ void savedViewsRoundtripV5() {
 ```
 Плюс: v4-фикстура (корень из 3 ключей с `v=4`) читается, `views()` пуст, `decodedVersion()==4`; v4 c ключом `views` → Bad; v5 без `views` → Bad; v5 `views` с не-картой/лишним ключом/51 элементом → Bad, прежняя модель не изменена. Обновить существующие проверки `decodedVersion()==4` новой модели на `CurrentVersion`.
 В `test_app.cpp`: v4-файл, созданный `packPassword` из `QCborMap{v:4,nodes,entries}` → `schemaUpgradeRequired()`; `save` без согласия — отказ и байты прежние; после `approveSchemaUpgrade` — сохранение, копия равна прежним байтам, повторный `unlock` → `decodedVersion()==5`.
-- [ ] **Step 2: Run** `build\runtest.cmd test_model` / `test_app` → компиляция, затем RED на `version > 4`.
-- [ ] **Step 3: Реализация.** `toCbor()`: `root[u"v"_s]=CurrentVersion;` после `entries` — `QCborArray vs; for (const auto& v : views_) { QCborMap m; m[u"name"_s]=v.name; m[u"lib"_s]=v.library; m[u"group"_s]=v.group.isNull()?QString():idStr(v.group); m[u"type"_s]=v.type; m[u"exp"_s]=v.expiry; m[u"sort"_s]=v.sort; QCborArray t; for (auto& s : v.tags) t << s; m[u"tags"_s]=t; m[u"q"_s]=v.search; vs << m; } root[u"views"_s]=vs;`. `encodeTo()`: `beginMap(4)`, `w.uint(CurrentVersion)`, затем `w.text(u"views"); w.beginArray(views_.size());` и для каждой — `beginMap(8)` в том же порядке; `type` пишется `w.integer(v.type)` (знаковый, как sourceLine). `fromCbor()`: `version` в 1..5; `root.size() != (version >= 5 ? 4 : 3)` → bad; для v5 разбор `views` строго (карта ровно из 8 ключей, типы text/uint/text/int/uint/uint/array of text/text, `QUuid` группы валиден или пусто — несуществующая группа допустима), затем `viewError()` и уникальность имён; результат кладётся в `fresh.views_`. `clear()` очищает `views_` и ставит `decodedVersion_=CurrentVersion`. `setViews()`: проверка каждого + уникальность (`compare(..., Qt::CaseInsensitive)`) + `MaxViews`, теги через `normalizeTags`, затем присваивание. `removeNode` не трогает представления (сброс — при применении).
+- [x] **Step 2: Run** `build\runtest.cmd test_model` / `test_app` → компиляция, затем RED на `version > 4`.
+- [x] **Step 3: Реализация.** `toCbor()`: `root[u"v"_s]=CurrentVersion;` после `entries` — `QCborArray vs; for (const auto& v : views_) { QCborMap m; m[u"name"_s]=v.name; m[u"lib"_s]=v.library; m[u"group"_s]=v.group.isNull()?QString():idStr(v.group); m[u"type"_s]=v.type; m[u"exp"_s]=v.expiry; m[u"sort"_s]=v.sort; QCborArray t; for (auto& s : v.tags) t << s; m[u"tags"_s]=t; m[u"q"_s]=v.search; vs << m; } root[u"views"_s]=vs;`. `encodeTo()`: `beginMap(4)`, `w.uint(CurrentVersion)`, затем `w.text(u"views"); w.beginArray(views_.size());` и для каждой — `beginMap(8)` в том же порядке; `type` пишется `w.integer(v.type)` (знаковый, как sourceLine). `fromCbor()`: `version` в 1..5; `root.size() != (version >= 5 ? 4 : 3)` → bad; для v5 разбор `views` строго (карта ровно из 8 ключей, типы text/uint/text/int/uint/uint/array of text/text, `QUuid` группы валиден или пусто — несуществующая группа допустима), затем `viewError()` и уникальность имён; результат кладётся в `fresh.views_`. `clear()` очищает `views_` и ставит `decodedVersion_=CurrentVersion`. `setViews()`: проверка каждого + уникальность (`compare(..., Qt::CaseInsensitive)`) + `MaxViews`, теги через `normalizeTags`, затем присваивание. `removeNode` не трогает представления (сброс — при применении).
 `Application`: заменить `persistedVersion_<4` (2 места) и `persistedVersion_=4` на `model::VaultModel::CurrentVersion`. `MainWindow`: в тексте согласия и экспорта `v4` → `QStringLiteral("v%1").arg(model::VaultModel::CurrentVersion)`. `docs/structured-storage-format.md`: раздел «CBOR v5: представления».
-- [ ] **Step 4: GREEN** test_model, test_app, test_storage_ui (в `legacyWriterUiKeepsOrUpgradesAtomically`/`legacyExportIsV4…` ожидания версии — `CurrentVersion`), полный набор.
-- [ ] **Step 5: Commit** `Store saved views inside the encrypted model as CBOR v5`.
+- [x] **Step 4: GREEN** test_model, test_app, test_storage_ui (в `legacyWriterUiKeepsOrUpgradesAtomically`/`legacyExportIsV4…` ожидания версии — `CurrentVersion`), полный набор.
+- [x] **Step 5: Commit** `Store saved views inside the encrypted model as CBOR v5`.
 
 ### Task 3: F3 — панель представлений
 

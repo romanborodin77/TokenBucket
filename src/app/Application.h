@@ -101,7 +101,7 @@ private:
     model::VaultModel model_;
     std::unique_ptr<SecureKey> dataKey_;
     QByteArray file_;
-    int persistedVersion_=4;
+    int persistedVersion_=model::VaultModel::CurrentVersion;
     std::optional<quint64> upgradeApproval_;
     QString upgradeSafetyPath_;
     Gate gate_ = Gate::NeedSetup;

@@ -116,7 +116,7 @@ private slots:
         }
         const auto bytes=model.toCbor(); auto secure=model.toCborSecure();
         QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(secure.data()),qsizetype(secure.size())),bytes);
-        VaultModel decoded; QString error; QCOMPARE(decoded.fromCbor(bytes,&error),VaultModel::ParseStatus::Ok); QCOMPARE(decoded.decodedVersion(),4);
+        VaultModel decoded; QString error; QCOMPARE(decoded.fromCbor(bytes,&error),VaultModel::ParseStatus::Ok); QCOMPARE(decoded.decodedVersion(),VaultModel::CurrentVersion);
         for(const auto& e:model.entries()) {QVERIFY(decoded.entry(e.id)); QCOMPARE(*decoded.entry(e.id),e);}
         auto badLinks=QCborValue::fromCbor(bytes).toMap(); auto linkedEntries=badLinks.value(u"entries"_s).toArray();
         for(int i=0;i<linkedEntries.size();++i) {
@@ -128,7 +128,7 @@ private slots:
         QCOMPARE(decoded.toCbor(),bytes);
         auto root=QCborValue::fromCbor(bytes).toMap(); QCborArray oldEntries;
         for(auto item:root.value(u"entries"_s).toArray()) if(item.toMap().value(u"type"_s).toInteger()==0) oldEntries.append(item);
-        root[u"entries"_s]=oldEntries;
+        root[u"entries"_s]=oldEntries; root.remove(u"views"_s);
         for(int version=1;version<=3;++version) {
             root[u"v"_s]=version; QCOMPARE(decoded.fromCbor(QCborValue(root).toCbor(),&error),VaultModel::ParseStatus::Ok);
             QCOMPARE(decoded.decodedVersion(),version); const auto e=*decoded.entries().cbegin();
@@ -152,7 +152,7 @@ private slots:
             auto broken=root; auto entry=root.value(u"entries"_s).toArray().first().toMap(); entry[fault.first]=fault.second;
             broken[u"entries"_s]=QCborArray{entry}; QString error;
             QCOMPARE(model.fromCbor(QCborValue(broken).toCbor(),&error),VaultModel::ParseStatus::Bad);
-            QVERIFY(!error.isEmpty()); QCOMPARE(model.toCbor(),before); QCOMPARE(model.decodedVersion(),4);
+            QVERIFY(!error.isEmpty()); QCOMPARE(model.toCbor(),before); QCOMPARE(model.decodedVersion(),VaultModel::CurrentVersion);
         }
     }
     void initialBomInValuesSurvivesRoundtrip() {

@@ -773,7 +773,7 @@ bool MainWindow::ensureSchemaUpgradeApproved() {
 #ifdef Q_OS_WIN
     const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
 #endif
-    QMessageBox box(QMessageBox::Warning,QStringLiteral("Обновление формата"),QStringLiteral("Данные будут сохранены в формате v4. Прежняя версия программы не откроет новый формат. Перед записью будет создана уникальная проверенная зашифрованная копия прежнего файла в каталоге хранилища. Продолжить?"),QMessageBox::Yes|QMessageBox::No,this);
+    QMessageBox box(QMessageBox::Warning,QStringLiteral("Обновление формата"),QStringLiteral("Данные будут сохранены в формате v%1. Прежняя версия программы не откроет новый формат. Перед записью будет создана уникальная проверенная зашифрованная копия прежнего файла в каталоге хранилища. Продолжить?").arg(model::VaultModel::CurrentVersion),QMessageBox::Yes|QMessageBox::No,this);
     box.setObjectName("schemaUpgradeConfirmation"); box.setTextFormat(Qt::PlainText); box.setDefaultButton(QMessageBox::No); box.setEscapeButton(QMessageBox::No);
     if(box.exec()!=QMessageBox::Yes) {error_->clear(); return false;}
     if(!ready() || generation!=app_.generation() || before!=*app_.model()) {if(ready()) report(QStringLiteral("Данные изменились. Повторите действие.")); return false;}
@@ -916,7 +916,7 @@ void MainWindow::exportVault() {
     if (!VerifyDialog::verify(app_, this, QStringLiteral("защищённый экспорт")) || !ready() || app_.generation() != generation) return;
     ExportDialog dialog(this, QStringLiteral("Защищённый экспорт хранилища"),
         QStringLiteral("Экспорт шифруется отдельным паролем, который не связан с мастер-паролем. "
-                       "Полученный файл можно переносить на другие компьютеры; для восстановления понадобятся только файл и этот пароль. Формат данных экспорта — v4: прежняя версия программы его не откроет. Локальный файл при экспорте не обновляется."),
+                       "Полученный файл можно переносить на другие компьютеры; для восстановления понадобятся только файл и этот пароль. Формат данных экспорта — v%1: прежняя версия программы его не откроет. Локальный файл при экспорте не обновляется.").arg(model::VaultModel::CurrentVersion),
         QStringLiteral("&Пароль защищённого экспорта (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
