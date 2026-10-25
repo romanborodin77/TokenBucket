@@ -22,6 +22,9 @@
 #include <QTreeView>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QToolButton>
+#include <QStatusBar>
+#include <QTreeWidgetItemIterator>
 #include <QDesktopServices>
 #include <QUrl>
 #include "../src/ui/RegistryView.h"
@@ -163,6 +166,82 @@ private slots:
         QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();}); driver.start(); watchdog.start(8000); window.exportVault(); driver.stop(); watchdog.stop();
         QVERIFY(!timedOut); QVERIFY(warned); QVERIFY(fileSeen); QFile main(path),file(output); QVERIFY(main.open(QIODevice::ReadOnly)); QCOMPARE(main.readAll(),bytes); QVERIFY(app.schemaUpgradeRequired());
         QVERIFY(file.open(QIODevice::ReadOnly)); const auto opened=container::openPassword(file.readAll(),"export-password"); QCOMPARE(opened.status,container::Status::Ok); QCOMPARE(QCborValue::fromCbor(opened.cbor).toMap().value(QStringLiteral("v")).toInteger(),model::VaultModel::CurrentVersion);
+    }
+    void savedViewsCaptureApplyAndSurviveLock() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto demo=QUuid::createUuid(); QVERIFY(app.model()->addNode(demo,{},"Demo").isEmpty());
+        model::Entry ip; ip.id=QUuid::createUuid(); ip.groupId=demo; ip.type=model::EntryType::PlainValue; ip.title="Public ip"; ip.plainValue="192.0.2.10"; ip.tags={"ci"};
+        model::Entry other=ip; other.id=QUuid::createUuid(); other.title="Other ip"; other.tags={};
+        QVERIFY(app.model()->setEntry(ip).isEmpty()); QVERIFY(app.model()->setEntry(other).isEmpty()); QVERIFY(app.save(&error));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        window.refreshAll();
+        QTreeWidgetItem* demoItem=nullptr; for(QTreeWidgetItemIterator it(window.tree());*it;++it) if((*it)->data(0,Qt::UserRole).value<model::Id>()==demo) demoItem=*it;
+        QVERIFY(demoItem); window.tree()->setCurrentItem(demoItem);
+        auto* type=window.findChild<QComboBox*>("typeFilter"); type->setCurrentIndex(type->findData(int(model::EntryType::PlainValue)));
+        const auto chip=[&](const QString& text) {QToolButton* found=nullptr; for(auto* b:window.findChild<QWidget*>("tagBar")->findChildren<QToolButton*>()) if(b->text()==text) found=b; return found;};
+        QVERIFY(chip("ci")); chip("ci")->click(); window.search()->setText("ip");
+        QVERIFY(window.saveCurrentView("CI")); QCOMPARE(app.model()->views().size(),1);
+        const auto saved=app.model()->views().first(); QCOMPARE(saved.group,demo); QCOMPARE(saved.type,int(model::EntryType::PlainValue)); QCOMPARE(saved.tags,QStringList{"ci"}); QCOMPARE(saved.search,QString("ip"));
+        QVERIFY(!window.saveCurrentView("ci")); QCOMPARE(app.model()->views().size(),1);
+        window.search()->clear(); type->setCurrentIndex(0); QTest::qWait(0); chip("ci")->click(); window.findChild<QPushButton*>("libraryAll")->click();
+        QCOMPARE(window.list()->count(),2);
+        QVERIFY(window.applyView("CI"));
+        QCOMPARE(type->currentData().toInt(),int(model::EntryType::PlainValue)); QCOMPARE(window.search()->text(),QString("ip"));
+        QVERIFY(chip("ci") && chip("ci")->isChecked()); QCOMPARE(window.list()->count(),1);
+        auto views=app.model()->views(); model::SavedView ghost; ghost.name="Призрак"; ghost.group=QUuid::createUuid(); ghost.tags={"gone"}; views<<ghost;
+        QVERIFY(app.model()->setViews(views).isEmpty()); QVERIFY(app.save(&error)); window.refreshAll();
+        QVERIFY(window.applyView("Призрак")); QVERIFY(!window.tree()->currentItem());
+        QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("удалена"))); QCOMPARE(window.list()->count(),2);
+        auto* list=window.findChild<QComboBox*>("savedViews"); QVERIFY(list); QCOMPARE(list->count(),2);
+        app.lock(); QCOMPARE(list->count(),0); QVERIFY(!window.applyView("CI"));
+        QVERIFY(app.unlock("valid-password",&error)); window.refreshAll(); QCOMPARE(list->count(),2);
+    }
+    void savedViewsFitNarrowWindow_data() {
+        QTest::addColumn<bool>("dark"); QTest::addColumn<int>("width"); QTest::addColumn<int>("height");
+        for(bool dark:{false,true}) {QTest::newRow(dark?"dark-420":"light-420")<<dark<<420<<480; QTest::newRow(dark?"dark-900":"light-900")<<dark<<900<<600;}
+    }
+    void savedViewsFitNarrowWindow() {
+        QFETCH(bool,dark); QFETCH(int,width); QFETCH(int,height); ui::theme::apply(dark?ui::theme::Mode::Dark:ui::theme::Mode::Light);
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Orbitrax — демо").isEmpty());
+        model::SavedView a; a.name="Истекают в CI"; model::SavedView b; b.name="Реестр Orbitrax"; b.group=group; QVERIFY(app.model()->setViews({a,b}).isEmpty());
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        window.resize(width,height); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window)); window.refreshAll(); QTest::qWait(50);
+        auto* list=window.findChild<QComboBox*>("savedViews"); auto* save=window.findChild<QToolButton*>("viewActions"); QVERIFY(list && save); QCOMPARE(list->count(),2);
+        auto* tree=window.tree(); qInfo("tree height=%d",tree->height()); QVERIFY(tree->height()>=48);
+        if(save->isVisible()) {
+            QVERIFY(window.rect().contains(QRect(save->mapTo(&window,QPoint()),save->size())));
+            QVERIFY(window.rect().contains(QRect(list->mapTo(&window,QPoint()),list->size())));
+        }
+        qInfo("views panel visible=%d at %dx%d",int(save->isVisible()),width,height);
+        const auto shots=qEnvironmentVariable("TOKENBUCKET_STORAGE_SCREENSHOTS");
+        if(!shots.isEmpty()) {QVERIFY(QDir().mkpath(shots)); QVERIFY(window.grab().save(shots+QString("/views-%1-%2.png").arg(width).arg(dark?"dark":"light")));}
+    }
+    void savedViewMenuRenamesUpdatesAndDeletes() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        model::SavedView a; a.name="Первый"; model::SavedView b; b.name="Второй"; QVERIFY(app.model()->setViews({a,b}).isEmpty()); QVERIFY(app.save(&error));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        window.refreshAll(); auto* combo=window.findChild<QComboBox*>("savedViews"); QVERIFY(combo); combo->setCurrentIndex(0);
+        const auto trigger=[&](int index,const std::function<void(QWidget*)>& drive) {
+            QAction* action=nullptr; for(auto* candidate:window.findChildren<QAction*>()) if(candidate->objectName()==QString("viewAction%1").arg(index)) action=candidate;
+            QVERIFY(action); QTimer::singleShot(0,&window,[&] {drive(QApplication::activeModalWidget());}); action->trigger();
+        };
+        trigger(1,[](QWidget* modal) {auto* input=qobject_cast<QInputDialog*>(modal); QVERIFY(input); input->setTextValue("Переименован"); input->accept();});
+        QCOMPARE(app.model()->views().first().name,QString("Переименован")); QCOMPARE(combo->currentText(),QString("Переименован"));
+        window.findChild<QComboBox*>("typeFilter")->setCurrentIndex(2);
+        trigger(2,[](QWidget*) {}); QCOMPARE(app.model()->views().first().type,window.findChild<QComboBox*>("typeFilter")->currentData().toInt());
+        trigger(3,[](QWidget* modal) {auto* box=qobject_cast<QMessageBox*>(modal); QVERIFY(box); box->button(QMessageBox::No)->click();}); QCOMPARE(app.model()->views().size(),2);
+        trigger(3,[](QWidget* modal) {auto* box=qobject_cast<QMessageBox*>(modal); QVERIFY(box); box->button(QMessageBox::Yes)->click();});
+        QCOMPARE(app.model()->views().size(),1); QCOMPARE(app.model()->views().first().name,QString("Второй"));
+        app.lock(); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->views().size(),1);
+    }
+    void savedViewOnLegacyFileAsksConsent() {
+        QTemporaryDir dir; const auto bytes=legacyFile(); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+        Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        bool asked=false; QTimer::singleShot(0,&window,[&] {auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if(box && box->objectName()=="schemaUpgradeConfirmation") {asked=true; box->button(QMessageBox::No)->click();}});
+        QVERIFY(!window.saveCurrentView("Вид")); QVERIFY(asked); QVERIFY(app.model()->views().isEmpty());
+        QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(),bytes);
     }
     void legacyHelloCancelLeavesFileUntouched() {
 #ifdef Q_OS_WIN

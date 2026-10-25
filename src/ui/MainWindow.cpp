@@ -193,8 +193,11 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     search_->setPlaceholderText(QStringLiteral("Поиск по названиям, логинам, проектам и заметкам — во всём хранилище"));
     search_->setPlaceholderText(QStringLiteral("Поиск по хранилищу…  Ctrl+K")); search_->setClearButtonEnabled(true);
     search_->setMinimumWidth(180); headerLayout_->addWidget(search_, 2);
-    auto* newEntry = new QToolButton(header); newEntry->setDefaultAction(addEntryAction); newEntry->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    newEntry->setAccessibleName(QStringLiteral("Новая запись")); headerLayout_->addWidget(newEntry);
+    // «Новая запись» и представления в одной строке: на узком окне заголовок вертикальный,
+    // и отдельная строка представлений отняла бы высоту у дерева проектов.
+    auto* entryRow = new QWidget(header); auto* entryRowLayout = new QHBoxLayout(entryRow); entryRowLayout->setContentsMargins(0, 0, 0, 0);
+    auto* newEntry = new QToolButton(entryRow); newEntry->setDefaultAction(addEntryAction); newEntry->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    newEntry->setAccessibleName(QStringLiteral("Новая запись")); entryRowLayout->addWidget(newEntry); headerLayout_->addWidget(entryRow);
     layout->addWidget(header);
     filterLayout_ = controlsLayout;
     typeFilter_ = new QComboBox(controls); typeFilter_->setObjectName(QStringLiteral("typeFilter"));
@@ -235,6 +238,25 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(libraryAll_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::All); });
     connect(libraryFavorites_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::Favorites); });
     connect(libraryExpiring_, &QPushButton::clicked, this, [this] { setLibraryView(LibraryView::Expiring); });
+    auto* viewsRow = new QWidget(entryRow); auto* viewsLayout = new QHBoxLayout(viewsRow); viewsLayout->setContentsMargins(0, 0, 0, 0);
+    savedViews_ = new QComboBox(viewsRow); savedViews_->setObjectName(QStringLiteral("savedViews"));
+    savedViews_->setAccessibleName(QStringLiteral("Сохранённые представления")); savedViews_->setPlaceholderText(QStringLiteral("Представления…"));
+    savedViews_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); savedViews_->setMinimumContentsLength(8);
+    viewActions_ = new QToolButton(viewsRow); viewActions_->setObjectName(QStringLiteral("viewActions")); viewActions_->setText(QStringLiteral("⋯"));
+    viewActions_->setAccessibleName(QStringLiteral("Действия с представлениями")); viewActions_->setPopupMode(QToolButton::InstantPopup);
+    viewActions_->setToolTip(QStringLiteral("Представление запоминает раздел, группу, тип, срок, теги, сортировку и поиск в зашифрованном хранилище"));
+    auto* viewsMenu = new QMenu(viewActions_);
+    const QString viewActionNames[4] = {QStringLiteral("Сохранить текущее…"), QStringLiteral("Переименовать…"), QStringLiteral("Обновить из текущего"), QStringLiteral("Удалить")};
+    for (int i = 0; i < 4; ++i) {
+        auto* action = viewsMenu->addAction(viewActionNames[i]); action->setObjectName(QStringLiteral("viewAction%1").arg(i));
+        connect(action, &QAction::triggered, this, [this, i] { viewAction(i); });
+    }
+    connect(viewsMenu, &QMenu::aboutToShow, this, [this, viewsMenu] {
+        for (int i = 1; i < 4; ++i) viewsMenu->actions().at(i)->setEnabled(savedViews_->currentIndex() >= 0);
+    });
+    viewActions_->setMenu(viewsMenu);
+    viewsLayout->addWidget(savedViews_, 1); viewsLayout->addWidget(viewActions_); entryRowLayout->addWidget(viewsRow, 1);
+    connect(savedViews_, &QComboBox::activated, this, [this](int index) { if (index >= 0) applyView(savedViews_->itemText(index)); });
     auto* vaultTree = new VaultTree(library); tree_ = vaultTree; libraryLayout->addWidget(tree_, 1);
     library->setMinimumWidth(170); tree_->setMinimumWidth(150);
     auto* newProject = new QToolButton(library); newProject->setDefaultAction(addProjectAction); newProject->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
@@ -585,6 +607,81 @@ void MainWindow::updateLibraryCounts() {
     libraryFavorites_->setChecked(libraryView_ == LibraryView::Favorites);
     libraryExpiring_->setChecked(libraryView_ == LibraryView::Expiring);
 }
+model::SavedView MainWindow::captureView(const QString& name) const {
+    model::SavedView v; v.name = name;
+    if (libraryView_ == LibraryView::Group) v.group = selectedNode();
+    else v.library = libraryView_ == LibraryView::Favorites ? 1 : libraryView_ == LibraryView::Expiring ? 2 : 0;
+    v.type = typeFilter_->currentData().toInt(); v.expiry = expiryFilter_->currentIndex(); v.sort = sortMode_->currentIndex();
+    v.tags = model::VaultModel::normalizeTags(selectedTags_); v.search = search_->text().left(model::VaultModel::MaxViewSearch);
+    return v;
+}
+// Представления — часть модели: любое изменение идёт обычным commit() (согласие на формат,
+// одно сохранение, полный откат при ошибке).
+bool MainWindow::changeViews(const std::function<QString(QList<model::SavedView>&)>& change) {
+    if (!ready()) return false;
+    return commit([&](model::VaultModel& m) { auto views = m.views(); const auto error = change(views); return error.isEmpty() ? m.setViews(views) : error; });
+}
+bool MainWindow::saveCurrentView(const QString& name) {
+    if (!ready()) return false;
+    const auto view = captureView(name);
+    return changeViews([&](QList<model::SavedView>& views) { views << view; return QString(); });
+}
+bool MainWindow::applyView(const QString& name) {
+    if (!ready()) return false;
+    const auto& views = app_.model()->views();
+    const auto it = std::find_if(views.cbegin(), views.cend(), [&](const auto& v) { return v.name.compare(name, Qt::CaseInsensitive) == 0; });
+    if (it == views.cend()) return false;
+    const auto v = *it;
+    QTreeWidgetItem* groupItem = nullptr;
+    if (!v.group.isNull()) for (QTreeWidgetItemIterator i(tree_); *i; ++i) if ((*i)->data(0, Qt::UserRole).value<model::Id>() == v.group) groupItem = *i;
+    {
+        QSignalBlocker b1(typeFilter_), b2(expiryFilter_), b3(sortMode_), b4(search_), b5(tree_);
+        typeFilter_->setCurrentIndex(qMax(0, typeFilter_->findData(v.type)));
+        sortMode_->setCurrentIndex(v.sort); search_->setText(v.search);
+        if (groupItem) { libraryView_ = LibraryView::Group; tree_->setCurrentItem(groupItem); }
+        else {
+            libraryView_ = v.library == 1 ? LibraryView::Favorites : v.library == 2 ? LibraryView::Expiring : LibraryView::All;
+            tree_->setCurrentItem(nullptr); tree_->clearSelection();
+        }
+        expiryFilter_->setCurrentIndex(v.expiry);
+        // Отсутствующие теги не применяются: фильтр несуществующим тегом дал бы пустой список без объяснения.
+        const auto tags = app_.model()->allTags(); selectedTags_.clear();
+        for (const auto& tag : v.tags)
+            if (std::any_of(tags.cbegin(), tags.cend(), [&](const QString& t) { return t.compare(tag, Qt::CaseInsensitive) == 0; })) selectedTags_ << tag;
+    }
+    refillTagBar(); updateLibraryCounts(); refillList();
+    if (!v.group.isNull() && !groupItem) statusBar()->showMessage(QStringLiteral("Группа представления удалена — фильтр группы снят."), 5000);
+    return true;
+}
+void MainWindow::refillViews() {
+    const QSignalBlocker block(savedViews_); const auto current = savedViews_->currentText();
+    savedViews_->clear();
+    if (app_.gate() == Application::Gate::Ready) for (const auto& v : app_.model()->views()) savedViews_->addItem(v.name);
+    savedViews_->setCurrentIndex(savedViews_->findText(current));
+}
+void MainWindow::viewAction(int action) {
+    if (!ready() || editing_) return;
+    const auto name = savedViews_->currentText();
+    if (action == 0) {
+        bool ok = false;
+        const auto chosen = QInputDialog::getText(this, QStringLiteral("Сохранить представление"), QStringLiteral("Имя представления:"), QLineEdit::Normal, {}, &ok).trimmed();
+        if (ok && !chosen.isEmpty() && saveCurrentView(chosen)) savedViews_->setCurrentIndex(savedViews_->findText(chosen));
+        return;
+    }
+    if (savedViews_->currentIndex() < 0) return;
+    const auto same = [&](const model::SavedView& v) { return v.name.compare(name, Qt::CaseInsensitive) == 0; };
+    if (action == 1) {
+        bool ok = false;
+        const auto renamed = QInputDialog::getText(this, QStringLiteral("Переименовать представление"), QStringLiteral("Новое имя:"), QLineEdit::Normal, name, &ok).trimmed();
+        if (ok && !renamed.isEmpty() && changeViews([&](QList<model::SavedView>& views) { for (auto& v : views) if (same(v)) v.name = renamed; return QString(); }))
+            savedViews_->setCurrentIndex(savedViews_->findText(renamed));
+    } else if (action == 2) {
+        const auto current = captureView(name);
+        changeViews([&](QList<model::SavedView>& views) { for (auto& v : views) if (same(v)) v = current; return QString(); });
+    } else if (action == 3 && QMessageBox::question(this, QStringLiteral("Удаление представления"), QStringLiteral("Удалить представление «%1»? Записи не затрагиваются.").arg(name),
+                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes)
+        changeViews([&](QList<model::SavedView>& views) { views.removeIf(same); return QString(); });
+}
 void MainWindow::refreshAll() {
     const auto node = selectedNode(), entry = selectedEntry();
     QSignalBlocker block(tree_); tree_->clear();
@@ -605,7 +702,7 @@ void MainWindow::refreshAll() {
     // переименования/удаления выбранного чипа) и лишь затем refillList рисует список —
     // иначе список фильтруется по устаревшему набору уже несуществующим тегом.
     displayedEntry_ = {}; // Explicit model refresh may change metadata of the same UUID.
-    refillTagBar(); updateLibraryCounts();
+    refillTagBar(); updateLibraryCounts(); refillViews();
     refillList(entry); updateEnabled(); updateSwitchActionText();
     if (app_.gate() == Application::Gate::Ready) {
         const auto mode = app_.mode() == Application::Mode::Hello ? QStringLiteral("Windows Hello") : QStringLiteral("мастер-пароль");

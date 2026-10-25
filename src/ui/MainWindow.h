@@ -45,6 +45,9 @@ public:
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
     QLineEdit* search() const { return search_; }
+    // Сохранённые представления (F3): снимок текущих фильтров в зашифрованной модели.
+    bool saveCurrentView(const QString& name);
+    bool applyView(const QString& name);
     EntryCard* card() const { return card_; }
 signals:
     void closing();
@@ -145,6 +148,11 @@ private:
     QComboBox* expiryFilter_{};
     QWidget* tagBar_{};
     QStringList selectedTags_{};
+    QComboBox* savedViews_{}; QToolButton* viewActions_{};
+    model::SavedView captureView(const QString& name) const;
+    bool changeViews(const std::function<QString(QList<model::SavedView>&)>& change);
+    void refillViews();
+    void viewAction(int action); // 0 — сохранить текущее, 1 — переименовать, 2 — обновить, 3 — удалить
     QStackedWidget* right_{};
     EntryCard* card_{};
     QScrollArea* cardScroll_{};
