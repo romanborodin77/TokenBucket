@@ -855,7 +855,7 @@ void MainWindow::addEntry() {
     const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
 #endif
     const auto generation = app_.generation();
-    EntryEditDialog dialog(*app_.model(), std::nullopt, this); dialog.setGroup(parent);
+    EntryEditDialog dialog(*app_.model(), std::nullopt, this); dialog.setGroup(parent); dialog.setGeneratorSettings(preferences_);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
         const auto entry = dialog.entry(); if (entry) commitEntry([&](auto& model) { return model.setEntry(*entry); }, entry->id);
     }
@@ -871,7 +871,7 @@ void MainWindow::editSelected() {
     // подтверждаем владельца, как при показе/копировании (audit M-1).
     if (!authorizeEntry(app_,id,this) || selectedEntry()!=id || !ready() || generation!=app_.generation()) return;
     const auto* entry=app_.model()->entry(id); if(!entry) return; const auto before=*entry;
-    EntryEditDialog dialog(*app_.model(), *entry, this);
+    EntryEditDialog dialog(*app_.model(), *entry, this); dialog.setGeneratorSettings(preferences_);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
         const auto* current=app_.model()->entry(id);
         if(!current || *current!=before) {report(QStringLiteral("Запись изменилась. Откройте редактор заново.")); return;}

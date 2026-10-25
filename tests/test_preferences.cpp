@@ -6,6 +6,19 @@ using namespace tb;
 class TestPreferences : public QObject {
     Q_OBJECT
 private slots:
+    void generatorOptionsRoundtripAndFallback() {
+        QTemporaryDir dir; QSettings s(dir.filePath("g.ini"), QSettings::IniFormat);
+        QCOMPARE(prefs::read(s).generator, crypto::GeneratorOptions{});
+        s.setValue("generator/length", 40); s.setValue("generator/groups", "LD"); s.setValue("generator/excludeSimilar", false);
+        QCOMPARE(prefs::read(s).generator, (crypto::GeneratorOptions{40, false, true, true, false, false}));
+        s.setValue("generator/length", 500); s.setValue("generator/groups", "XYZ");
+        const auto fallback = prefs::read(s).generator;
+        QCOMPARE(fallback.length, 24); QVERIFY(fallback.upper && fallback.lower && fallback.digits && fallback.symbols);
+        s.setValue("generator/groups", "");
+        QVERIFY(prefs::read(s).generator.upper);
+        auto values = prefs::read(s); values.generator = {24, false, false, false, false, true};
+        QVERIFY(!prefs::validate(values).isEmpty());
+    }
     void defaultsAndReadOnly() {
         QTemporaryDir dir; QSettings s(dir.filePath("prefs.ini"),QSettings::IniFormat);
         const auto v=prefs::read(s);

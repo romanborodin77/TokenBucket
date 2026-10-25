@@ -31,6 +31,13 @@
 #include <sodium.h>
 #include <algorithm>
 #include <QUrl>
+#include <QToolButton>
+#include <QMenu>
+#include <QWidgetAction>
+#include <QSpinBox>
+#include <QSettings>
+#include "../app/Preferences.h"
+#include "../vault/PasswordGenerator.h"
 using namespace tb::model;
 namespace {
 class FileBodyEditor : public QPlainTextEdit {
@@ -160,8 +167,23 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     auto* passwordRow = new QWidget(credentials); auto* passwordLayout = new QHBoxLayout(passwordRow);
     passwordLayout->setContentsMargins(0, 0, 0, 0); passwordLayout->addWidget(password_);
     auto* generate = new QPushButton(QStringLiteral("Сгенерировать"), passwordRow); generate->setObjectName(QStringLiteral("generatePassword"));
-    generate->setToolTip(QStringLiteral("Случайный пароль из 24 символов без похожих знаков (0/O, 1/l/I)"));
+    generate->setToolTip(QStringLiteral("Случайный пароль по параметрам рядом: длина, группы символов, исключение похожих знаков"));
     passwordLayout->addWidget(generate);
+    auto* generatorOptions=new QToolButton(passwordRow); generatorOptions->setObjectName(QStringLiteral("generatorOptions"));
+    generatorOptions->setText(QStringLiteral("Параметры")); generatorOptions->setAccessibleName(QStringLiteral("Параметры генератора пароля"));
+    generatorOptions->setPopupMode(QToolButton::InstantPopup);
+    auto* generatorMenu=new QMenu(generatorOptions);
+    generatorLength_=new QSpinBox(generatorMenu); generatorLength_->setObjectName(QStringLiteral("generatorLength"));
+    generatorLength_->setRange(8,128); generatorLength_->setPrefix(QStringLiteral("Длина: ")); generatorLength_->setAccessibleName(QStringLiteral("Длина пароля"));
+    auto* lengthAction=new QWidgetAction(generatorMenu); lengthAction->setDefaultWidget(generatorLength_); generatorMenu->addAction(lengthAction);
+    const char* names[5]={"generatorUpper","generatorLower","generatorDigits","generatorSymbols","generatorSimilar"};
+    const QString labels[5]={QStringLiteral("Заглавные A–Z"),QStringLiteral("Строчные a–z"),QStringLiteral("Цифры 0–9"),QStringLiteral("Символы #!%+=-_@$*?."),QStringLiteral("Исключать похожие (0/O, 1/l/I)")};
+    for(int i=0;i<5;++i) {
+        if(i==4) generatorMenu->addSeparator();
+        generatorGroups_[i]=generatorMenu->addAction(labels[i]); generatorGroups_[i]->setObjectName(QString::fromLatin1(names[i])); generatorGroups_[i]->setCheckable(true);
+    }
+    generatorOptions->setMenu(generatorMenu); passwordLayout->addWidget(generatorOptions);
+    loadGeneratorOptions(tb::crypto::GeneratorOptions{});
     credentialsForm->addRow(QStringLiteral("&Логин:"), login_); credentialsForm->addRow(QStringLiteral("П&ароль:"), passwordRow); pageLayout->addWidget(credentials);
     auto* ssh = new QWidget(pages); auto* sshForm = new QFormLayout(ssh);
     sshPath_ = line(ssh, "sshPrivatePath"); sshPath_->setPlaceholderText(existing ? QStringLiteral("Пусто — сохранить прежний ключ") : QStringLiteral("Выберите файл приватного ключа"));
@@ -258,11 +280,17 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     });
     connect(generate, &QPushButton::clicked, this, [this] {
         tb::crypto::init();
-        // Алфавит без похожих знаков (0/O, 1/l/I); 24 знака ≈ 140 бит энтропии.
-        const QString alphabet = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789#!%+=-");
-        QString password;
-        for (int i = 0; i < 24; ++i) password += alphabet.at(int(randombytes_uniform(uint(alphabet.size()))));
-        password_->setText(password);
+        const tb::crypto::GeneratorOptions options{generatorLength_->value(),generatorGroups_[0]->isChecked(),generatorGroups_[1]->isChecked(),
+            generatorGroups_[2]->isChecked(),generatorGroups_[3]->isChecked(),generatorGroups_[4]->isChecked()};
+        if(const auto error=tb::crypto::generatorError(options);!error.isEmpty()) {showError(error); return;}
+        password_->setText(tb::crypto::generatePassword(options)); error_->hide();
+        if(!generatorSettings_) return;
+        QString groups;
+        for(int i=0;i<4;++i) if(generatorGroups_[i]->isChecked()) groups+=QStringLiteral("ULDS").at(i);
+        // Параметры — не секрет; отказ записи настроек не мешает уже сгенерированному паролю.
+        tb::prefs::writeValue(*generatorSettings_,QStringLiteral("generator/length"),options.length);
+        tb::prefs::writeValue(*generatorSettings_,QStringLiteral("generator/groups"),groups);
+        tb::prefs::writeValue(*generatorSettings_,QStringLiteral("generator/excludeSimilar"),options.excludeSimilar);
     });
     shownType_=original_.type; type_->setCurrentIndex(type_->findData(int(original_.type)));
     if (existing) setGroup(original_.groupId);
@@ -295,6 +323,14 @@ void EntryEditDialog::fitToContents() {
         move(qBound(available.left(), frame.left(), available.right() - frame.width() + 1),
              qBound(available.top(), frame.top(), available.bottom() - frame.height() + 1));
     }
+}
+void EntryEditDialog::setGeneratorSettings(QSettings* settings) {
+    generatorSettings_=settings; if(settings) loadGeneratorOptions(tb::prefs::read(*settings).generator);
+}
+void EntryEditDialog::loadGeneratorOptions(const tb::crypto::GeneratorOptions& o) {
+    generatorLength_->setValue(o.length);
+    const bool values[5]={o.upper,o.lower,o.digits,o.symbols,o.excludeSimilar};
+    for(int i=0;i<5;++i) generatorGroups_[i]->setChecked(values[i]);
 }
 void EntryEditDialog::showError(const QString& message) { error_->setText(message); error_->show(); fitToContents(); }
 EntryEditDialog::~EntryEditDialog() { clearSecrets(); }

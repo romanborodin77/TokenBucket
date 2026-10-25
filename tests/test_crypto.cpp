@@ -1,10 +1,32 @@
 #include <QtTest>
 #include "../src/vault/Crypto.h"
+#include "../src/vault/PasswordGenerator.h"
+#include <algorithm>
 using namespace tb;
 class TestCrypto : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(crypto::init()); }
+    void generatorHonoursOptions() {
+        const QString symbols = QStringLiteral("#!%+=-_@$*?.");
+        for (int i = 0; i < 1000; ++i) {
+            const auto p = crypto::generatePassword({8, true, true, true, true, true});
+            QCOMPARE(p.size(), 8);
+            QVERIFY(std::any_of(p.cbegin(), p.cend(), [](QChar c) { return c.isUpper(); }));
+            QVERIFY(std::any_of(p.cbegin(), p.cend(), [](QChar c) { return c.isLower(); }));
+            QVERIFY(std::any_of(p.cbegin(), p.cend(), [](QChar c) { return c.isDigit(); }));
+            QVERIFY(std::any_of(p.cbegin(), p.cend(), [&](QChar c) { return symbols.contains(c); }));
+            for (QChar c : QStringLiteral("0O1lI")) QVERIFY(!p.contains(c));
+        }
+        const auto digits = crypto::generatePassword({128, false, false, true, false, false});
+        QCOMPARE(digits.size(), 128); QVERIFY(std::all_of(digits.cbegin(), digits.cend(), [](QChar c) { return c.isDigit(); }));
+        QVERIFY(crypto::generatePassword({24, true, false, false, false, false}) != crypto::generatePassword({24, true, false, false, false, false}));
+        QVERIFY(!crypto::generatorError({24, false, false, false, false, true}).isEmpty());
+        QVERIFY(crypto::generatePassword({24, false, false, false, false, true}).isEmpty());
+        QVERIFY(!crypto::generatorError({7, true, true, true, true, true}).isEmpty());
+        QVERIFY(!crypto::generatorError({129, true, true, true, true, true}).isEmpty());
+        QVERIFY(crypto::generatorError({8, true, true, true, true, false}).isEmpty());
+    }
     void secureKeyMove() {
         SecureKey first; randombytes_buf(first.data(), SecureKey::Size);
         const QByteArray expected(reinterpret_cast<const char*>(first.data()), SecureKey::Size);

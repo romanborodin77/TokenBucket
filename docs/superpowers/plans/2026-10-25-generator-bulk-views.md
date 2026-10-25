@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-25-generator-bulk-views-design.md](../specs/2026-10-25-generator-bulk-views-design.md)
 
-**Status:** ждёт рассмотрения владельцем.
+**Status:** исполняется нативно (вопрос об утверждении плана остался без ответа — по мандату владельца взят рекомендованный вариант).
 
 ## Global Constraints
 
@@ -49,7 +49,7 @@ QString generatePassword(const GeneratorOptions&); // пусто при ошиб
 // prefs::Values += crypto::GeneratorOptions generator;  ключи generator/length, generator/groups ("ULDS"-подмножество), generator/excludeSimilar
 ```
 
-- [ ] **Step 1: RED.** В `test_crypto.cpp` слот `generatorHonoursOptions`:
+- [x] **Step 1: RED.** В `test_crypto.cpp` слот `generatorHonoursOptions`:
 ```cpp
 using tb::crypto::GeneratorOptions;
 tb::crypto::init();
@@ -69,8 +69,8 @@ QVERIFY(!tb::crypto::generatorError({7, true, true, true, true, true}).isEmpty()
 QVERIFY(!tb::crypto::generatorError({129, true, true, true, true, true}).isEmpty());
 ```
 В `test_preferences.cpp` слот `generatorOptionsRoundtripAndFallback`: записать `generator/length=40`, `generator/groups=LD`, `generator/excludeSimilar=false` → `read()` даёт {40,false,true,true,false,false}; `generator/length=500` и `generator/groups=XYZ` → значения по умолчанию.
-- [ ] **Step 2: Run** `rtk proxy cmd //d //c "tools\\build.cmd"` → ошибка компиляции (нет заголовка) — затем после объявлений поведенческий RED.
-- [ ] **Step 3: Реализация** `PasswordGenerator.cpp`:
+- [x] **Step 2: Run** `rtk proxy cmd //d //c "tools\\build.cmd"` → ошибка компиляции (нет заголовка) — затем после объявлений поведенческий RED.
+- [x] **Step 3: Реализация** `PasswordGenerator.cpp`:
 ```cpp
 namespace tb::crypto {
 namespace {
@@ -101,8 +101,8 @@ QString generatePassword(const GeneratorOptions& o) {
 ```
 `Preferences`: поле `crypto::GeneratorOptions generator;` в `Values`; `read()` — `length` через `integer()` с проверкой 8..128, `groups` — строка только из букв `U L D S` без повторов и непустая, иначе умолчание; `excludeSimilar` через `boolean()`. `validate()` возвращает `crypto::generatorError(v.generator)`.
 `EntryEditDialog`: рядом с `generate` — `QToolButton` `generatorOptions` (popupMode InstantPopup) с меню: `QWidgetAction` со `QSpinBox` `generatorLength` (8..128) и checkable-действиями `generatorUpper/Lower/Digits/Symbols/Similar`. Обработчик `generate` строит `GeneratorOptions` из контролов, при ошибке пишет её через `showError()`, иначе `password_->setText(generatePassword(o))` и сохраняет параметры `prefs::writeValue` в `QSettings` по умолчанию (ключи из Interfaces). Начальные значения — `prefs::read(QSettings())`.
-- [ ] **Step 4: GREEN** — `build\runtest.cmd test_crypto`, `test_preferences`; в `test_ui` расширить `passwordGeneratorProducesLongDistinctPasswords`: выставить `generatorLength=40`, снять `generatorSymbols`, нажать `generatePassword` → длина 40, нет символов из набора; снять все группы → пароль не изменился, видна ошибка. Полный набор.
-- [ ] **Step 5: Commit** `Configure password generator length and character groups`.
+- [x] **Step 4: GREEN** — `build\runtest.cmd test_crypto`, `test_preferences`; в `test_ui` расширить `passwordGeneratorProducesLongDistinctPasswords`: выставить `generatorLength=40`, снять `generatorSymbols`, нажать `generatePassword` → длина 40, нет символов из набора; снять все группы → пароль не изменился, видна ошибка. Полный набор.
+- [x] **Step 5: Commit** `Configure password generator length and character groups`.
 
 ### Task 2: F3 — модель и CBOR v5
 

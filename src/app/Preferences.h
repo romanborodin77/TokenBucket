@@ -3,6 +3,7 @@
 #include <QSettings>
 #include <optional>
 #include "../platform/QuickPaste.h"
+#include "../vault/PasswordGenerator.h"
 namespace tb::prefs {
 enum class CloseBehavior { Hide, LockHide, Exit };
 struct Values {
@@ -13,6 +14,7 @@ struct Values {
     paste::Field defaultField = paste::Field::Secret;
     CloseBehavior closeBehavior = CloseBehavior::Hide;
     std::optional<bool> autostart;
+    crypto::GeneratorOptions generator;
     bool operator==(const Values&) const = default;
 };
 struct ApplyResult { QStringList appliedKeys; QString failedKey, error; };

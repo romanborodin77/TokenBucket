@@ -23,6 +23,7 @@ add_library(tokenbucket_core STATIC
   src/app/Preferences.cpp
   src/vault/Crypto.cpp
   src/vault/CborWriter.cpp
+  src/vault/PasswordGenerator.cpp
   src/vault/Container.cpp
   src/model/VaultModel.cpp
   src/model/TextFile.cpp

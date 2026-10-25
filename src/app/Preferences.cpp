@@ -1,4 +1,5 @@
 #include "Preferences.h"
+#include <algorithm>
 namespace tb::prefs {
 namespace {
 int integer(QSettings& s,const QString& key,int fallback) {
@@ -26,6 +27,13 @@ Values read(QSettings& s) {
     if(closing=="lock-hide") v.closeBehavior=CloseBehavior::LockHide;
     if(closing=="exit") v.closeBehavior=CloseBehavior::Exit;
     if(s.contains("hotkey")) v.hotkey=QKeySequence::fromString(s.value("hotkey").toString(),QKeySequence::PortableText);
+    // Генератор: неверная длина или набор групп заменяются умолчанием целиком — частично
+    // применённые параметры могли бы дать неожиданно слабый пароль.
+    const int length=integer(s,"generator/length",24); const auto groups=s.value("generator/groups","ULDS").toString();
+    const bool groupsValid=!groups.isEmpty() && groups.size()<=4 && std::all_of(groups.cbegin(),groups.cend(),[&](QChar c) {return QStringLiteral("ULDS").contains(c) && groups.count(c)==1;});
+    if(length>=8 && length<=128 && groupsValid)
+        v.generator={length,groups.contains('U'),groups.contains('L'),groups.contains('D'),groups.contains('S'),boolean(s,"generator/excludeSimilar",true)};
+    else v.generator.excludeSimilar=boolean(s,"generator/excludeSimilar",true);
     return v;
 }
 QString validate(const Values& v) {
@@ -41,7 +49,7 @@ QString validate(const Values& v) {
 #ifdef Q_OS_WIN
     if(!paste::parseHotkey(v.hotkey)) return QStringLiteral("Сочетание: Ctrl/Alt/Win и A–Z, 0–9, Space или F1–F11.");
 #endif
-    return {};
+    return crypto::generatorError(v.generator);
 }
 bool writeValue(QSettings& settings,const QString& key,const QVariant& value,QString* error) {
     if(error) error->clear();

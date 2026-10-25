@@ -2,7 +2,8 @@
 #include <QDialog>
 #include <optional>
 #include "../model/VaultModel.h"
-class QComboBox; class QLineEdit; class QPlainTextEdit; class QCheckBox; class QLabel; class QDateEdit;
+#include "../vault/PasswordGenerator.h"
+class QSettings; class QSpinBox; class QAction; class QComboBox; class QLineEdit; class QPlainTextEdit; class QCheckBox; class QLabel; class QDateEdit;
 class QDialogButtonBox; class QPushButton;
 namespace tb::ui { void populateGroups(QComboBox& combo, const model::VaultModel& model); }
 class EntryEditDialog : public QDialog {
@@ -12,6 +13,8 @@ public:
     ~EntryEditDialog() override;
     std::optional<tb::model::Entry> entry() const { return result_; }
     void setGroup(tb::model::Id id);
+    // Настройки, где запоминаются параметры генератора; без них параметры живут только в диалоге.
+    void setGeneratorSettings(QSettings* settings);
     void clearSecrets();
 public slots:
     void reject() override;
@@ -21,6 +24,9 @@ public slots:
 protected:
     bool eventFilter(QObject*,QEvent*) override;
 private:
+    QSettings* generatorSettings_{};
+    QSpinBox* generatorLength_{}; QAction* generatorGroups_[5]{}; // U, L, D, S, исключать похожие
+    void loadGeneratorOptions(const tb::crypto::GeneratorOptions&);
     void fitToContents();
     void showError(const QString& message);
     const tb::model::VaultModel& model_;

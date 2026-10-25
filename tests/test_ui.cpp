@@ -22,6 +22,7 @@
 #include <QDateEdit>
 #include <QAccessible>
 #include <QSettings>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QSignalSpy>
 #include <QMenu>
@@ -728,9 +729,34 @@ private slots:
         generate->click(); const auto first = password->text();
         generate->click(); const auto second = password->text();
         QCOMPARE(first.size(), 24); QCOMPARE(second.size(), 24); QVERIFY(first != second);
-        const QString alphabet = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789#!%+=-");
+        const QString alphabet = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789#!%+=-_@$*?.");
         for (const QChar ch : first + second)
             QVERIFY2(alphabet.contains(ch), qPrintable(QStringLiteral("недопустимый знак: %1").arg(ch)));
+    }
+    void passwordGeneratorOptionsApplyAndPersist() {
+        QTemporaryDir dir; QSettings settings(dir.filePath("g.ini"), QSettings::IniFormat);
+        tb::model::VaultModel model; EntryEditDialog dialog(model, std::nullopt); dialog.setGeneratorSettings(&settings);
+        dialog.findChild<QComboBox*>(QStringLiteral("entryType"))->setCurrentIndex(1);
+        auto* password = dialog.findChild<QLineEdit*>(QStringLiteral("entryPassword"));
+        auto* length = dialog.findChild<QSpinBox*>(QStringLiteral("generatorLength")); QVERIFY(length);
+        QAction* groups[4] = {}; int found = 0;
+        for (auto* action : dialog.findChildren<QAction*>()) {
+            const auto name = action->objectName();
+            if (name == "generatorUpper") groups[0] = action, ++found; else if (name == "generatorLower") groups[1] = action, ++found;
+            else if (name == "generatorDigits") groups[2] = action, ++found; else if (name == "generatorSymbols") groups[3] = action, ++found;
+        }
+        QCOMPARE(found, 4);
+        length->setValue(40); groups[3]->setChecked(false);
+        dialog.findChild<QPushButton*>(QStringLiteral("generatePassword"))->click();
+        const auto generated = password->text(); QCOMPARE(generated.size(), 40);
+        for (QChar c : QStringLiteral("#!%+=-_@$*?.")) QVERIFY(!generated.contains(c));
+        QCOMPARE(settings.value("generator/length").toInt(), 40); QCOMPARE(settings.value("generator/groups").toString(), QStringLiteral("ULD"));
+        for (auto* action : groups) action->setChecked(false);
+        dialog.findChild<QPushButton*>(QStringLiteral("generatePassword"))->click();
+        QCOMPARE(password->text(), generated);
+        QVERIFY(dialog.findChild<QLabel*>(QStringLiteral("entryError"))->text().contains(QStringLiteral("группу")));
+        EntryEditDialog second(model, std::nullopt); second.setGeneratorSettings(&settings);
+        QCOMPARE(second.findChild<QSpinBox*>(QStringLiteral("generatorLength"))->value(), 40);
     }
     void entryMutationRollsBackSingleEntry() {
         Application app(dir_.path() + "/rollback-entry"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
