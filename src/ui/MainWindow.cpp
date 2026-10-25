@@ -38,6 +38,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMap>
 #include <QMenuBar>
 #include <QMenu>
 #include <QMessageBox>
@@ -139,6 +140,11 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     addEntryAction->setShortcut(QKeySequence::New);
     auto* edit = action(entries, QStringLiteral("Изменить запись…"), &MainWindow::editSelected); edit->setShortcut(QKeySequence(Qt::Key_F2));
     action(entries, QStringLiteral("Удалить запись…"), &MainWindow::deleteSelected);
+    entries->addSeparator();
+    action(entries, QStringLiteral("Переместить выбранные в группу…"), &MainWindow::bulkMoveDialog);
+    action(entries, QStringLiteral("Добавить тег выбранным…"), &MainWindow::bulkAddTagDialog);
+    action(entries, QStringLiteral("Снять тег у выбранных…"), &MainWindow::bulkRemoveTagDialog);
+    entries->addSeparator();
 #ifdef Q_OS_WIN
     // Не через mutations_: доступность зависит не только от Ready, но и от выбранной записи
     // (тип и однострочность секрета) — управляем сами в updateEnabled/showMetadata.
@@ -269,7 +275,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     auto* results = new QWidget(splitter); results->setMinimumWidth(260);
     auto* resultsLayout = new QVBoxLayout(results); resultsLayout->setContentsMargins(0, 0, 0, 0); resultsLayout->setSpacing(10);
     list_ = new QListWidget(results); list_->setObjectName("entriesList"); list_->setAccessibleName(QStringLiteral("Список записей")); list_->setMinimumWidth(160); list_->setSpacing(4);
-    list_->setWordWrap(true); list_->setUniformItemSizes(true);
+    list_->setWordWrap(true); list_->setUniformItemSizes(true); list_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     right_ = new QStackedWidget(splitter); right_->setObjectName(QStringLiteral("entryPanel"));
     auto* hint = new QLabel(QStringLiteral("Создайте проект и добавьте запись или выберите существующую запись."), right_);
     emptyHint_ = hint;
@@ -327,6 +333,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { if (tree_->currentItem()) setLibraryView(LibraryView::Group); });
     connect(search_, &QLineEdit::textChanged, this, [this] { refillList(); });
     connect(list_, &QListWidget::currentItemChanged, this, &MainWindow::showMetadata);
+    connect(list_, &QListWidget::itemSelectionChanged, this, &MainWindow::showMetadata);
     connect(list_, &QListWidget::itemDoubleClicked, this, [this] { if (!narrow_) editSelected(); });
     connect(list_, &QListWidget::itemClicked, this, &MainWindow::openCardDialog);
     connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
@@ -607,6 +614,96 @@ void MainWindow::updateLibraryCounts() {
     libraryFavorites_->setChecked(libraryView_ == LibraryView::Favorites);
     libraryExpiring_->setChecked(libraryView_ == LibraryView::Expiring);
 }
+QList<model::Id> MainWindow::selectedEntries() const {
+    QList<model::Id> ids;
+    for (const auto* item : list_->selectedItems()) ids << item->data(Qt::UserRole).value<model::Id>();
+    return ids;
+}
+// Все изменения — одна мутация commit(): проверка на копии модели, одно сохранение,
+// полный откат при первой ошибке (сообщение называет запись).
+bool MainWindow::bulkApply(const QList<model::Id>& ids, quint64 generation, const std::function<QString(model::VaultModel&, model::Id)>& change) {
+    if (!selectionStill(ids, generation) || ids.isEmpty()) return false;
+    return commit([&](model::VaultModel& m) {
+        for (auto id : ids) {
+            const auto title = m.entry(id) ? m.entry(id)->title : QString();
+            if (const auto error = change(m, id); !error.isEmpty()) return QStringLiteral("%1: %2").arg(title, error);
+        }
+        return QString();
+    });
+}
+bool MainWindow::bulkMove(model::Id group) {
+    if (!ready() || !app_.model()->nodes().contains(group)) return false;
+    return bulkApply(selectedEntries(), app_.generation(), [&](model::VaultModel& m, model::Id id) {
+        auto e = *m.entry(id); if (e.groupId == group) return QString();
+        e.groupId = group; e.modified = QDateTime::currentDateTimeUtc(); return m.setEntry(e);
+    });
+}
+bool MainWindow::bulkAddTag(const QString& tag) {
+    const auto clean = tag.trimmed(); if (!ready() || clean.isEmpty()) return false;
+    return bulkApply(selectedEntries(), app_.generation(), [&](model::VaultModel& m, model::Id id) {
+        auto e = *m.entry(id); if (e.tags.contains(clean, Qt::CaseInsensitive)) return QString();
+        e.tags << clean; e.modified = QDateTime::currentDateTimeUtc(); return m.setEntry(e);
+    });
+}
+bool MainWindow::bulkRemoveTag(const QString& tag) {
+    const auto clean = tag.trimmed(); if (!ready() || clean.isEmpty()) return false;
+    return bulkApply(selectedEntries(), app_.generation(), [&](model::VaultModel& m, model::Id id) {
+        auto e = *m.entry(id);
+        if (!e.tags.removeIf([&](const QString& t) { return t.compare(clean, Qt::CaseInsensitive) == 0; })) return QString();
+        e.modified = QDateTime::currentDateTimeUtc(); return m.setEntry(e);
+    });
+}
+bool MainWindow::bulkDelete() {
+    const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) return false;
+    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    // Удаление не раскрывает секретов, но защищённые записи не должны исчезать без владельца.
+    const bool guarded = std::any_of(ids.cbegin(), ids.cend(), [&](model::Id id) { const auto* e = app_.model()->entry(id); return e && e->reverify; });
+    if (guarded && !VerifyDialog::verify(app_, this, QStringLiteral("массовое удаление"))) return false;
+    if (!selectionStill(ids, generation)) return false;
+    if (QMessageBox::question(this, QStringLiteral("Удаление записей"), QStringLiteral("Удалить выбранные записи: %1? Действие нельзя отменить.").arg(ids.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return false;
+    return bulkApply(ids, generation, [](model::VaultModel& m, model::Id id) { return m.removeEntry(id); });
+}
+bool MainWindow::selectionStill(const QList<model::Id>& ids, quint64 generation) {
+    if (!ready() || app_.generation() != generation) return false;
+    for (auto id : ids) if (!app_.model()->entry(id)) { report(QStringLiteral("Выбранные записи изменились. Повторите действие.")); return false; }
+    return true;
+}
+void MainWindow::selectEntriesForAction(const QList<model::Id>& ids) {
+    const QSignalBlocker block(list_); list_->clearSelection();
+    for (int i = 0; i < list_->count(); ++i) if (ids.contains(list_->item(i)->data(Qt::UserRole).value<model::Id>())) list_->item(i)->setSelected(true);
+}
+void MainWindow::bulkMoveDialog() {
+    const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) { report(QStringLiteral("Выберите записи.")); return; }
+    const auto generation = app_.generation(); bool ok = false;
+    QMap<QString, model::Id> groups;
+    for (auto id : app_.model()->nodes().keys()) groups.insert(groupPath(id), id);
+    QString chosen;
+    { QScopedValueRollback guard(editing_, true);
+      chosen = QInputDialog::getItem(this, QStringLiteral("Переместить записи"), QStringLiteral("Группа для выбранных записей (%1):").arg(ids.size()), groups.keys(), 0, false, &ok); }
+    if (!ok || !selectionStill(ids, generation)) return;
+    selectEntriesForAction(ids); bulkMove(groups.value(chosen));
+}
+void MainWindow::bulkAddTagDialog() {
+    const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) { report(QStringLiteral("Выберите записи.")); return; }
+    const auto generation = app_.generation(); bool ok = false; QString tag;
+    { QScopedValueRollback guard(editing_, true);
+      tag = QInputDialog::getText(this, QStringLiteral("Добавить тег"), QStringLiteral("Тег для выбранных записей (%1):").arg(ids.size()), QLineEdit::Normal, {}, &ok); }
+    if (!ok || !selectionStill(ids, generation)) return;
+    selectEntriesForAction(ids); bulkAddTag(tag);
+}
+void MainWindow::bulkRemoveTagDialog() {
+    const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) { report(QStringLiteral("Выберите записи.")); return; }
+    const auto generation = app_.generation();
+    QStringList tags;
+    for (auto id : ids) for (const auto& tag : app_.model()->entry(id)->tags) if (!tags.contains(tag, Qt::CaseInsensitive)) tags << tag;
+    if (tags.isEmpty()) { report(QStringLiteral("У выбранных записей нет тегов.")); return; }
+    bool ok = false; QString tag;
+    { QScopedValueRollback guard(editing_, true);
+      tag = QInputDialog::getItem(this, QStringLiteral("Снять тег"), QStringLiteral("Тег у выбранных записей (%1):").arg(ids.size()), tags, 0, false, &ok); }
+    if (!ok || !selectionStill(ids, generation)) return;
+    selectEntriesForAction(ids); bulkRemoveTag(tag);
+}
 model::SavedView MainWindow::captureView(const QString& name) const {
     model::SavedView v; v.name = name;
     if (libraryView_ == LibraryView::Group) v.group = selectedNode();
@@ -847,6 +944,13 @@ void MainWindow::removeTag(const QString& tag) {
     commit([&](auto& model) { return model.removeTag(tag); });
 }
 void MainWindow::showMetadata() {
+    if (const int selected = int(list_->selectedItems().size()); selected > 1 && app_.gate() == Application::Gate::Ready) {
+        right_->setCurrentIndex(1); displayedEntry_ = {}; card_->showSelection(selected);
+#ifdef Q_OS_WIN
+        if (envExportAction_) envExportAction_->setEnabled(false);
+#endif
+        return;
+    }
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(selectedEntry()) : nullptr;
     right_->setCurrentIndex(entry ? 1 : 0); if (!entry) { displayedEntry_ = {}; card_->clear(); return; }
     if (displayedEntry_ != entry->id) { displayedEntry_ = entry->id; card_->showEntry(entry->id); }
@@ -958,6 +1062,7 @@ void MainWindow::addEntry() {
     }
 }
 void MainWindow::editSelected() {
+    if (selectedEntries().size() > 1) { report(QStringLiteral("Для изменения выберите одну запись.")); return; }
     if (!ready() || editing_) return; const auto id=selectedEntry(); if (!app_.model()->entry(id)) { report(QStringLiteral("Выберите запись.")); return; }
     QScopedValueRollback guard(editing_, true);
 #ifdef Q_OS_WIN
@@ -992,6 +1097,7 @@ void MainWindow::moveSelectedNode() {
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) commit([&](auto& model) { return model.moveNode(id, combo->currentData().value<model::Id>()); });
 }
 void MainWindow::deleteSelected() {
+    if (selectedEntries().size() > 1) { bulkDelete(); return; }
     if (!ready() || editing_) return; const auto id = selectedEntry(); if (id.isNull()) { report(QStringLiteral("Выберите запись для удаления.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     if (QMessageBox::question(this, QStringLiteral("Удаление записи"), QStringLiteral("Удалить выбранную запись?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes
@@ -1239,6 +1345,15 @@ void MainWindow::treeMenu(const QPoint& pos) {
 void MainWindow::listMenu(const QPoint& pos) {
     const auto item = list_->itemAt(pos);
     if (!item || !ready()) return;
+    if (item->isSelected() && list_->selectedItems().size() > 1) {
+        QMenu menu(this);
+        menu.addAction(QStringLiteral("Переместить в группу…"), this, &MainWindow::bulkMoveDialog);
+        menu.addAction(QStringLiteral("Добавить тег…"), this, &MainWindow::bulkAddTagDialog);
+        menu.addAction(QStringLiteral("Снять тег…"), this, &MainWindow::bulkRemoveTagDialog);
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("Удалить %1 записей…").arg(list_->selectedItems().size()), this, [this] { bulkDelete(); });
+        menu.exec(list_->viewport()->mapToGlobal(pos)); return;
+    }
     list_->setCurrentItem(item);
     showEntryMenu(list_->viewport()->mapToGlobal(pos));
 }
@@ -1458,7 +1573,7 @@ void MainWindow::importTextFile() {
 }
 #ifdef Q_OS_WIN
 bool MainWindow::canExportEnv() const {
-    if (!ready()) return false;
+    if (!ready() || list_->selectedItems().size() > 1) return false;
     const auto* entry = app_.model()->entry(selectedEntry());
     // однострочный токен/пароль: eligibleForAutoPaste заодно отсекает SSH-ключи (многострочные)
     return entry && paste::eligibleForAutoPaste(*entry);

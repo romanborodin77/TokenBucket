@@ -16,6 +16,8 @@ public:
     explicit EntryCard(Application& app, QWidget* parent = nullptr);
     void showEntry(model::Id id);
     void clear();
+    // Несколько выбранных записей: только число, без значений и действий выдачи.
+    void showSelection(int count);
     QString secretText() const;                       // для тестов
     QPushButton* revealButton() const { return reveal_; }
     void hideNowForTest();

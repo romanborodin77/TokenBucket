@@ -160,9 +160,9 @@ void savedViewsRoundtripV5() {
 
 **Interfaces — Produces:** `QList<model::Id> MainWindow::selectedEntries() const`; публичные `bulkMove(model::Id group)`, `bulkAddTag(const QString&)`, `bulkRemoveTag(const QString&)`, `bulkDelete()` → bool; `EntryCard::showSelection(int count)`.
 
-- [ ] **Step 1: RED** в `test_ui.cpp` слот `bulkActionsAreAtomic`: три записи в группе A, группа B. Выделить две (`entriesList` ExtendedSelection, `setSelected`); карточка `entryDetails` пуста, заголовок «Выбрано: 2 записи». `bulkMove(B)` → обе в B, третья в A, одно сохранение (сравнить файл до/после: изменился один раз — `QSignalSpy` на `Application::stateChanged` не нужен; проверить `groupId`). Одной записи выставить 16 тегов; `bulkAddTag("new")` → false, ни у одной записи нет `new`, файл прежний. `bulkRemoveTag("old")` снимает у обеих. `bulkDelete` с драйвером: QMessageBox «Нет» → обе на месте; «Да» → удалены. Слот `bulkDeleteAsksOwnerForProtected`: одна из выбранных reverify, драйвер отменяет VerifyDialog → ничего не удалено; подтверждает → удалены. Слот `bulkActionCanceledByLock`: драйвер вызывает `app.lock()` в диалоге группы → файл прежний.
-- [ ] **Step 2: Run** `build\runtest.cmd test_ui bulkActionsAreAtomic` → нет методов.
-- [ ] **Step 3: Реализация.** `list_->setSelectionMode(QAbstractItemView::ExtendedSelection)`. `selectedEntries()` — UUID из `list_->selectedItems()`. Общий шаблон:
+- [x] **Step 1: RED** в `test_ui.cpp` слот `bulkActionsAreAtomic`: три записи в группе A, группа B. Выделить две (`entriesList` ExtendedSelection, `setSelected`); карточка `entryDetails` пуста, заголовок «Выбрано: 2 записи». `bulkMove(B)` → обе в B, третья в A, одно сохранение (сравнить файл до/после: изменился один раз — `QSignalSpy` на `Application::stateChanged` не нужен; проверить `groupId`). Одной записи выставить 16 тегов; `bulkAddTag("new")` → false, ни у одной записи нет `new`, файл прежний. `bulkRemoveTag("old")` снимает у обеих. `bulkDelete` с драйвером: QMessageBox «Нет» → обе на месте; «Да» → удалены. Слот `bulkDeleteAsksOwnerForProtected`: одна из выбранных reverify, драйвер отменяет VerifyDialog → ничего не удалено; подтверждает → удалены. Слот `bulkActionCanceledByLock`: драйвер вызывает `app.lock()` в диалоге группы → файл прежний.
+- [x] **Step 2: Run** `build\runtest.cmd test_ui bulkActionsAreAtomic` → нет методов.
+- [x] **Step 3: Реализация.** `list_->setSelectionMode(QAbstractItemView::ExtendedSelection)`. `selectedEntries()` — UUID из `list_->selectedItems()`. Общий шаблон:
 ```cpp
 bool MainWindow::bulkApply(const QList<model::Id>& ids, quint64 generation,
                            const std::function<QString(model::VaultModel&, model::Entry&)>& change) {
@@ -179,8 +179,8 @@ bool MainWindow::bulkApply(const QList<model::Id>& ids, quint64 generation,
 }
 ```
 `bulkMove`: `e.groupId = group`. `bulkAddTag`: `e.tags << tag` (лимит проверит `setEntry`). `bulkRemoveTag`: удалить без учёта регистра. `bulkDelete`: если есть reverify — `VerifyDialog::verify(app_, this, "массовое удаление")`; затем `QMessageBox::question` «Удалить N записей?» с No по умолчанию; `commit` с `removeEntry` для каждой. Пункты меню «Записи» и контекстного меню списка при `selectedEntries().size() > 1`: «Переместить в группу…» (QInputDialog::getItem по `groupPath()` всех узлов), «Добавить тег…» (getText с автодополнением `allTags()`), «Снять тег…» (getItem по объединению тегов выбранных), «Удалить N записей…». Каждое снимает `ids`/`generation` до диалога. `EntryCard::showSelection(n)`: очищает значение, скрывает все кнопки выдачи, заголовок «Выбрано: %1 записей»; вызывается из `showMetadata` при `selectedItems().size() > 1`. Действия копирования/показа/вставки при множественном выборе неактивны (`canExportEnv`, копирование — проверка `selectedItems().size()==1`).
-- [ ] **Step 4: GREEN** test_ui, test_storage_ui, test_e2e; полный набор.
-- [ ] **Step 5: Commit** `Move, tag and delete several entries in one atomic save`.
+- [x] **Step 4: GREEN** test_ui, test_storage_ui, test_e2e; полный набор.
+- [x] **Step 5: Commit** `Move, tag and delete several entries in one atomic save`.
 
 ### Task 5: Приёмка, обзор, поставка
 

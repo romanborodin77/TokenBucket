@@ -48,6 +48,12 @@ public:
     // Сохранённые представления (F3): снимок текущих фильтров в зашифрованной модели.
     bool saveCurrentView(const QString& name);
     bool applyView(const QString& name);
+    // Массовые действия (F2) над выделенными записями: одна мутация, одно сохранение, полный откат.
+    QList<model::Id> selectedEntries() const;
+    bool bulkMove(model::Id group);
+    bool bulkAddTag(const QString& tag);
+    bool bulkRemoveTag(const QString& tag);
+    bool bulkDelete();
     EntryCard* card() const { return card_; }
 signals:
     void closing();
@@ -152,6 +158,11 @@ private:
     model::SavedView captureView(const QString& name) const;
     bool changeViews(const std::function<QString(QList<model::SavedView>&)>& change);
     void refillViews();
+    bool bulkApply(const QList<model::Id>& ids, quint64 generation, const std::function<QString(model::VaultModel&, model::Id)>& change);
+    // Диалоговые обёртки массовых действий: UUID и поколение снимаются до диалога.
+    void bulkMoveDialog(); void bulkAddTagDialog(); void bulkRemoveTagDialog();
+    void selectEntriesForAction(const QList<model::Id>& ids);
+    bool selectionStill(const QList<model::Id>& ids, quint64 generation);
     void viewAction(int action); // 0 — сохранить текущее, 1 — переименовать, 2 — обновить, 3 — удалить
     QStackedWidget* right_{};
     EntryCard* card_{};

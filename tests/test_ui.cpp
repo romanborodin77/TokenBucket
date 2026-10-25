@@ -758,6 +758,92 @@ private slots:
         EntryEditDialog second(model, std::nullopt); second.setGeneratorSettings(&settings);
         QCOMPARE(second.findChild<QSpinBox*>(QStringLiteral("generatorLength"))->value(), 40);
     }
+    static QByteArray fileBytes(const QString& path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); }
+    static void selectEntries(ui::MainWindow& w, const QList<model::Id>& ids) {
+        w.list()->clearSelection();
+        for (int i = 0; i < w.list()->count(); ++i)
+            if (ids.contains(w.list()->item(i)->data(Qt::UserRole).value<model::Id>())) w.list()->item(i)->setSelected(true);
+    }
+    void bulkActionsAreAtomic() {
+        Application app(dir_.path() + "/bulk"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto a = QUuid::createUuid(), b = QUuid::createUuid(); QVERIFY(app.model()->addNode(a, {}, "A").isEmpty()); QVERIFY(app.model()->addNode(b, {}, "B").isEmpty());
+        QList<model::Entry> es;
+        for (int i = 0; i < 3; ++i) { model::Entry e; e.id = QUuid::createUuid(); e.groupId = a; e.title = QStringLiteral("Запись %1").arg(i); e.token = "synthetic"; e.tags = {"old"}; QVERIFY(app.model()->setEntry(e).isEmpty()); es << e; }
+        QVERIFY(app.save(&error));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.refreshAll(); w.findChild<QPushButton*>("libraryAll")->click();
+        selectEntries(w, {es[0].id, es[1].id}); QCOMPARE(w.selectedEntries().size(), 2);
+        QVERIFY(w.card()->findChild<QLabel*>("cardTitle")->text().contains(QStringLiteral("Выбрано: 2")));
+        QVERIFY(w.card()->findChild<QPushButton*>("copySecretButton")); QVERIFY(!w.card()->findChild<QPushButton*>("copySecretButton")->isEnabled());
+        QVERIFY(w.bulkMove(b));
+        QCOMPARE(app.model()->entry(es[0].id)->groupId, b); QCOMPARE(app.model()->entry(es[1].id)->groupId, b); QCOMPARE(app.model()->entry(es[2].id)->groupId, a);
+        auto full = *app.model()->entry(es[1].id); full.tags.clear(); for (int i = 0; i < model::VaultModel::MaxTags; ++i) full.tags << QStringLiteral("t%1").arg(i);
+        QVERIFY(app.model()->setEntry(full).isEmpty()); QVERIFY(app.save(&error)); const auto before = fileBytes(app.storePathForTest());
+        selectEntries(w, {es[0].id, es[1].id});
+        QVERIFY(!w.bulkAddTag("new"));
+        QVERIFY(!app.model()->entry(es[0].id)->tags.contains("new")); QVERIFY(!app.model()->entry(es[1].id)->tags.contains("new"));
+        QCOMPARE(fileBytes(app.storePathForTest()), before);
+        selectEntries(w, {es[0].id, es[2].id}); QVERIFY(w.bulkRemoveTag("OLD"));
+        QVERIFY(app.model()->entry(es[0].id)->tags.isEmpty()); QVERIFY(app.model()->entry(es[2].id)->tags.isEmpty());
+        selectEntries(w, {es[0].id, es[2].id});
+        QTimer::singleShot(0, &w, [] { auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); QVERIFY(box); QCOMPARE(box->defaultButton(), box->button(QMessageBox::No)); box->button(QMessageBox::No)->click(); });
+        QVERIFY(!w.bulkDelete()); QVERIFY(app.model()->entry(es[0].id)); QVERIFY(app.model()->entry(es[2].id));
+        QTimer::singleShot(0, &w, [] { auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); QVERIFY(box); QVERIFY(box->text().contains("2")); box->button(QMessageBox::Yes)->click(); });
+        QVERIFY(w.bulkDelete()); QVERIFY(!app.model()->entry(es[0].id)); QVERIFY(!app.model()->entry(es[2].id)); QVERIFY(app.model()->entry(es[1].id));
+        app.lock(); QVERIFY(app.unlock("valid-password", &error)); QCOMPARE(app.model()->entries().size(), 1);
+    }
+    void bulkMenuDialogsUseCapturedSelection() {
+        Application app(dir_.path() + "/bulk-menu"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto a = QUuid::createUuid(), b = QUuid::createUuid(); QVERIFY(app.model()->addNode(a, {}, "A").isEmpty()); QVERIFY(app.model()->addNode(b, {}, "B").isEmpty());
+        model::Entry one; one.id = QUuid::createUuid(); one.groupId = a; one.title = "Один"; one.token = "synthetic";
+        model::Entry two = one; two.id = QUuid::createUuid(); two.title = "Два";
+        QVERIFY(app.model()->setEntry(one).isEmpty()); QVERIFY(app.model()->setEntry(two).isEmpty()); QVERIFY(app.save(&error));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.refreshAll(); w.findChild<QPushButton*>("libraryAll")->click();
+        const auto trigger = [&](const QString& text, const std::function<void(QInputDialog*)>& drive) {
+            QAction* found = nullptr; for (auto* action : w.findChildren<QAction*>()) if (action->text() == text) found = action;
+            QVERIFY(found); QTimer::singleShot(0, &w, [&] { auto* input = qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(input); drive(input); });
+            found->trigger();
+        };
+        selectEntries(w, {one.id, two.id});
+        trigger(QStringLiteral("Переместить выбранные в группу…"), [](QInputDialog* input) { input->setTextValue("B"); input->accept(); });
+        QCOMPARE(app.model()->entry(one.id)->groupId, b); QCOMPARE(app.model()->entry(two.id)->groupId, b);
+        w.findChild<QPushButton*>("libraryAll")->click(); selectEntries(w, {one.id, two.id});
+        trigger(QStringLiteral("Добавить тег выбранным…"), [](QInputDialog* input) { input->setTextValue("  prod "); input->accept(); });
+        QCOMPARE(app.model()->entry(one.id)->tags, QStringList{"prod"}); QCOMPARE(app.model()->entry(two.id)->tags, QStringList{"prod"});
+        w.findChild<QPushButton*>("libraryAll")->click(); selectEntries(w, {one.id, two.id});
+        trigger(QStringLiteral("Добавить тег выбранным…"), [&](QInputDialog* input) { app.lock(); input->setTextValue("late"); input->accept(); });
+        QVERIFY(app.unlock("valid-password", &error)); QVERIFY(!app.model()->entry(one.id)->tags.contains("late"));
+    }
+    void bulkDeleteAsksOwnerForProtected() {
+        Application app(dir_.path() + "/bulk-protected"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto a = QUuid::createUuid(); QVERIFY(app.model()->addNode(a, {}, "A").isEmpty());
+        model::Entry plain; plain.id = QUuid::createUuid(); plain.groupId = a; plain.title = "Обычная"; plain.token = "synthetic";
+        model::Entry guarded = plain; guarded.id = QUuid::createUuid(); guarded.title = "Защищённая"; guarded.reverify = true;
+        QVERIFY(app.model()->setEntry(plain).isEmpty()); QVERIFY(app.model()->setEntry(guarded).isEmpty()); QVERIFY(app.save(&error));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.refreshAll(); w.findChild<QPushButton*>("libraryAll")->click();
+        for (bool confirm : {false, true}) {
+            selectEntries(w, {plain.id, guarded.id}); bool asked = false;
+            QTimer driver; driver.setInterval(10);
+            connect(&driver, &QTimer::timeout, &w, [&] {
+                auto* modal = QApplication::activeModalWidget();
+                if (auto* input = qobject_cast<QInputDialog*>(modal)) { asked = true; if (confirm) { input->setTextValue("valid-password"); input->accept(); } else input->reject(); }
+                else if (auto* box = qobject_cast<QMessageBox*>(modal)) box->button(QMessageBox::Yes) ? box->button(QMessageBox::Yes)->click() : box->accept();
+            });
+            driver.start(); const bool deleted = w.bulkDelete(); driver.stop();
+            QVERIFY(asked); QCOMPARE(deleted, confirm); QCOMPARE(app.model()->entries().size(), confirm ? 0 : 2);
+        }
+    }
+    void bulkActionCanceledByLock() {
+        Application app(dir_.path() + "/bulk-lock"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto a = QUuid::createUuid(); QVERIFY(app.model()->addNode(a, {}, "A").isEmpty());
+        model::Entry one; one.id = QUuid::createUuid(); one.groupId = a; one.title = "Один"; one.token = "synthetic";
+        model::Entry two = one; two.id = QUuid::createUuid(); two.title = "Два";
+        QVERIFY(app.model()->setEntry(one).isEmpty()); QVERIFY(app.model()->setEntry(two).isEmpty()); QVERIFY(app.save(&error));
+        const auto before = fileBytes(app.storePathForTest());
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.refreshAll(); w.findChild<QPushButton*>("libraryAll")->click();
+        selectEntries(w, {one.id, two.id});
+        QTimer::singleShot(0, &w, [&] { app.lock(); if (auto* modal = QApplication::activeModalWidget()) if (auto* box = qobject_cast<QMessageBox*>(modal)) box->button(QMessageBox::Yes)->click(); });
+        QVERIFY(!w.bulkDelete()); QCOMPARE(fileBytes(app.storePathForTest()), before); QCOMPARE(app.gate(), Application::Gate::NeedUnlock);
+    }
     void entryMutationRollsBackSingleEntry() {
         Application app(dir_.path() + "/rollback-entry"); QString error; QVERIFY(app.createPasswordVault("valid-password", &error));
         auto group = QUuid::createUuid(); QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());

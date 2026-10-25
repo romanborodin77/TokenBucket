@@ -113,6 +113,7 @@ void EntryCard::setRevealSeconds(int seconds) {
     reveal_->setText(QStringLiteral("Показать на %1 секунд").arg(seconds));
 }
 void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); identity_->clear(); flags_->clear(); metadata_->clear(); error_->clear(); updateEnabled(); }
+void EntryCard::showSelection(int count) { clear(); title_->setText(QStringLiteral("Выбрано: %1 записей").arg(count)); }
 void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(id) : nullptr;
