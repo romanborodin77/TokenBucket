@@ -13,4 +13,4 @@
 
 ## Путь отката на v3
 
-dist/TokenBucket.rollback-v3 — сборка коммита 7b1faf0 «Record verified local settings release and recovery checks» (последний релиз с писателем CBOR v3), 69 файлов, TokenBucket.exe SHA-256 f4e0a9cf1b142db136723b476d427cc77a15646e238ebb71b61deb7737793403. Собрана во временном worktree на тех же зависимостях; только приложение, без тестов. Откат: закрыть программу, отложить vault.tb, переименовать vault.tb.before-upgrade-* в vault.tb, запустить EXE из этой папки (нужен мастер-пароль на момент создания копии).
+Сборка коммита 7b1faf0 «Record verified local settings release and recovery checks» (последний релиз с писателем CBOR v3), 69 файлов, TokenBucket.exe SHA-256 f4e0a9cf1b142db136723b476d427cc77a15646e238ebb71b61deb7737793403. Собрана во временном worktree на тех же зависимостях; только приложение, без тестов. Каталог dist/TokenBucket.rollback-v3 удалён после подтверждения владельцем успешного обновления; при необходимости собирается заново из 7b1faf0. Откат: закрыть программу, отложить vault.tb, переименовать vault.tb.before-upgrade-* в vault.tb, запустить EXE из этой папки (нужен мастер-пароль на момент создания копии).

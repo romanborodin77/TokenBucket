@@ -11,9 +11,9 @@
 
 Тем же вечером: удаление устаревшего build/ основного checkout задело зависимости — build/vcpkg_installed и tools/vcpkg в worktree являются junction на основной checkout. Зависимости восстановлены build/restore-deps.cmd (vcpkg install в build/vcpkg_installed, Qt 6.11.2 пересобран); затем Release build и полный CTest 23/23, 560 passed, 0 failed/0 skipped. Перед чисткой проверять `dir /AL` на junction.
 
-Путь отката: dist/TokenBucket.rollback-v3 (сборка 7b1faf0, писатель v3) — см. docs/build/2026-10-25-generator-bulk-views-release.md. В dist также лежит резервная копия хранилища владельца TokenBucket_vaultbackup.zip — не удалять при чистке.
+Хранилище владельца обновлено до v5 и подтверждено владельцем (2026-10-25 ~23:55). После подтверждения вычищено: сборка отката v3, bundle прежней истории, устаревшие копии в папке хранилища (stray, before-import, before-upgrade — все есть в архиве), промежуточные каталоги vcpkg (buildtrees/packages), влитые ветки codex/*. Единственная резервная копия прежних файлов хранилища — dist/TokenBucket_vaultbackup.zip, НЕ удалять. Откат на v3 при необходимости: собрать коммит 7b1faf0 и взять vault.tb из этого архива.
 
-GitHub: origin = https://github.com/romanborodin77/TokenBucket.git, ветка main. Вся история переписана (git filter-repo --mailmap) на romanborodin77 <300133179+romanborodin77@users.noreply.github.com> и отправлена force-push; эта же идентичность задана глобально. Хеши коммитов, упомянутые в записях выше, относятся к истории до переписи. Страховочный bundle прежней истории: D:/Sources/gitverse/TokenBucket-pre-rewrite-20261025-194346Z.bundle (вне папки проекта).
+GitHub: origin = https://github.com/romanborodin77/TokenBucket.git, ветка main. Вся история переписана (git filter-repo --mailmap) на romanborodin77 <300133179+romanborodin77@users.noreply.github.com> и отправлена force-push; эта же идентичность задана глобально. Хеши коммитов, упомянутые в записях выше, относятся к истории до переписи. Bundle прежней истории удалён после подтверждения владельцем.
 
 ## 2026-10-25 — структурированное хранение завершено, всё в main
 
