@@ -111,6 +111,7 @@ private:
     QLabel *idleStatus_{}, *clipboardStatus_{}, *hotkeyStatus_{};
     QDate statusDate_ = QDateTime::currentDateTimeUtc().date();
     bool ready() const;
+    bool ensureSchemaUpgradeApproved();
     void previewTextImport(io::TextImportPreview);
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
     void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);

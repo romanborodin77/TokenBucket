@@ -15,6 +15,7 @@
 #include <QSignalBlocker>
 #include <QCloseEvent>
 #include <QKeyEvent>
+#include <QDialog>
 namespace tb::ui {
 MiniPanel::MiniPanel(Application& app, ClipboardGuard& clip, QWidget* parent)
     : QWidget(parent, Qt::Tool), app_(app), clip_(clip) {
@@ -69,12 +70,17 @@ void MiniPanel::clearContext() {
     recipient_ = {};
 #endif
 }
-void MiniPanel::cancel() { clearContext(); hide(); }
+void MiniPanel::cancel() {
+    auto* modal=qobject_cast<QDialog*>(QApplication::activeModalWidget()); QObject* owner=modal;
+    while(owner && owner!=this) owner=owner->parent();
+    clearContext(); if(modal && owner) modal->reject(); hide();
+}
 void MiniPanel::closeEvent(QCloseEvent* event) { cancel(); event->ignore(); }
 bool MiniPanel::eventFilter(QObject* object, QEvent* event) {
-    if (event->type() == QEvent::KeyPress && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
-        auto* widget = qobject_cast<QWidget*>(object);
-        if (widget && (widget == this || isAncestorOf(widget))) { cancel(); return true; }
+    if ((event->type()==QEvent::KeyPress || event->type()==QEvent::ShortcutOverride) && static_cast<QKeyEvent*>(event)->key()==Qt::Key_Escape) {
+        QObject* owner=object; while(owner && owner!=this) owner=owner->parent();
+        if(!owner && phase_==Phase::Verifying) {owner=QApplication::activeModalWidget(); while(owner && owner!=this) owner=owner->parent();}
+        if(owner) {if(event->type()==QEvent::KeyPress) cancel(); event->accept(); return true;}
     }
     if (phase_ == Phase::Choosing && event->type() == QEvent::ApplicationDeactivate) cancel();
     if (object == search_ && event->type() == QEvent::KeyPress) {

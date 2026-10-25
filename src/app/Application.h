@@ -57,6 +57,7 @@ public:
     bool unlock(const QByteArray& pw, QString* err);
     bool save(QString* err);
     bool schemaUpgradeRequired() const;
+    bool schemaUpgradeApproved() const {return gate_==Gate::Ready && upgradeApproval_ && *upgradeApproval_==generation();}
     bool approveSchemaUpgrade(QString* error);
     QString upgradeSafetyPath() const { return upgradeSafetyPath_; }
     QString preserveBeforeRegistryMigration(QString* error);

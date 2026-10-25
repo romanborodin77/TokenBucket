@@ -1,6 +1,7 @@
 #include <QtTest>
 #include <QApplication>
 #include <QWidget>
+#include <QDialog>
 #include <QKeySequence>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -47,6 +48,14 @@ private slots:
         QVERIFY(paste::eligibleForAutoPaste(e, paste::Field::Secret));
     }
 #ifdef Q_OS_WIN
+    void unrelatedModalBlocksQuickPanel() {
+        QTemporaryDir dir; Application app(dir.path()); ClipboardGuard clip; QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        platform::QuickPaste quick(app,clip,nullptr); ui::MiniPanel* panel=nullptr;
+        for(auto* widget:QApplication::topLevelWidgets()) if(auto* candidate=qobject_cast<ui::MiniPanel*>(widget)) panel=candidate;
+        QVERIFY(panel); QDialog editor; editor.setWindowModality(Qt::ApplicationModal); editor.show(); QVERIFY(QTest::qWaitForWindowExposed(&editor));
+        quick.popupPanel(); const bool blocked=!panel->isVisible(); panel->close(); editor.reject(); QVERIFY(blocked);
+        quick.popupPanel(); QVERIFY(panel->isVisible()); panel->close();
+    }
     void suspensionBlocksHotkeyAndManualPopup() {
         QTemporaryDir dir; Application app(dir.path()); ClipboardGuard clip; QString error;
         QVERIFY(app.createPasswordVault("valid-password",&error));

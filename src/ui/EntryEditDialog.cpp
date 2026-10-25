@@ -30,6 +30,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <sodium.h>
 #include <algorithm>
+#include <QUrl>
 using namespace tb::model;
 namespace {
 class FileBodyEditor : public QPlainTextEdit {
@@ -369,6 +370,12 @@ void EntryEditDialog::accept() {
     }
     auto validation = model_; const auto error = validation.setEntry(e);
     if (!error.isEmpty()) { showError(error); return; }
+    if(e.type==EntryType::PlainValue && e.valueFormat==ValueFormat::Url) {
+        const QUrl url(e.plainValue,QUrl::StrictMode);
+        if((!url.userInfo().isEmpty() || url.hasQuery() || url.hasFragment())
+            && !confirmChange(this,QStringLiteral("URL может содержать секрет"),QStringLiteral("В адресе есть учётные данные, параметры или фрагмент. Рекомендуется хранить такой адрес как API-токен. Оставить простым значением?"))) return;
+        if(canceled_) return;
+    }
     e.modified = QDateTime::currentDateTimeUtc(); if (!e.created.isValid()) e.created = e.modified;
     result_ = std::move(e); QDialog::accept();
 }

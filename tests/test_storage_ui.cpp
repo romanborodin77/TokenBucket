@@ -22,9 +22,19 @@
 #include <QTreeView>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QDesktopServices>
+#include <QUrl>
 #include "../src/ui/RegistryView.h"
 #include "../src/ui/TextFileDialog.h"
 #include "../src/ui/TextImportDialog.h"
+#include "../src/ui/ExportDialog.h"
+#include "../src/vault/Container.h"
+#include "../src/vault/Crypto.h"
+#include <QCborMap>
+#include <QCborArray>
+#ifdef Q_OS_WIN
+#include "../src/platform/QuickPasteWin.h"
+#endif
 #include "../src/ui/MiniPanel.h"
 #include "../src/platform/ClipboardGuard.h"
 #include "../src/ui/EntryAccess.h"
@@ -37,6 +47,19 @@
 using namespace tb;
 class TestStorageUi : public QObject {
     Q_OBJECT
+    QList<QUrl> openedUrls_;
+    static QByteArray legacyFile(bool hello=false) {
+        crypto::init(); const auto group=QUuid::createUuid(),id=QUuid::createUuid(); QCborMap node,entry,root;
+        node[QStringLiteral("id")]=group.toString(QUuid::WithoutBraces); node[QStringLiteral("p")]=QString(); node[QStringLiteral("n")]="Legacy";
+        entry[QStringLiteral("id")]=id.toString(QUuid::WithoutBraces); entry[QStringLiteral("g")]=group.toString(QUuid::WithoutBraces); entry[QStringLiteral("type")]=0;
+        entry[QStringLiteral("title")]="PUBLIC_IP"; entry[QStringLiteral("tok")]=QByteArray("192.0.2.10"); root[QStringLiteral("v")]=3; root[QStringLiteral("nodes")]=QCborArray{node}; root[QStringLiteral("entries")]=QCborArray{entry};
+#ifdef Q_OS_WIN
+        if(hello) return container::packHello(QCborValue(root).toCbor(),nullptr);
+#else
+        Q_UNUSED(hello);
+#endif
+        return container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr);
+    }
     static QString clipboardText() {
 #ifdef Q_OS_WIN
         if(!OpenClipboard(nullptr)) return QStringLiteral("<unavailable>");
@@ -61,6 +84,133 @@ class TestStorageUi : public QObject {
         return e;
     }
 private slots:
+    void sensitiveUrlNeedsAnExplicitWarning() {
+        model::VaultModel model; const auto group=QUuid::createUuid(); QVERIFY(model.addNode(group,{},"Demo").isEmpty()); EntryEditDialog dialog(model,std::nullopt); dialog.setGroup(group);
+        dialog.findChild<QComboBox*>("entryType")->setCurrentIndex(3); dialog.findChild<QLineEdit*>("entryTitle")->setText("Endpoint"); dialog.findChild<QLineEdit*>("entryPlainValue")->setText("https://demo:synthetic@example.test/?token=synthetic"); dialog.findChild<QComboBox*>("entryValueFormat")->setCurrentIndex(2);
+        bool warned=false; QTimer::singleShot(0,&dialog,[&] {auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if(!box) return; warned=true; QCOMPARE(box->textFormat(),Qt::PlainText); box->button(QMessageBox::No)->click();});
+        dialog.accept(); QVERIFY(warned); QVERIFY(!dialog.entry());
+    }
+    void urlOpeningIsExplicitAndRestricted_data() {
+        QTest::addColumn<QString>("value"); QTest::addColumn<int>("access");
+        QTest::newRow("https")<<QString("https://example.test/path")<<0;
+        QTest::newRow("http")<<QString("http://example.test/path")<<0;
+        QTest::newRow("protected-cancel")<<QString("https://example.test/private")<<1;
+        QTest::newRow("protected-confirm")<<QString("https://example.test/private")<<2;
+        QTest::newRow("file")<<QString("file:///C:/synthetic.txt")<<3;
+        QTest::newRow("javascript")<<QString("javascript:synthetic")<<3;
+    }
+    void urlOpeningIsExplicitAndRestricted() {
+        QFETCH(QString,value); QFETCH(int,access); openedUrls_.clear(); QDesktopServices::setUrlHandler("https",this,"captureUrl"); QDesktopServices::setUrlHandler("http",this,"captureUrl");
+        const auto cleanup=qScopeGuard([] {QDesktopServices::unsetUrlHandler("https"); QDesktopServices::unsetUrlHandler("http");});
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        model::Entry e; e.id=QUuid::createUuid(); e.groupId=group; e.type=model::EntryType::PlainValue; e.valueFormat=model::ValueFormat::Url; e.title="Endpoint"; e.plainValue=value; e.reverify=access==1 || access==2; QVERIFY(app.model()->setEntry(e).isEmpty());
+        ui::EntryCard card(app); card.showEntry(e.id); QVERIFY(openedUrls_.isEmpty()); auto* button=card.findChild<QPushButton*>("cardOpenUrl"); QVERIFY(button);
+        if(access==1 || access==2) QTimer::singleShot(0,&card,[access] {auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(auth); if(access==1) auth->reject(); else {auth->setTextValue("valid-password"); auth->accept();}});
+        button->click(); QCOMPARE(openedUrls_.size(),access==0 || access==2?1:0); if(!openedUrls_.isEmpty()) QCOMPARE(openedUrls_.first().toString(),value);
+    }
+    void legacyWriterUiKeepsOrUpgradesAtomically_data() {
+        QTest::addColumn<int>("writer"); QTest::addColumn<bool>("allow");
+        for(int writer=0;writer<4;++writer) for(bool allow:{false,true}) QTest::newRow(qPrintable(QString("%1-%2").arg(writer).arg(allow)))<<writer<<allow;
+    }
+    void legacyWriterUiKeepsOrUpgradesAtomically() {
+        QFETCH(int,writer); QFETCH(bool,allow); QTemporaryDir dir; const bool hello=writer==1;
+        const auto bytes=legacyFile(hello); QVERIFY(!bytes.isEmpty()); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,[](void*,const QString&) {return platform::hello::Result::Verified;});
+#else
+        Application app(dir.path());
+#endif
+        QString error;
+#ifdef Q_OS_WIN
+        if(hello) QVERIFY(app.unlockHello(nullptr,&error)); else
+#endif
+        QVERIFY(app.unlock("valid-password",&error));
+        const auto baseline=*app.model(); const auto imported=writer==3?QByteArray("Title,Login,Password,Group\nDemo,,synthetic-import,Service\n"):legacyFile();
+        const auto input=dir.filePath(writer==3?"import.csv":"import.tb"); QVERIFY(store::realFileOps().writeAll(input,imported));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        const bool nativeDisabled=QApplication::testAttribute(Qt::AA_DontUseNativeDialogs); QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,true); const auto restore=qScopeGuard([&] {QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,nativeDisabled);});
+        int schemas=0; bool fileSeen=false,timedOut=false; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            auto* modal=QApplication::activeModalWidget();
+            if(auto* box=qobject_cast<QMessageBox*>(modal)) {
+                if(box->objectName()=="schemaUpgradeConfirmation") {++schemas; QCOMPARE(box->textFormat(),Qt::PlainText); box->button(allow?QMessageBox::Yes:QMessageBox::No)->click();}
+                else if(box->button(QMessageBox::Yes)) box->button(QMessageBox::Yes)->click(); else box->accept();
+            } else if(auto* auth=qobject_cast<QInputDialog*>(modal)) {auth->setTextValue("valid-password"); auth->accept();}
+            else if(auto* password=qobject_cast<ui::ExportDialog*>(modal)) {
+                password->findChild<QLineEdit*>("exportPassword")->setText("changed-password"); password->findChild<QLineEdit*>("confirmExportPassword")->setText("changed-password"); password->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            } else if(auto* file=qobject_cast<QFileDialog*>(modal);file && !fileSeen) {fileSeen=true; file->selectFile(input); QMetaObject::invokeMethod(file,"accept",Qt::QueuedConnection);}
+        });
+        QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();});
+        driver.start(); watchdog.start(10000); if(writer==0) window.changeMasterPassword(); else if(writer==1) window.switchUnlockMode(); else if(writer==2) window.importVault(); else window.importFromCsvKeePass(); driver.stop(); watchdog.stop();
+        QVERIFY(!timedOut); QCOMPARE(schemas,1); QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); const auto after=file.readAll(); file.close();
+        if(!allow) {QCOMPARE(after,bytes); QVERIFY(*app.model()==baseline); QVERIFY(app.schemaUpgradeRequired());}
+        else {
+            QVERIFY(!app.schemaUpgradeRequired()); const auto copies=QDir(dir.path()).entryList({"vault.tb.before-upgrade-*"},QDir::Files); QCOMPARE(copies.size(),1); QFile copy(dir.filePath(copies.first())); QVERIFY(copy.open(QIODevice::ReadOnly)); const auto safety=copy.readAll(); QCOMPARE(safety,bytes);
+            if(!hello && writer!=3) {QCOMPARE(container::openPassword(safety,"valid-password").status,container::Status::Ok); QCOMPARE(container::openPassword(safety,"changed-password").status,container::Status::WrongKey);}
+            app.lock(); QVERIFY(app.unlock(writer==3?QByteArray("valid-password"):QByteArray("changed-password"),&error)); QCOMPARE(app.model()->decodedVersion(),4);
+        }
+    }
+    void legacyExportIsV4WithoutChangingLocalFile() {
+        QTemporaryDir dir; const auto bytes=legacyFile(); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes)); Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error));
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;}); const auto output=dir.filePath("export.tb");
+        const bool nativeDisabled=QApplication::testAttribute(Qt::AA_DontUseNativeDialogs); QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,true); const auto restore=qScopeGuard([&] {QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,nativeDisabled);});
+        bool warned=false,fileSeen=false,timedOut=false; QTimer driver; driver.setInterval(10); connect(&driver,&QTimer::timeout,&window,[&] {
+            auto* modal=QApplication::activeModalWidget();
+            if(auto* auth=qobject_cast<QInputDialog*>(modal)) {auth->setTextValue("valid-password"); auth->accept();}
+            else if(auto* password=qobject_cast<ui::ExportDialog*>(modal)) {for(auto* label:password->findChildren<QLabel*>()) warned|=label->text().contains("v4"); password->findChild<QLineEdit*>("exportPassword")->setText("export-password"); password->findChild<QLineEdit*>("confirmExportPassword")->setText("export-password"); password->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();}
+            else if(auto* file=qobject_cast<QFileDialog*>(modal);file && !fileSeen) {fileSeen=true; file->selectFile(output); QMetaObject::invokeMethod(file,"accept",Qt::QueuedConnection);}
+        });
+        QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();}); driver.start(); watchdog.start(8000); window.exportVault(); driver.stop(); watchdog.stop();
+        QVERIFY(!timedOut); QVERIFY(warned); QVERIFY(fileSeen); QFile main(path),file(output); QVERIFY(main.open(QIODevice::ReadOnly)); QCOMPARE(main.readAll(),bytes); QVERIFY(app.schemaUpgradeRequired());
+        QVERIFY(file.open(QIODevice::ReadOnly)); const auto opened=container::openPassword(file.readAll(),"export-password"); QCOMPARE(opened.status,container::Status::Ok); QCOMPARE(QCborValue::fromCbor(opened.cbor).toMap().value(QStringLiteral("v")).toInteger(),4);
+    }
+    void legacyHelloCancelLeavesFileUntouched() {
+#ifdef Q_OS_WIN
+        QTemporaryDir dir; const auto bytes=legacyFile(true); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+        std::atomic<int> calls{0};
+        Application app(dir.path(),nullptr,[&calls](void*,const QString&) {return ++calls==1?platform::hello::Result::Verified:platform::hello::Result::Canceled;});
+        QString error; QVERIFY(app.unlockHello(nullptr,&error)); const auto baseline=*app.model();
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        int schemas=0; QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {schemas+=box->objectName()=="schemaUpgradeConfirmation"; box->accept();}});
+        driver.start(); window.switchUnlockMode(); driver.stop();
+        QVERIFY(calls>=2); QCOMPARE(schemas,0); QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(),bytes);
+        QVERIFY(*app.model()==baseline); QVERIFY(app.schemaUpgradeRequired()); QVERIFY(QDir(dir.path()).entryList({"vault.tb.before-upgrade-*"},QDir::Files).isEmpty());
+#endif
+    }
+    void legacyCommitNeedsExplicitFormatConsent_data() {
+        QTest::addColumn<int>("action"); for(int i=0;i<4;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
+    }
+    void legacyCommitNeedsExplicitFormatConsent() {
+        QFETCH(int,action); QTemporaryDir dir; const auto bytes=legacyFile(); QVERIFY(!bytes.isEmpty()); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes));
+        Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error)); QVERIFY(app.schemaUpgradeRequired()); const auto before=*app.model(); const auto e=*app.model()->entries().cbegin();
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        bool seen=false; QTimer::singleShot(0,&window,[&] {
+            auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if(!box) return; seen=true;
+            QCOMPARE(box->textFormat(),Qt::PlainText); QCOMPARE(box->defaultButton(),qobject_cast<QPushButton*>(box->button(QMessageBox::No)));
+            if(action==2) {app.lock(); return;} if(action==3) {auto changed=e; changed.token="changed-without-modified"; QVERIFY(app.model()->setEntry(changed).isEmpty());}
+            box->button(action==0?QMessageBox::No:QMessageBox::Yes)->click();
+        });
+        int mutated=0; const bool saved=window.commitEntry([&](model::VaultModel& model) {++mutated; auto changed=e; changed.title="Updated"; return model.setEntry(changed);},e.id);
+        QVERIFY(seen); QCOMPARE(saved,action==1); QCOMPARE(mutated,action==1?1:0);
+        QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); const auto after=file.readAll(); file.close();
+        if(action!=1) QCOMPARE(after,bytes);
+        if(action==0) QVERIFY(*app.model()==before);
+        if(action==3) QCOMPARE(app.model()->entry(e.id)->token,QString("changed-without-modified"));
+        if(action==1) {const auto copies=QDir(dir.path()).entryList({"vault.tb.before-upgrade-*"},QDir::Files); QCOMPARE(copies.size(),1); QFile copy(dir.filePath(copies.first())); QVERIFY(copy.open(QIODevice::ReadOnly)); QCOMPARE(copy.readAll(),bytes); app.lock(); QVERIFY(app.unlock("valid-password",&error)); QVERIFY(!app.schemaUpgradeRequired()); QCOMPARE(app.model()->entry(e.id)->title,QString("Updated"));}
+    }
+    void entryEditorSuspendsQuickDelivery() {
+#ifdef Q_OS_WIN
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); prefs.setValue("hotkey","Ctrl+Alt+Shift+F7"); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;});
+        ui::MiniPanel* panel=nullptr; for(auto* widget:QApplication::topLevelWidgets()) if(auto* candidate=qobject_cast<ui::MiniPanel*>(widget)) panel=candidate;
+        QVERIFY(panel); auto* owner=panel->findChild<QWidget*>("hotkeyOwnerWindow"); QVERIFY(owner); const auto hwnd=reinterpret_cast<HWND>(owner->winId());
+        QVERIFY(PostMessageW(hwnd,WM_HOTKEY,1,0)); QTRY_VERIFY(panel->isVisible()); panel->close(); bool seen=false,blocked=false;
+        QTimer::singleShot(0,&window,[&] {auto* editor=qobject_cast<EntryEditDialog*>(QApplication::activeModalWidget()); QVERIFY(editor); seen=true;
+            QVERIFY(PostMessageW(hwnd,WM_HOTKEY,1,0)); QTest::qWait(50); blocked=!panel->isVisible(); panel->close(); editor->reject();});
+        window.addEntry(); QVERIFY(seen); QVERIFY(blocked); QVERIFY(PostMessageW(hwnd,WM_HOTKEY,1,0)); QTRY_VERIFY(panel->isVisible()); panel->close();
+#endif
+    }
     void registryRolesAreSafeAndShareMainFilters() {
         QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
         const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
@@ -313,6 +463,7 @@ private slots:
             auto* dialog=qobject_cast<ui::TextFileDialog*>(QApplication::activeModalWidget()); QVERIFY(dialog); visited=true;
             auto* table=dialog->findChild<QTableView*>(); table->setCurrentIndex(table->model()->index(1,1));
             dialog->findChild<QPushButton*>("textLineVisibility")->click();
+            QVERIFY(dialog->isVisible());
             if(!timedOut) {QVERIFY(app.model()->entry(e.id)); QCOMPARE(app.model()->entry(e.id)->textFile.visibleLines,fail?QList<int>{0}:(QList<int>{0,1}));}
             dialog->reject();
         });
@@ -452,6 +603,18 @@ private slots:
         QCOMPARE(card.findChild<QLabel*>("cardValueLabel")->text(),QStringLiteral("ЗНАЧЕНИЕ"));
         QVERIFY(!card.findChild<QTimer*>("secretHideTimer")->isActive()); card.hideNowForTest(); QCOMPARE(card.secretText(),entry.plainValue);
         app.lock(); QVERIFY(!card.secretText().contains(entry.plainValue));
+    }
+    void plainCardSelectionUsesGuardedCopy() {
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        model::Entry entry; entry.id=QUuid::createUuid(); entry.groupId=group; entry.type=model::EntryType::PlainValue;
+        entry.title="Public value"; entry.plainValue=QStringLiteral("public\u00a0value"); QVERIFY(app.model()->setEntry(entry).isEmpty());
+        ui::EntryCard card(app); card.showEntry(entry.id); card.show(); QVERIFY(QTest::qWaitForWindowExposed(&card));
+        auto* value=card.findChild<QPlainTextEdit*>("entryDetails"); value->setFocus();
+        auto cursor=value->textCursor(); cursor.setPosition(3); cursor.setPosition(9,QTextCursor::KeepAnchor); value->setTextCursor(cursor);
+        QSignalSpy copies(&card,&ui::EntryCard::copyRequested);
+        QTest::keyClick(value,Qt::Key_C,Qt::ControlModifier);
+        QCOMPARE(copies.size(),1); QCOMPARE(copies.first().first().toString(),entry.plainValue.mid(3,6));
     }
     void newTextFileHasASeparateBody() {
         model::VaultModel model; const auto group=QUuid::createUuid(); QVERIFY(model.addNode(group,{},"Demo").isEmpty());
@@ -608,6 +771,32 @@ private slots:
         });
         window.editSelected(); QVERIFY(visited); QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
     }
+    void registryAndDocumentLayouts_data() {
+        QTest::addColumn<bool>("dark"); QTest::newRow("light")<<false; QTest::newRow("dark")<<true;
+    }
+    void registryAndDocumentLayouts() {
+        QFETCH(bool,dark); ui::theme::apply(dark?ui::theme::Mode::Dark:ui::theme::Mode::Light);
+        QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
+        const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Orbitrax — демо").isEmpty());
+        auto source=document(group,true); QVERIFY(app.model()->setEntry(source).isEmpty());
+        model::Entry plain; plain.id=QUuid::createUuid(); plain.groupId=group; plain.type=model::EntryType::PlainValue;
+        plain.title="PUBLIC_IP"; plain.parameterName="PUBLIC_IP"; plain.plainValue="192.0.2.10"; QVERIFY(app.model()->setEntry(plain).isEmpty());
+        model::Entry secret; secret.id=QUuid::createUuid(); secret.groupId=group; secret.title="TOKEN"; secret.token="synthetic-secret"; QVERIFY(app.model()->setEntry(secret).isEmpty());
+        ClipboardGuard clipboard;
+        ui::RegistryView registry(app); registry.setGroup(group);
+        ui::TextFileDialog documentView(app,source.id,clipboard);
+        auto preview=io::parseTextFile("PUBLIC_IP=192.0.2.10\nTOKEN=synthetic-secret\n# comment\n","vm-demo.txt"); preview.source.groupId=group;
+        ui::TextImportDialog importView(app,preview,[](const auto&,const auto&,QString*) {return false;});
+        const auto shots=qEnvironmentVariable("TOKENBUCKET_STORAGE_SCREENSHOTS");
+        for(auto* widget:QList<QWidget*>{&registry,&documentView,&importView}) {
+            widget->resize(420,480); widget->show(); QVERIFY(QTest::qWaitForWindowExposed(widget));
+            QCOMPARE(widget->width(),420); QCOMPARE(widget->height(),480);
+            for(auto* button:widget->findChildren<QPushButton*>()) if(button->isVisible())
+                QVERIFY2(widget->rect().contains(QRect(button->mapTo(widget,QPoint()),button->size())),qPrintable(button->text()));
+            if(!shots.isEmpty()) {QVERIFY(QDir().mkpath(shots)); QVERIFY(widget->grab().save(shots+QString("/%1-%2.png").arg(widget==&registry?"registry":widget==&documentView?"document":"import").arg(dark?"dark":"light")));}
+            widget->hide();
+        }
+    }
     void fiveFormsFit_data() {
         QTest::addColumn<int>("type"); QTest::addColumn<int>("width"); QTest::addColumn<bool>("dark");
         for(int type=0;type<5;++type) for(int width:{420,900}) for(bool dark:{false,true})
@@ -628,6 +817,8 @@ private slots:
         if(!shots.isEmpty()) {QVERIFY(QDir().mkpath(shots)); QVERIFY(dialog.grab().save(shots+QString("/form-%1-%2-%3.png").arg(type).arg(width).arg(dark?"dark":"light")));}
         dialog.reject(); QVERIFY(!dialog.entry());
     }
+public slots:
+    void captureUrl(const QUrl& url) {openedUrls_.append(url);}
 };
 QTEST_MAIN(TestStorageUi)
 #include "test_storage_ui.moc"

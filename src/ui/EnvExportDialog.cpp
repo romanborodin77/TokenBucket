@@ -83,6 +83,11 @@ EnvExportDialog::EnvExportDialog(QWidget* parent,QSettings* preferences) : QDial
 }
 QString EnvExportDialog::name() const { return name_->text().trimmed(); }
 EnvExportDialog::Mode EnvExportDialog::mode() const { return temporary_->isChecked() ? Mode::Temporary : Mode::Permanent; }
+void EnvExportDialog::setSuggestedName(const QString& name) {
+    if(name.isEmpty()) return;
+    if(!platform::envops::validName(name)) {name_->clear(); error_->setText(QStringLiteral("Имя параметра не подходит для окружения. Укажите имя по правилам ниже.")); return;}
+    name_->setText(name);
+}
 QString EnvExportDialog::program() const { return program_->text().trimmed(); }
 QString EnvExportDialog::arguments() const { return arguments_->text(); }
 void EnvExportDialog::accept() {

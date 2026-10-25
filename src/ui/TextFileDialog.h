@@ -33,5 +33,6 @@ private:
     std::optional<model::Entry> snapshot_;
     TextLinesModel* lines_{}; QTableView* table_{}; QLabel* error_{};
     QTimer timer_;
+    bool changingVisibility_=false;
 };
 }

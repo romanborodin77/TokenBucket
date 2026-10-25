@@ -79,6 +79,16 @@ class TestE2E : public QObject {
     QTemporaryDir dir_;
 private slots:
 #ifdef Q_OS_WIN
+    void escapeClosesQuickPanelOwnerPrompt() {
+        QTemporaryDir dir; Application app(dir.path()); ClipboardGuard clip; QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
+        model::Entry e; e.id=QUuid::createUuid(); e.groupId=group; e.title="Synthetic"; e.token="synthetic-value"; e.reverify=true; QVERIFY(app.model()->setEntry(e).isEmpty());
+        ui::MiniPanel panel(app,clip); panel.popup(); panel.findChild<QLineEdit*>("miniSearch")->setText("Synthetic"); bool seen=false,closed=false;
+        QSignalSpy changed(QApplication::clipboard(),&QClipboard::dataChanged);
+        QTimer::singleShot(0,&panel,[&] {
+            auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(auth); seen=true; QTest::keyClick(auth->findChild<QLineEdit*>(),Qt::Key_Escape); closed=!auth->isVisible(); if(!closed) auth->reject();
+        });
+        panel.findChild<QPushButton*>("miniCopy")->click(); QVERIFY(seen); QVERIFY(closed); QVERIFY(!panel.isVisible()); QCOMPARE(changed.count(),0);
+    }
     void quickPanelProtectedCopy_data() {
         QTest::addColumn<int>("interruption");
         QTest::newRow("confirmed") << 0;

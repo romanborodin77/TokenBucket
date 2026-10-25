@@ -13,8 +13,26 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QKeyEvent>
+#include <QMimeData>
+#include <QTextDocument>
 #include "../platform/FileOps.h"
 namespace tb::ui {
+namespace {
+class CardValue final : public QPlainTextEdit {
+public:
+    using QPlainTextEdit::QPlainTextEdit;
+protected:
+    QMimeData* createMimeDataFromSelection() const override { return new QMimeData; }
+};
+QUrl openableUrl(const model::Entry* e) {
+    if(!e || e->type!=model::EntryType::PlainValue || e->valueFormat!=model::ValueFormat::Url) return {};
+    const QUrl url(e->plainValue,QUrl::StrictMode);
+    return url.isValid() && !url.host().isEmpty() && (url.scheme()=="http" || url.scheme()=="https")?url:QUrl();
+}
+}
 EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(app) {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(18, 16, 18, 16); layout->setSpacing(12);
@@ -28,7 +46,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     edit_ = new QPushButton(QStringLiteral("Изменить"), this); edit_->setObjectName(QStringLiteral("cardEdit")); heading->addWidget(edit_);
     layout->addLayout(heading); layout->addWidget(identity_); layout->addWidget(flags_);
     valueLabel_=new QLabel(QStringLiteral("СЕКРЕТ"),this); valueLabel_->setObjectName("cardValueLabel"); layout->addWidget(valueLabel_);
-    value_ = new QPlainTextEdit(this); value_->setObjectName(QStringLiteral("entryDetails")); value_->setReadOnly(true);
+    value_ = new CardValue(this); value_->setObjectName(QStringLiteral("entryDetails")); value_->setReadOnly(true);
     value_->setTextInteractionFlags(Qt::NoTextInteraction); value_->setFocusPolicy(Qt::NoFocus); value_->setContextMenuPolicy(Qt::NoContextMenu);
     value_->setAccessibleName(QStringLiteral("Секретное значение")); value_->setMinimumHeight(80); value_->setMaximumHeight(140); layout->addWidget(value_);
     reveal_ = new QPushButton(QStringLiteral("Показать на 15 секунд"), this);
@@ -40,6 +58,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     document_=new QPushButton(QStringLiteral("Открыть строки…"),this); document_->setObjectName("textFileOpen"); layout->addWidget(document_);
     source_=new QPushButton(QStringLiteral("Открыть источник…"),this); source_->setObjectName("cardSource"); layout->addWidget(source_);
     compare_=new QPushButton(QStringLiteral("Сравнить с источником…"),this); compare_->setObjectName("cardCompare"); layout->addWidget(compare_);
+    openUrl_=new QPushButton(QStringLiteral("Открыть HTTP(S)-адрес…"),this); openUrl_->setObjectName("cardOpenUrl"); layout->addWidget(openUrl_);
     for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) layout->addWidget(button);
     layout->addWidget(more_); layout->addSpacing(10); layout->addWidget(metadata_); layout->addStretch(1);
     layout->addWidget(error_);
@@ -64,6 +83,11 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     connect(document_,&QPushButton::clicked,this,[this] {if(app_.gate()==Application::Gate::Ready && !app_.busy()) emit documentRequested(id_);});
     connect(source_,&QPushButton::clicked,this,[this] {if(app_.gate()==Application::Gate::Ready && !app_.busy()) if(const auto* e=app_.model()->entry(id_);e && !e->sourceEntryId.isNull()) emit sourceRequested(e->sourceEntryId);});
     connect(compare_,&QPushButton::clicked,this,[this] {if(app_.gate()==Application::Gate::Ready && !app_.busy()) emit compareRequested(id_);});
+    connect(openUrl_,&QPushButton::clicked,this,[this] {
+        if(app_.gate()!=Application::Gate::Ready || app_.busy() || openableUrl(app_.model()->entry(id_)).isEmpty() || !authorize()) return;
+        const auto url=openableUrl(app_.model()->entry(id_)); if(url.isEmpty()) return;
+        if(!QDesktopServices::openUrl(url)) error_->setText(QStringLiteral("Не удалось открыть адрес."));
+    });
     connect(&app_, &Application::busyChanged, this, &EntryCard::updateEnabled);
     // Инвариант: модель может быть очищена из QtConcurrent-потока (lock) — указатели на Entry
     // не живут через диалоги/циклы событий.
@@ -72,7 +96,10 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
 }
 void EntryCard::updateEnabled() {
     const bool allowed = app_.gate() == Application::Gate::Ready && !app_.busy() && app_.model()->entry(id_);
-    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_,document_,source_,compare_}) button->setEnabled(allowed);
+    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, edit_, more_,document_,source_,compare_,openUrl_}) button->setEnabled(allowed);
+    const auto* entry=allowed?app_.model()->entry(id_):nullptr;
+    openUrl_->setEnabled(allowed && !openableUrl(entry).isEmpty());
+    source_->setEnabled(entry && !entry->sourceEntryId.isNull() && app_.model()->entry(entry->sourceEntryId));
 }
 void EntryCard::hideNowForTest() {
     hideTimer_.stop(); const auto* entry=app_.gate()==Application::Gate::Ready?app_.model()->entry(id_):nullptr;
@@ -114,6 +141,7 @@ void EntryCard::showEntry(model::Id id) {
     const bool plain=entry->type==model::EntryType::PlainValue,file=entry->type==model::EntryType::TextFile;
     document_->setVisible(file);
     source_->setVisible(!entry->sourceEntryId.isNull()); compare_->setVisible(!entry->sourceEntryId.isNull());
+    openUrl_->setVisible(!openableUrl(entry).isEmpty());
     valueLabel_->setText(plain?QStringLiteral("ЗНАЧЕНИЕ"):file?QStringLiteral("ДОКУМЕНТ"):QStringLiteral("СЕКРЕТ"));
     value_->setAccessibleName(plain?QStringLiteral("Значение"):file?QStringLiteral("Сведения о документе"):QStringLiteral("Секретное значение"));
     value_->setFocusPolicy(plain && !entry->reverify?Qt::StrongFocus:Qt::NoFocus);
@@ -217,6 +245,21 @@ void EntryCard::saveSshToFile() {
     error_->clear();
 }
 bool EntryCard::eventFilter(QObject* object, QEvent* event) {
+    if(object==value_ && (event->type()==QEvent::ShortcutOverride || event->type()==QEvent::KeyPress)) {
+        auto* key=static_cast<QKeyEvent*>(event);
+        if(key->matches(QKeySequence::Copy) || key->matches(QKeySequence::Cut)) {
+            event->accept();
+            if(event->type()==QEvent::KeyPress && app_.gate()==Application::Gate::Ready && !app_.busy()) {
+                const auto* entry=app_.model()->entry(id_); const auto cursor=value_->textCursor();
+                if(entry && entry->type==model::EntryType::PlainValue && !entry->reverify && cursor.hasSelection()
+                    && value_->document()->toRawText()==entry->plainValue) {
+                    const auto text=entry->plainValue.mid(cursor.selectionStart(),cursor.selectionEnd()-cursor.selectionStart());
+                    if(!text.isEmpty() && authorize()) emit copyRequested(text);
+                }
+            }
+            return true;
+        }
+    }
     if ((event->type() == QEvent::WindowDeactivate && object == window()) || event->type() == QEvent::ApplicationDeactivate || (event->type() == QEvent::Hide && object == this)) hideNowForTest();
     if (event->type() == QEvent::FocusIn) if (auto* widget = qobject_cast<QWidget*>(object); widget && widget != this && !isAncestorOf(widget)) hideNowForTest();
     return QFrame::eventFilter(object, event);

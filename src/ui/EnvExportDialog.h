@@ -16,6 +16,7 @@ public:
     enum class Mode { Temporary, Permanent };
     explicit EnvExportDialog(QWidget* parent = nullptr,QSettings* preferences=nullptr);
     QString name() const;
+    void setSuggestedName(const QString&);
     Mode mode() const;
     QString program() const;
     QString arguments() const;

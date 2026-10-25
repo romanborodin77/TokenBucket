@@ -766,25 +766,47 @@ void MainWindow::openCardDialog() {
     const auto available = screen()->availableGeometry(); dialog.resize(qMin(520, available.width() - 40), qMin(560, available.height() - 80)); dialog.exec();
 }
 void MainWindow::report(const QString& error) { error_->setText(error); statusBar()->showMessage(QStringLiteral("Операция не выполнена.")); }
+bool MainWindow::ensureSchemaUpgradeApproved() {
+    if(!ready()) return false;
+    if(!app_.schemaUpgradeRequired() || app_.schemaUpgradeApproved()) return true;
+    const auto generation=app_.generation(); const auto before=*app_.model();
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    QMessageBox box(QMessageBox::Warning,QStringLiteral("Обновление формата"),QStringLiteral("Данные будут сохранены в формате v4. Прежняя версия программы не откроет новый формат. Перед записью будет создана уникальная проверенная зашифрованная копия прежнего файла в каталоге хранилища. Продолжить?"),QMessageBox::Yes|QMessageBox::No,this);
+    box.setObjectName("schemaUpgradeConfirmation"); box.setTextFormat(Qt::PlainText); box.setDefaultButton(QMessageBox::No); box.setEscapeButton(QMessageBox::No);
+    if(box.exec()!=QMessageBox::Yes) {error_->clear(); return false;}
+    if(!ready() || generation!=app_.generation() || before!=*app_.model()) {if(ready()) report(QStringLiteral("Данные изменились. Повторите действие.")); return false;}
+    QString error; if(!app_.approveSchemaUpgrade(&error)) {report(error); return false;} return true;
+}
 bool MainWindow::commit(const std::function<QString(model::VaultModel&)>& mutation) {
-    if (!ready()) return false;
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    if (!ready() || !ensureSchemaUpgradeApproved()) return false;
     auto before = *app_.model(); const auto generation = app_.generation();
     const auto connection = connect(&app_, &Application::stateChanged, this, [&] { if (app_.generation() != generation) before.clear(); });
     auto cleanup = qScopeGuard([&] { disconnect(connection); });
     const auto error = mutation(*app_.model());
     if (!error.isEmpty()) { *app_.model() = std::move(before); report(error); refreshAll(); return false; }
-    QString saveError; const bool saved = app_.save(&saveError);
+    QString saveError; const QPointer<MainWindow> self(this); auto* core=&app_;
+    const bool saved=runVaultOperation(*core,[core](void*,QString* error) {return core->save(error);},&saveError,this);
+    if(!self) return false;
     if (!saved) {
         if (app_.generation() == generation && app_.gate() == Application::Gate::Ready) *app_.model() = std::move(before);
         before.clear(); refreshAll();
-        if (app_.gate() == Application::Gate::Ready) report(saveError);
+        if (app_.gate() == Application::Gate::Ready) report(saveError); else if(!saveError.isEmpty()) emit notifyRequested(saveError);
         return false;
     }
     error_->clear(); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
 }
 bool MainWindow::commitEntry(const std::function<QString(model::VaultModel&)>& mutation, model::Id entryId) {
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
     if (!ready()) return false;
     if(const auto* existing=app_.model()->entry(entryId);existing && existing->type==model::EntryType::TextFile) return commit(mutation);
+    if(!ensureSchemaUpgradeApproved()) return false;
     std::optional<model::Entry> backup;
     if (const auto* existing = app_.model()->entry(entryId)) backup = *existing;
     const auto generation = app_.generation();
@@ -795,11 +817,14 @@ bool MainWindow::commitEntry(const std::function<QString(model::VaultModel&)>& m
     const QString error = mutation(*app_.model());
     if (!error.isEmpty()) { rollbackEntry(entryId, backup); report(error); refreshAll(); return false; }
     QString saveError;
-    if (!app_.save(&saveError)) {
+    const QPointer<MainWindow> self(this); auto* core=&app_;
+    const bool saved=runVaultOperation(*core,[core](void*,QString* error) {return core->save(error);},&saveError,this);
+    if(!self) return false;
+    if (!saved) {
         if (app_.generation() == generation && app_.gate() == Application::Gate::Ready)
             rollbackEntry(entryId, backup);
         refreshAll();
-        if (app_.gate() == Application::Gate::Ready) report(saveError);
+        if (app_.gate() == Application::Gate::Ready) report(saveError); else if(!saveError.isEmpty()) emit notifyRequested(saveError);
         return false;
     }
     error_->clear(); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
@@ -825,7 +850,11 @@ void MainWindow::addGroup() {
 void MainWindow::addEntry() {
     if (!ready() || editing_) return; const auto parent = selectedNode();
     if (app_.model()->nodes().isEmpty()) { report(QStringLiteral("Создайте проект кнопкой «Новый проект».")); return; }
-    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    const auto generation = app_.generation();
     EntryEditDialog dialog(*app_.model(), std::nullopt, this); dialog.setGroup(parent);
     if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) {
         const auto entry = dialog.entry(); if (entry) commitEntry([&](auto& model) { return model.setEntry(*entry); }, entry->id);
@@ -833,7 +862,11 @@ void MainWindow::addEntry() {
 }
 void MainWindow::editSelected() {
     if (!ready() || editing_) return; const auto id=selectedEntry(); if (!app_.model()->entry(id)) { report(QStringLiteral("Выберите запись.")); return; }
-    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    const auto generation = app_.generation();
     // Редактор показывает секреты записи — для записей с повторной проверкой сначала
     // подтверждаем владельца, как при показе/копировании (audit M-1).
     if (!authorizeEntry(app_,id,this) || selectedEntry()!=id || !ready() || generation!=app_.generation()) return;
@@ -875,11 +908,15 @@ void MainWindow::deleteSelectedNode() {
 }
 void MainWindow::exportVault() {
     if (!ready() || editing_) return;
-    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    const auto generation = app_.generation();
     if (!VerifyDialog::verify(app_, this, QStringLiteral("защищённый экспорт")) || !ready() || app_.generation() != generation) return;
     ExportDialog dialog(this, QStringLiteral("Защищённый экспорт хранилища"),
         QStringLiteral("Экспорт шифруется отдельным паролем, который не связан с мастер-паролем. "
-                       "Полученный файл можно переносить на другие компьютеры; для восстановления понадобятся только файл и этот пароль."),
+                       "Полученный файл можно переносить на другие компьютеры; для восстановления понадобятся только файл и этот пароль. Формат данных экспорта — v4: прежняя версия программы его не откроет. Локальный файл при экспорте не обновляется."),
         QStringLiteral("&Пароль защищённого экспорта (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
@@ -899,7 +936,11 @@ void MainWindow::exportVault() {
 }
 void MainWindow::importVault() {
     if (!ready() || editing_) return;
-    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    const auto generation = app_.generation();
     if (QMessageBox::question(this, QStringLiteral("Импорт хранилища"),
             QStringLiteral("Импорт заменит текущее хранилище новым без слияния. Продолжить?"),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
@@ -923,9 +964,13 @@ void MainWindow::importVault() {
         QStringLiteral("&Новый мастер-пароль локального хранилища (12–1024 байта UTF-8):"));
     if (localDialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) { filePassword.clear(); return; }
     SecureBytes localPassword(localDialog.password()); localDialog.clearSecrets();
+    if(!ensureSchemaUpgradeApproved()) {filePassword.clear(); localPassword.clear(); return;}
     QString error;
-    const bool ok = app_.importContainer(bytes, filePassword.bytes(), localPassword.bytes(), &error);
+    const QPointer<MainWindow> self(this); auto* core=&app_;
+    const bool ok=runVaultOperation(*core,[&](void*,QString* failure) {return core->importContainer(bytes,filePassword.bytes(),localPassword.bytes(),failure);},&error,this);
     filePassword.clear(); localPassword.clear();
+    if(!self) return;
+    if(!ready()) {if(!error.isEmpty()) emit notifyRequested(error); return;}
     if (!ok) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
     refreshAll();
     statusBar()->showMessage(QStringLiteral("Импорт выполнен."), 5000);
@@ -933,6 +978,9 @@ void MainWindow::importVault() {
 void MainWindow::switchUnlockMode() {
     if (!ready() || editing_) return;
     QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
     if (!VerifyDialog::verify(app_, this, QStringLiteral("смена способа разблокировки")) || !ready()) return;
     QString error;
 #ifdef Q_OS_WIN
@@ -945,8 +993,13 @@ void MainWindow::switchUnlockMode() {
             QStringLiteral("Хранилище будет зашифровано для вашей учётной записи Windows, и разблокировка станет выполняться по Windows Hello. "
                            "Мастер-пароль использоваться больше не будет. Ключ не переносится на другие компьютеры; "
                            "для переноса заранее сделайте защищённый экспорт."));
-        if (app_.switchToHello(&error)) statusBar()->showMessage(QStringLiteral("Разблокировка Windows Hello включена."), 5000);
-        else QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
+        if(!ensureSchemaUpgradeApproved()) return;
+        const QPointer<MainWindow> self(this); auto* core=&app_;
+        const bool ok=runVaultOperation(*core,[core](void*,QString* failure) {return core->switchToHello(failure);},&error,this);
+        if(!self) return;
+        if(!ready()) {if(!error.isEmpty()) emit notifyRequested(error); return;}
+        if(ok) statusBar()->showMessage(QStringLiteral("Разблокировка Windows Hello включена."),5000);
+        else QMessageBox::critical(this,QStringLiteral("TokenBucket"),error);
         refreshAll();
         return;
     }
@@ -959,8 +1012,12 @@ void MainWindow::switchUnlockMode() {
         QStringLiteral("&Новый мастер-пароль (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready()) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
-    const bool ok = app_.switchToPassword(password.bytes(), &error);
+    if(!ensureSchemaUpgradeApproved()) {password.clear(); return;}
+    const QPointer<MainWindow> self(this); auto* core=&app_;
+    const bool ok=runVaultOperation(*core,[&](void*,QString* failure) {return core->switchToPassword(password.bytes(),failure);},&error,this);
     password.clear();
+    if(!self) return;
+    if(!ready()) {if(!error.isEmpty()) emit notifyRequested(error); return;}
     if (!ok) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
     else statusBar()->showMessage(QStringLiteral("Разблокировка по мастер-паролю включена."), 5000);
     refreshAll();
@@ -968,6 +1025,9 @@ void MainWindow::switchUnlockMode() {
 void MainWindow::changeMasterPassword() {
     if (!ready() || editing_) return;
     QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
     if (app_.mode() != Application::Mode::Password) return;
     if (!VerifyDialog::verify(app_, this, QStringLiteral("смена мастер-пароля")) || !ready()) return;
     ExportDialog dialog(this, QStringLiteral("Смена мастер-пароля"),
@@ -978,8 +1038,12 @@ void MainWindow::changeMasterPassword() {
     if (dialog.exec() != QDialog::Accepted || !ready()) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
     QString error;
-    const bool ok = app_.switchToPassword(password.bytes(), &error);
+    if(!ensureSchemaUpgradeApproved()) {password.clear(); return;}
+    const QPointer<MainWindow> self(this); auto* core=&app_;
+    const bool ok=runVaultOperation(*core,[&](void*,QString* failure) {return core->switchToPassword(password.bytes(),failure);},&error,this);
     password.clear();
+    if(!self) return;
+    if(!ready()) {if(!error.isEmpty()) emit notifyRequested(error); return;}
     if (!ok) QMessageBox::critical(this, QStringLiteral("TokenBucket"), error);
     else statusBar()->showMessage(QStringLiteral("Мастер-пароль изменён."), 5000);
 }
@@ -989,7 +1053,11 @@ bool MainWindow::moveNodeTo(model::Id node, model::Id newParent) {
 }
 void MainWindow::importFromCsvKeePass() {
     if (!ready() || editing_) return;
-    QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
+    QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
+    const auto generation = app_.generation();
     const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Импорт из CSV / KeePass XML"), {},
         QStringLiteral("CSV (*.csv);;KeePass XML (*.xml);;Все файлы (*.*)"));
     if (path.isEmpty() || !ready() || app_.generation() != generation) return;
@@ -1003,22 +1071,28 @@ void MainWindow::importFromCsvKeePass() {
     const bool keepass = path.endsWith(QStringLiteral(".xml"), Qt::CaseInsensitive);
     QString error;
     const int added = applyImport(bytes, keepass, &error);
-    if (added < 0) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
+    if (added < 0) {
+        if(ready() && !error.isEmpty()) {QMessageBox box(QMessageBox::Critical,QStringLiteral("TokenBucket"),error,QMessageBox::Ok,this); box.setTextFormat(Qt::PlainText); box.exec();}
+        return;
+    }
     refreshAll();
     statusBar()->showMessage(QStringLiteral("Импортировано записей: %1").arg(added), 5000);
-    QMessageBox::information(this, QStringLiteral("TokenBucket"),
+    QMessageBox summary(QMessageBox::Information,QStringLiteral("TokenBucket"),
         QStringLiteral("Импортировано записей: %1%2.").arg(added)
-            .arg(error.isEmpty() ? QString() : QStringLiteral(" — Пропуски и замечания: %1").arg(error)));
+            .arg(error.isEmpty() ? QString() : QStringLiteral(" — Пропуски и замечания: %1").arg(error)),QMessageBox::Ok,this);
+    summary.setTextFormat(Qt::PlainText); summary.exec();
 }
 int MainWindow::applyImport(const QByteArray& bytes, bool keepassXml, QString* err) {
+    if(!ready()) {if(err) *err=QStringLiteral("Хранилище недоступно."); return -1;}
     const io::ImportResult parsed = keepassXml ? io::parseKeePassXml(bytes) : io::parseCsv(bytes);
+    auto candidate=*app_.model();
     // Все записи селятся под проект «Импорт» (создаётся при необходимости), группы — по пути из файла.
     model::Id root;
-    for (auto id : app_.model()->nodes().keys())
-        if (app_.model()->nodes().value(id).parent.isNull() && app_.model()->nodes().value(id).name == QLatin1String("Импорт")) root = id;
+    for (auto id : candidate.nodes().keys())
+        if (candidate.nodes().value(id).parent.isNull() && candidate.nodes().value(id).name == QLatin1String("Импорт")) root = id;
     if (root.isNull()) {
         root = QUuid::createUuid();
-        const QString createError = app_.model()->addNode(root, {}, QStringLiteral("Импорт"));
+        const QString createError = candidate.addNode(root, {}, QStringLiteral("Импорт"));
         if (!createError.isEmpty()) { if (err) *err = createError; return -1; }
     }
     int added = 0;
@@ -1027,11 +1101,11 @@ int MainWindow::applyImport(const QByteArray& bytes, bool keepassXml, QString* e
         model::Id parent = root;
         for (const QString& part : imported.groupPath) {
             model::Id child;
-            for (auto id : app_.model()->nodes().keys())
-                if (app_.model()->nodes().value(id).parent == parent && app_.model()->nodes().value(id).name == part) { child = id; break; }
+            for (auto id : candidate.nodes().keys())
+                if (candidate.nodes().value(id).parent == parent && candidate.nodes().value(id).name == part) { child = id; break; }
             if (child.isNull()) {
                 child = QUuid::createUuid();
-                const QString createError = app_.model()->addNode(child, parent, part);
+                const QString createError = candidate.addNode(child, parent, part);
                 if (!createError.isEmpty()) { notes << createError; child = parent; break; } // упёрлись в лимит глубины — селятся выше
                 parent = child;
             } else parent = child;
@@ -1039,13 +1113,14 @@ int MainWindow::applyImport(const QByteArray& bytes, bool keepassXml, QString* e
         model::Entry e = imported.entry;
         e.id = QUuid::createUuid(); e.groupId = parent;
         e.created = e.modified = QDateTime::currentDateTimeUtc();
-        const QString entryError = app_.model()->setEntry(e);
+        const QString entryError = candidate.setEntry(e);
         if (entryError.isEmpty()) ++added; else notes << QStringLiteral("%1: %2").arg(e.title, entryError);
     }
     if (parsed.skipped > 0) notes << QStringLiteral("Пропущено строк файла: %1 (%2)").arg(parsed.skipped).arg(parsed.lastSkipReason);
-    // Импорт меняет модель — фиксируем одним сохранением (откат commit() не нужен: ошибки не отменяют уже добавленное).
-    QString saveError;
-    if (added > 0 && !app_.save(&saveError)) notes << saveError;
+    if(added>0) {
+        if(!ensureSchemaUpgradeApproved()) {if(err) *err=error_->text(); return -1;}
+        if(!commit([&](model::VaultModel& model) {model=std::move(candidate); return QString();})) {if(err) *err=error_->text().isEmpty()?QStringLiteral("Импорт не сохранён."):error_->text(); return -1;}
+    }
     if (err) *err = notes.join(QLatin1Char('\n'));
     return added;
 }
@@ -1164,10 +1239,12 @@ void MainWindow::previewRegistryMigration() {
         QMessageBox confirm(QMessageBox::Warning,QStringLiteral("Изменение видимости"),QStringLiteral("Выбранные значения станут видимыми и доступными поиску, кроме записей с повторной проверкой. Перед записью будет создана проверенная зашифрованная копия. Затем сеанс заблокируется для повторного открытия. Продолжить?"),QMessageBox::Yes|QMessageBox::No,&dialog);
         confirm.setTextFormat(Qt::PlainText); confirm.setDefaultButton(QMessageBox::No); confirm.setEscapeButton(QMessageBox::No);
         if(confirm.exec()!=QMessageBox::Yes || canceled || !ready() || generation!=app_.generation()) return;
+        if(!ensureSchemaUpgradeApproved() || canceled || !ready() || generation!=app_.generation()) return;
         model::VaultModel candidate; QString failure;
         if(!io::buildMigrationCandidate(*app_.model(),selected,&candidate,&failure)) {error->setText(failure); return;}
         applying=true; buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-        const auto safety=app_.preserveBeforeRegistryMigration(&failure);
+        QString safety;
+        runVaultOperation(app_,[&](void*,QString* error) {safety=app_.preserveBeforeRegistryMigration(error); return !safety.isEmpty();},&failure,&dialog);
         if(canceled || !ready() || generation!=app_.generation()) return;
         if(safety.isEmpty() || !io::buildMigrationCandidate(*app_.model(),selected,&candidate,&failure)) {
             applying=false; error->setText(failure); buttons->button(QDialogButtonBox::Ok)->setEnabled(true); return;
@@ -1292,9 +1369,14 @@ bool MainWindow::canExportEnv() const {
 void MainWindow::exportToEnvironment() {
     if (!ready() || editing_) return;
     QScopedValueRollback guard(editing_, true);
+#ifdef Q_OS_WIN
+    const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
+#endif
     const auto generation = app_.generation();
     const auto* entry = app_.model()->entry(selectedEntry());
-    if (!entry || !paste::eligibleForAutoPaste(*entry)) { report(QStringLiteral("Выберите запись с однострочным токеном или паролем.")); return; }
+    if (!entry || !paste::eligibleForAutoPaste(*entry)) { report(QStringLiteral("Выберите непустое однострочное значение, токен или пароль.")); return; }
+    const auto before=*entry; const auto id=entry->id;
+    const auto stillValid=[&] {const auto* current=app_.model()->entry(id); return ready() && app_.generation()==generation && selectedEntry()==id && current && *current==before;};
     // Копия секрета в локаль ДО диалогов: VerifyDialog/EnvExportDialog крутят вложенные циклы
     // событий, за которые автолок или QtConcurrent-операция могут очистить модель — указатель
     // entry стал бы висячим. Дальше работаем только с копией и после каждого диалога
@@ -1303,12 +1385,12 @@ void MainWindow::exportToEnvironment() {
     // NUL в секрете недопустим: и env-блок CreateProcessW, и REG_SZ в реестре молча усекают
     // строку на нём — для security-фичи отказываемся явно, а не отдаём усечённое значение.
     if (secret.contains(QChar(u'\0'))) { report(QStringLiteral("Секрет содержит недопустимые символы для переменной окружения.")); return; }
-    if (entry->reverify && !VerifyDialog::verify(app_, this, QStringLiteral("выдача секрета в переменную окружения"))) return;
-    if (!ready() || app_.generation() != generation) return;
+    if(!authorizeEntry(app_,id,this) || !stillValid()) return;
     EnvExportDialog dialog(this,preferences_);
+    if(before.type==model::EntryType::PlainValue) dialog.setSuggestedName(before.parameterName);
     const int outcome=dialog.exec();
     appliedPreferences_.clearEnvironmentOnExit=prefs::read(*preferences_).clearEnvironmentOnExit;
-    if (outcome != QDialog::Accepted || !ready() || app_.generation() != generation) return;
+    if (outcome != QDialog::Accepted || !stillValid()) return;
     QString error;
     if (dialog.mode() == EnvExportDialog::Mode::Temporary) {
         if (!platform::envops::startWithVariable(dialog.program(), dialog.arguments(), dialog.name(), secret, &error)) {
@@ -1323,7 +1405,7 @@ void MainWindow::exportToEnvironment() {
                            "от вашего имени. Новые процессы увидят переменную после перезапуска оболочки/проводника "
                            "или выхода из системы. Установить переменную %1?").arg(dialog.name()),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
-    if (!ready() || app_.generation() != generation) return;
+    if (!stillValid()) return;
     if (!platform::envops::setUserVariable(dialog.name(), secret, &error)) {
         QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
     }

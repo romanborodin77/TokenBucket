@@ -188,7 +188,13 @@ bool QuickPaste::nativeEventFilter(const QByteArray& type, void* message, qintpt
     }
     return false;
 }
-void QuickPaste::popupPanel() { if(!suspended_) panel_->popup(); }
+void QuickPaste::popupPanel() {
+    if(suspended_ || (app_.busy() && !panel_->isVisible())) return;
+    auto* modal=QApplication::activeModalWidget(); QObject* owner=modal;
+    while(owner && owner!=panel_) owner=owner->parent();
+    if(modal && !owner) return;
+    panel_->popup();
+}
 void QuickPaste::setDefaultField(paste::Field field) {panel_->setDefaultField(field);}
 void QuickPaste::setSuspended(bool suspended) {
     suspended_=suspended;

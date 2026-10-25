@@ -46,6 +46,7 @@ private:
     QPushButton *reveal_{}, *copySecret_{}, *copyLogin_{}, *copyPhrase_{}, *sshToFile_{};
     QPushButton *edit_{}, *more_{}, *document_{};
     QPushButton *source_{},*compare_{};
+    QPushButton* openUrl_{};
     QTimer hideTimer_;
 };
 }

@@ -20,6 +20,7 @@
 #include <QTableView>
 #include <QVBoxLayout>
 #include <QGridLayout>
+#include <QScopedValueRollback>
 #include <algorithm>
 namespace tb::ui {
 TextFileDialog::TextFileDialog(Application& app,model::Id id,ClipboardGuard& clipboard,QWidget* parent)
@@ -50,12 +51,14 @@ TextFileDialog::TextFileDialog(Application& app,model::Id id,ClipboardGuard& cli
     button(QStringLiteral("Копировать весь файл…"),"copyTextFile",2,0,[this] {copyFile();});
     button(QStringLiteral("Сохранить файл…"),"exportTextFile",2,1,[this] {exportFile();});
     layout->addLayout(actions);
-    error_=new QLabel(this); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
+    error_=new QLabel(this); error_->setObjectName("textFileError"); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
     auto* close=new QDialogButtonBox(QDialogButtonBox::Close,this); connect(close,&QDialogButtonBox::rejected,this,&QDialog::reject); layout->addWidget(close);
     timer_.setParent(this); timer_.setSingleShot(true); timer_.setObjectName("textLineHideTimer"); timer_.setInterval(15000);
     connect(&timer_,&QTimer::timeout,this,&TextFileDialog::hideLine);
     connect(table_->selectionModel(),&QItemSelectionModel::currentChanged,this,[this] {hideLine();});
-    connect(&app_,&Application::stateChanged,this,[this] {if(!valid()) {clipboard_.cancelPendingCopy(); clipboard_.clearIfOurs(); reject();}});
+    connect(&app_,&Application::stateChanged,this,[this] {
+        if(generation_!=app_.generation() || app_.gate()!=Application::Gate::Ready || (!changingVisibility_ && !valid())) {clipboard_.cancelPendingCopy(); clipboard_.clearIfOurs(); reject();}
+    });
     qApp->installEventFilter(this);
 }
 bool TextFileDialog::valid() const {
@@ -132,9 +135,12 @@ void TextFileDialog::changeVisibility() {
     const bool visible=!model::textfile::isVisible(snapshot_->textFile,row);
     if(visible && !confirm(QStringLiteral("Строка станет видимой после разблокировки и доступной поиску. Продолжить?"))) return;
     if(!valid() || table_->currentIndex().row()!=row) return;
-    emit requestVisibilityChange(id_,row,visible);
+    const QScopedValueRollback changing(changingVisibility_,true); emit requestVisibilityChange(id_,row,visible);
     if(!snapshot_ || generation_!=app_.generation() || app_.gate()!=Application::Gate::Ready) {reject(); return;}
     const auto* e=app_.model()->entry(id_); if(!e || e->type!=model::EntryType::TextFile) {reject(); return;}
+    auto expected=*snapshot_; expected.textFile.visibleLines=e->textFile.visibleLines;
+    if(expected!=*e) {reject(); return;}
+    error_->setText(model::textfile::isVisible(e->textFile,row)==visible?QString():QStringLiteral("Изменение видимости не сохранено. Проверьте сообщение в основном окне и повторите действие."));
     snapshot_=*e; lines_->reset(); table_->setCurrentIndex(lines_->index(row,1));
 }
 }
