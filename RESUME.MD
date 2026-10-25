@@ -9,6 +9,10 @@
 
 Не проверено: живой прогон владельцем новых функций, физический DPI, Linux. Первое сохранение v4-хранилища попросит согласие на v5.
 
+Тем же вечером: удаление устаревшего build/ основного checkout задело зависимости — build/vcpkg_installed и tools/vcpkg в worktree являются junction на основной checkout. Зависимости восстановлены build/restore-deps.cmd (vcpkg install в build/vcpkg_installed, Qt 6.11.2 пересобран); затем Release build и полный CTest 23/23, 560 passed, 0 failed/0 skipped. Перед чисткой проверять `dir /AL` на junction.
+
+GitHub: origin = https://github.com/romanborodin77/TokenBucket.git, ветка main. Вся история переписана (git filter-repo --mailmap) на romanborodin77 <300133179+romanborodin77@users.noreply.github.com> и отправлена force-push; эта же идентичность задана глобально. Хеши коммитов, упомянутые в записях выше, относятся к истории до переписи. Страховочный bundle прежней истории: D:/Sources/gitverse/TokenBucket-pre-rewrite-20261025-194346Z.bundle (вне папки проекта).
+
 ## 2026-10-25 — структурированное хранение завершено, всё в main
 
 План PlainValue/TextFile/CBOR v4 (docs/superpowers/plans/2026-10-24-structured-storage.md) исполнен полностью: задачи 1–7 — коммиты ec3b55e…d1478e8, задача 8 — приёмка и поставка. Рабочее дерево C:/Users/bboy2/.codex/worktrees/tokenbucket-quick-paste (ветка codex/structured-storage) влито в main fast-forward, незавершённый WIP задачи 7 доведён (добавлен тест отмены Hello при смене режима старого файла) и закоммичен; дерево чистое. Все ветки codex/* влиты в main.
