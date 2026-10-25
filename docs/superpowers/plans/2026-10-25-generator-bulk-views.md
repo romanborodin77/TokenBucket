@@ -10,7 +10,7 @@
 
 **Spec:** [2026-10-25-generator-bulk-views-design.md](../specs/2026-10-25-generator-bulk-views-design.md)
 
-**Status:** исполняется нативно (вопрос об утверждении плана остался без ответа — по мандату владельца взят рекомендованный вариант).
+**Status:** исполнен 2026-10-25 (задачи 1–5; ручная приёмка владельцем открыта). Исполнение нативное (вопрос об утверждении плана остался без ответа — по мандату владельца взят рекомендованный вариант).
 
 ## Global Constraints
 
@@ -186,11 +186,11 @@ bool MainWindow::bulkApply(const QList<model::Id>& ids, quint64 generation,
 
 **Files:** `docs/testing/2026-10-25-generator-bulk-views-acceptance.md`, `docs/build/2026-10-25-generator-bulk-views-release.md`, `RESUME.MD`, `README.md` (возможности, формат v5).
 
-- [ ] **Step 1:** Сопоставить разделы 2–6 спецификации с тестами задач 1–4.
-- [ ] **Step 2:** Release build + полный CTest с `TOKENBUCKET_TEST_USER_CLIPBOARD=1`; при падении — изолированный перепрогон и классификация.
-- [ ] **Step 3:** Обзор всей ветки (агент при доступности, иначе вручную по Review Focus); Critical/Important — RED→GREEN.
-- [ ] **Step 4:** Пересобрать граф `engram update src --scope all --no-description --no-label --no-cluster`.
-- [ ] **Step 5:** `tools\package-windows.cmd` в worktree, dumpbin-проверка зависимостей, перенос в `D:/Sources/gitverse/TokenBucket/dist/` с сохранением прежней сборки и сверкой SHA-256, коммит отчётов в main, worktree — fast-forward до main.
+- [x] **Step 1:** Сопоставить разделы 2–6 спецификации с тестами задач 1–4.
+- [x] **Step 2:** Release build + полный CTest с `TOKENBUCKET_TEST_USER_CLIPBOARD=1`; при падении — изолированный перепрогон и классификация.
+- [x] **Step 3:** Обзор всей ветки (агент при доступности, иначе вручную по Review Focus); Critical/Important — RED→GREEN.
+- [x] **Step 4:** Пересобрать граф `engram update src --scope all --no-description --no-label --no-cluster`.
+- [x] **Step 5:** `tools\package-windows.cmd` в worktree, dumpbin-проверка зависимостей, перенос в `D:/Sources/gitverse/TokenBucket/dist/` с сохранением прежней сборки и сверкой SHA-256, коммит отчётов в main, worktree — fast-forward до main.
 
 ## Покрытие спецификации
 

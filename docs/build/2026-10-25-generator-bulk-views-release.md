@@ -1,0 +1,12 @@
+# Локальный релиз: F1–F3
+
+Дата: 2026-10-25. Сборка из worktree codex/structured-storage (main), tools\package-windows.cmd exit 0.
+
+- Постоянный каталог D:/Sources/gitverse/TokenBucket/dist/TokenBucket/ — 69 файлов, SHA-256 каждого совпадает с пакетом сборки.
+- ZIP dist/TokenBucket-windows-x64.zip, 61 472 739 байт, SHA-256 9a06727525761f79b01e8e0a82ef80d823d4c5be9c701a8d7a1e92d2f3e10f83.
+- TokenBucket.exe SHA-256 88cd252bed656c5a4777332c1cb699ea7628471431b586bf2cbd84f67b6c84ee.
+- Прежняя сборка: dist/TokenBucket.previous-20261025-191526Z (+ .zip). Более старые копии удалены при чистке папки проекта.
+- dumpbin /dependents: все несистемные библиотеки в пакете.
+- Без цифровой подписи; пакет из агентской сессии не запускался; vault владельца не открывался. Push не выполнялся.
+
+Внимание владельцу: первое сохранение хранилища v4 (или старше) попросит согласие на формат v5 и создаст vault.tb.before-upgrade-*; сборки до F3 файл v5 не откроют.

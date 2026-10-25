@@ -772,7 +772,7 @@ private slots:
         QVERIFY(app.save(&error));
         ui::MainWindow w(app, nullptr, &uiPreferences_); w.show(); w.refreshAll(); w.findChild<QPushButton*>("libraryAll")->click();
         selectEntries(w, {es[0].id, es[1].id}); QCOMPARE(w.selectedEntries().size(), 2);
-        QVERIFY(w.card()->findChild<QLabel*>("cardTitle")->text().contains(QStringLiteral("Выбрано: 2")));
+        QVERIFY(w.card()->findChild<QLabel*>("cardTitle")->text().contains(QStringLiteral("Выбрано записей: 2")));
         QVERIFY(w.card()->findChild<QPushButton*>("copySecretButton")); QVERIFY(!w.card()->findChild<QPushButton*>("copySecretButton")->isEnabled());
         QVERIFY(w.bulkMove(b));
         QCOMPARE(app.model()->entry(es[0].id)->groupId, b); QCOMPARE(app.model()->entry(es[1].id)->groupId, b); QCOMPARE(app.model()->entry(es[2].id)->groupId, a);

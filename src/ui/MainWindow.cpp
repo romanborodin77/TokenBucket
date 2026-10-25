@@ -1351,7 +1351,7 @@ void MainWindow::listMenu(const QPoint& pos) {
         menu.addAction(QStringLiteral("Добавить тег…"), this, &MainWindow::bulkAddTagDialog);
         menu.addAction(QStringLiteral("Снять тег…"), this, &MainWindow::bulkRemoveTagDialog);
         menu.addSeparator();
-        menu.addAction(QStringLiteral("Удалить %1 записей…").arg(list_->selectedItems().size()), this, [this] { bulkDelete(); });
+        menu.addAction(QStringLiteral("Удалить выбранные (%1)…").arg(list_->selectedItems().size()), this, [this] { bulkDelete(); });
         menu.exec(list_->viewport()->mapToGlobal(pos)); return;
     }
     list_->setCurrentItem(item);
