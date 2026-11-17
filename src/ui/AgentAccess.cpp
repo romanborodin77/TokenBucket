@@ -1,0 +1,354 @@
+#include "AgentAccess.h"
+#include "EntryAccess.h"
+#include "app/Application.h"
+#include "model/TextFile.h"
+#include "platform/AgentPipe.h"
+#include <QApplication>
+#include <QDeadlineTimer>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMessageBox>
+#include <QScopeGuard>
+#include <QTimer>
+#include <QWinEventNotifier>
+#include <algorithm>
+#include <array>
+
+namespace tb::agent {
+namespace {
+enum class Field { Token, Login, Password, Private, Public, Passphrase, Value, TextLine };
+struct FieldInfo { const char* name; model::EntryType type; };
+constexpr FieldInfo Fields[] = {
+    {"token", model::EntryType::ApiToken},
+    {"login", model::EntryType::Credentials},
+    {"password", model::EntryType::Credentials},
+    {"sshPrivate", model::EntryType::SshKey},
+    {"sshPublic", model::EntryType::SshKey},
+    {"sshPassphrase", model::EntryType::SshKey},
+    {"plainValue", model::EntryType::PlainValue},
+    {"textLine", model::EntryType::TextFile},
+};
+const char* typeName(model::EntryType type) {
+    switch (type) {
+    case model::EntryType::ApiToken: return "apiToken";
+    case model::EntryType::Credentials: return "credentials";
+    case model::EntryType::SshKey: return "sshKey";
+    case model::EntryType::PlainValue: return "plainValue";
+    case model::EntryType::TextFile: return "textFile";
+    }
+    return "unknown";
+}
+
+struct Request {
+    QString title;
+    model::Id id;
+    Field field = Field::Token;
+    int line = -1;
+    bool find() const { return id.isNull(); }
+    const FieldInfo& fieldInfo() const { return Fields[static_cast<size_t>(field)]; }
+};
+
+std::optional<Request> parseRequest(QByteArrayView bytes) {
+    if (!bytes.isValidUtf8()) return std::nullopt;
+    const auto doc = QJsonDocument::fromJson(QByteArray::fromRawData(bytes.data(), bytes.size()));
+    if (!doc.isObject()) return std::nullopt;
+    const auto object = doc.object();
+    // QJsonObject folds duplicate keys. Count JSON member separators outside strings
+    // before applying the flat schema so an overwritten member is still rejected.
+    bool inString = false;
+    int members = 0;
+    for (qsizetype i = 0; i < bytes.size(); ++i) {
+        const auto ch = bytes[i];
+        if (inString && ch == '\\') ++i;
+        else if (ch == '"') inString = !inString;
+        else if (!inString && ch == ':') ++members;
+    }
+    if (members != object.size() || object.value("v") != QJsonValue(1)) return std::nullopt;
+    Request request;
+    const auto op = object.value("op");
+    if (op == "find" && object.size() == 3) {
+        request.title = object.value("title").toString();
+        if (!request.title.isEmpty() && request.title.isValidUtf16()) return request;
+    }
+    if (op == "read") {
+        const auto id = object.value("id").toString();
+        request.id = model::Id(id);
+        if (request.id.isNull() || request.id.toString(QUuid::WithoutBraces) != id.toLower()) return std::nullopt;
+        const auto field = object.value("field");
+        for (size_t i = 0; i < std::size(Fields); ++i) {
+            if (field != QJsonValue(Fields[i].name)) continue;
+            request.field = static_cast<Field>(i);
+            if (request.field != Field::TextLine && object.size() == 4) return request;
+            if (request.field == Field::TextLine && object.size() == 5) {
+                const int line = object.value("line").toInt(0);
+                if (line > 0 && line <= model::textfile::MaxLines) {
+                    request.line = line - 1;
+                    return request;
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+constexpr qsizetype InlineTitleLimit = 160;
+QString displayTitle(const QString& title, qsizetype limit = InlineTitleLimit) {
+    auto prefix = title.left(limit);
+    if (title.size() > limit && prefix.back().isHighSurrogate()) prefix.chop(1);
+    const auto characters = prefix.toUcs4();
+    QString safe = QStringLiteral("\"");
+    for (const char32_t ch : characters) {
+        if (!QChar::isPrint(ch) || ch == 0x2028 || ch == 0x2029)
+            safe += QStringLiteral("\\u{%1}").arg(static_cast<quint32>(ch), 0, 16);
+        else if (ch == U'"' || ch == U'\\') safe += QStringLiteral("\\") + QChar(static_cast<ushort>(ch));
+        else safe += QString::fromUcs4(&ch, 1);
+    }
+    if (title.size() > limit) safe += QStringLiteral("…");
+    return safe + QStringLiteral("\"");
+}
+
+SecureBytes valueReply(QByteArrayView bytes) {
+    if (bytes.size() > model::VaultModel::MaxSecretBytes) return SecureBytes(errorReply("too_large"));
+    SecureBytes encoded(QByteArray::fromRawData(bytes.data(), bytes.size()).toBase64());
+    QByteArray reply;
+    reply.reserve(encoded.size() + 48);
+    reply += "{\"ok\":true,\"encoding\":\"base64\",\"value\":\"";
+    reply += encoded.bytes();
+    reply += "\"}\n";
+    return SecureBytes(std::move(reply));
+}
+
+SecureBytes stringReply(const QString& text) {
+    if (text.size() > model::VaultModel::MaxSecretBytes) return SecureBytes(errorReply("too_large"));
+    const SecureBytes bytes(text.toUtf8());
+    return valueReply(bytes.bytes());
+}
+
+SecureBytes readReply(const Request& request, const model::Entry& entry) {
+    switch (request.field) {
+    case Field::Token: return stringReply(entry.token);
+    case Field::Login: return stringReply(entry.login);
+    case Field::Password: return stringReply(entry.password);
+    case Field::Private: return valueReply(entry.sshPrivate);
+    case Field::Public: return valueReply(entry.sshPublic);
+    case Field::Passphrase: return stringReply(entry.sshPassphrase);
+    case Field::Value: return stringReply(entry.plainValue);
+    case Field::TextLine: {
+        const auto& file = entry.textFile;
+        const auto range = model::textfile::lineRanges(file.bytes).at(request.line);
+        return valueReply(QByteArrayView(file.bytes).sliced(range.offset, range.length));
+    }
+    }
+    return SecureBytes(errorReply("invalid_request"));
+}
+}
+
+class Access::Broker : public QObject {
+public:
+    Broker(Application& app, QString endpointSuffix, Decision consent)
+        : app_(app), suffix_(std::move(endpointSuffix)), consent_(std::move(consent)), endpoint_(Endpoint::current()) {
+        connect(&notifier_, &QWinEventNotifier::activated, this, [this] { complete(); });
+        connect(&timer_, &QTimer::timeout, this, [this] {
+            if (phase_ == Phase::Approval) {
+                if (!requestAlive()) cancelApproval();
+            } else reset();
+        });
+        connect(&app_, &Application::stateChanged, this, [this] {
+            if (phase_ == Phase::Approval && !sessionCurrent()) cancelApproval();
+            else if (phase_ == Phase::Reply && !sessionCurrent()) reset();
+        });
+    }
+
+    ~Broker() override { stopIo(); }
+
+    bool start() {
+        event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        pipe_.reset(openServer(endpoint_, suffix_));
+        if (!event_ || pipe_.get() == INVALID_HANDLE_VALUE) return false;
+        notifier_.setHandle(event_.get());
+        arm(Phase::Connect);
+        return true;
+    }
+
+private:
+    enum class Phase { Connect, Request, Approval, Reply, Drain };
+
+    void arm(Phase phase) {
+        phase_ = phase;
+        timer_.stop();
+        overlapped_ = {};
+        overlapped_.hEvent = event_.get();
+        ResetEvent(event_.get());
+        DWORD count = 0;
+        BOOL ready = FALSE;
+        switch (phase_) {
+        case Phase::Connect: ready = ConnectNamedPipe(pipe_.get(), &overlapped_); break;
+        case Phase::Request:
+            timer_.start(RequestTimeoutMs);
+            ready = ReadFile(pipe_.get(), input_.data(), MaxRequest, &count, &overlapped_); break;
+        case Phase::Reply:
+            timer_.start(ReplyTimeoutMs);
+            ready = WriteFile(pipe_.get(), output_.bytes().constData(), static_cast<DWORD>(output_.size()), &count, &overlapped_); break;
+        case Phase::Drain:
+            // Keep the instance connected until the client consumes its one response.
+            // A blocked client cannot hold it indefinitely.
+            timer_.start(ReplyTimeoutMs);
+            ready = ReadFile(pipe_.get(), input_.data(), MaxRequest, &count, &overlapped_); break;
+        case Phase::Approval: return;
+        }
+        status_ = ready ? ERROR_SUCCESS : GetLastError();
+        count_ = count;
+        notifier_.setEnabled(true);
+        if (status_ != ERROR_IO_PENDING) SetEvent(event_.get());
+    }
+
+    void stopIo() {
+        notifier_.setEnabled(false);
+        timer_.stop();
+        if (status_ == ERROR_IO_PENDING) {
+            CancelIoEx(pipe_.get(), &overlapped_);
+            DWORD ignored = 0;
+            GetOverlappedResult(pipe_.get(), &overlapped_, &ignored, TRUE);
+            status_ = ERROR_OPERATION_ABORTED;
+        }
+    }
+
+    void reset() {
+        stopIo();
+        DisconnectNamedPipe(pipe_.get());
+        output_.clear();
+        arm(Phase::Connect);
+    }
+
+    void complete() {
+        notifier_.setEnabled(false);
+        if (status_ == ERROR_IO_PENDING) {
+            status_ = GetOverlappedResult(pipe_.get(), &overlapped_, &count_, FALSE) ? ERROR_SUCCESS : GetLastError();
+        }
+        if (phase_ == Phase::Connect && (status_ == ERROR_SUCCESS || status_ == ERROR_PIPE_CONNECTED)) arm(Phase::Request);
+        else if (phase_ == Phase::Request && status_ == ERROR_SUCCESS && count_ > 0) {
+            phase_ = Phase::Approval;
+            deadline_ = QDeadlineTimer(ApprovalTimeoutMs, Qt::PreciseTimer);
+            generation_ = app_.generation();
+            cancelled_ = false;
+            timer_.start(100);
+            output_ = handleRequest(QByteArrayView(input_.data(), count_));
+            if (requestAlive()) arm(Phase::Reply);
+            else reset();
+        } else if (phase_ == Phase::Reply && status_ == ERROR_SUCCESS && count_ == output_.size()) {
+            output_.clear();
+            arm(Phase::Drain);
+        } else reset();
+    }
+
+    bool sessionCurrent() const { return app_.gate() == Application::Gate::Ready && app_.generation() == generation_; }
+
+    bool requestAlive() const {
+        DWORD available = 0;
+        return !cancelled_ && !deadline_.hasExpired() &&
+            PeekNamedPipe(pipe_.get(), nullptr, 0, nullptr, &available, nullptr) && available == 0;
+    }
+
+    void cancelApproval() {
+        cancelled_ = true;
+        if (!dialog_) return;
+        const auto children = dialog_->findChildren<QDialog*>();
+        for (auto* child : children) child->reject();
+        dialog_->reject();
+    }
+
+    SecureBytes handleRequest(QByteArrayView bytes) {
+        const auto fail = [](const char* error) { return SecureBytes(errorReply(error)); };
+        DWORD clientSession = 0;
+        DWORD pid = 0;
+        if (!GetNamedPipeClientSessionId(pipe_.get(), &clientSession) || clientSession != endpoint_.session ||
+            !GetNamedPipeClientProcessId(pipe_.get(), &pid)) return fail("denied");
+        const auto request = parseRequest(bytes);
+        if (!request) return fail("invalid_request");
+        if (!sessionCurrent()) return fail("locked");
+        if (app_.busy() || QApplication::activeModalWidget() || !cooldown_.hasExpired()) return fail("busy");
+        if (!requestAlive()) return fail("cancelled");
+
+        const auto lookup = [&]() -> std::pair<const model::Entry*, bool> {
+            if (!request->find()) return {app_.model()->entry(request->id), false};
+            const model::Entry* match = nullptr;
+            for (const auto& entry : app_.model()->entries()) {
+                if (entry.title != request->title) continue;
+                if (match) return {nullptr, true};
+                match = &entry;
+            }
+            return {match, false};
+        };
+        const auto [entry, ambiguous] = lookup();
+        const auto before = entry ? std::optional(*entry) : std::nullopt;
+        const auto consistent = [&] {
+            if (!requestAlive() || !sessionCurrent() || app_.busy()) return false;
+            const auto [current, nowAmbiguous] = lookup();
+            return nowAmbiguous == ambiguous && (before ? current && *current == *before : !current);
+        };
+
+        QString description;
+        if (request->find()) {
+            description = QStringLiteral("Разрешить поиск по точному названию %1? Будут переданы только название, тип и ID.")
+                .arg(displayTitle(request->title));
+        } else {
+            description = QStringLiteral("Передать поле %1 из записи %2?\nID записи: %3\n\nЗначение покинет хранилище. Программа или ИИ-агент могут сохранить его или отправить дальше.")
+                .arg(QString::fromLatin1(request->fieldInfo().name), before ? displayTitle(before->title) : QStringLiteral("(недоступна)"),
+                    request->id.toString(QUuid::WithoutBraces));
+            if (request->field == Field::TextLine) description += QStringLiteral("\nНомер строки: %1").arg(request->line + 1);
+        }
+        description += QStringLiteral("\n\nЛокальный процесс PID %1. Программа, вызвавшая помощника, не проверена.").arg(pid);
+        QMessageBox dialog(QMessageBox::Question, QStringLiteral("TokenBucket — доступ агента"), {}, QMessageBox::Yes | QMessageBox::No);
+        dialog.setTextFormat(Qt::PlainText);
+        dialog.setText(description);
+        if (request->find() && request->title.size() > InlineTitleLimit)
+            dialog.setDetailedText(displayTitle(request->title, request->title.size()));
+        dialog.setDefaultButton(QMessageBox::No);
+        dialog.setEscapeButton(QMessageBox::No);
+        dialog.setWindowModality(Qt::ApplicationModal);
+        dialog.setWindowFlag(Qt::WindowStaysOnTopHint);
+        dialog_ = &dialog;
+        const auto finishDialog = qScopeGuard([&] {
+            dialog_ = nullptr;
+            cooldown_ = QDeadlineTimer(750);
+        });
+        const bool approved = consent_ ? consent_(&dialog) : dialog.exec() == QMessageBox::Yes;
+        if (!approved) return fail("denied");
+        if (!consistent()) return fail("stale");
+        if (ambiguous) return fail("ambiguous");
+        if (!before) return fail("not_found");
+        if (request->find()) {
+            const QJsonObject match{{"id", before->id.toString(QUuid::WithoutBraces)},
+                {"title", before->title}, {"type", QString::fromLatin1(typeName(before->type))}};
+            return SecureBytes(QJsonDocument(QJsonObject{{"ok", true}, {"entry", match}}).toJson(QJsonDocument::Compact) + '\n');
+        }
+        if (request->fieldInfo().type != before->type || (request->field == Field::TextLine &&
+            !model::textfile::isVisible(before->textFile, request->line))) return fail("unavailable_field");
+        if (!ui::authorizeEntry(app_, request->id, &dialog, true)) return fail("denied");
+        if (!consistent()) return fail("stale");
+        return readReply(*request, *app_.model()->entry(request->id));
+    }
+
+    Application& app_;
+    QString suffix_;
+    Decision consent_;
+    Endpoint endpoint_;
+    Handle pipe_, event_;
+    QWinEventNotifier notifier_;
+    QTimer timer_;
+    OVERLAPPED overlapped_{};
+    Phase phase_ = Phase::Connect;
+    DWORD status_ = ERROR_SUCCESS, count_ = 0;
+    std::array<char, MaxRequest> input_{};
+    SecureBytes output_;
+    QDeadlineTimer deadline_, cooldown_;
+    quint64 generation_ = 0;
+    bool cancelled_ = false;
+    QMessageBox* dialog_ = nullptr;
+};
+
+Access::Access(Application& app, const QString& endpointSuffix, Decision consent)
+    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent))) {}
+Access::~Access() = default;
+bool Access::start() { return broker_->start(); }
+}

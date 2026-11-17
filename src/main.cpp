@@ -7,6 +7,7 @@
 #ifdef Q_OS_WIN
 #include "platform/EnvOps.h"
 #include "platform/CrashPolicy.h"
+#include "ui/AgentAccess.h"
 #endif
 #include "ui/Theme.h"
 #include "ui/Brand.h"
@@ -19,6 +20,17 @@ int start() {
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
     if(!instanceLock) {QMessageBox::critical(nullptr,QStringLiteral("TokenBucket"),error); return 1;}
     tb::Application core(dir);
+#ifdef Q_OS_WIN
+    std::unique_ptr<tb::agent::Access> agentAccess;
+    if (QCoreApplication::arguments().contains(QStringLiteral("--agent-access"))) {
+        agentAccess = std::make_unique<tb::agent::Access>(core);
+        if (!agentAccess->start()) {
+            agentAccess.reset();
+            QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"),
+                QStringLiteral("Локальный интерфейс агента не запущен. Хранилище доступно через обычный интерфейс."));
+        }
+    }
+#endif
     QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
     const int code=tb::ui::runSession(core,settings,startHidden);
 #ifdef Q_OS_WIN

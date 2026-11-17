@@ -6,6 +6,8 @@ cmake --build --preset default || exit /b 1
 if exist dist\TokenBucket rmdir /s /q dist\TokenBucket
 mkdir dist\TokenBucket 2>nul
 copy build\Release\TokenBucket.exe dist\TokenBucket\ || exit /b 1
+copy build\Release\TokenBucket-agent.exe dist\TokenBucket\ || exit /b 1
+copy docs\agent-access.md dist\TokenBucket\ || exit /b 1
 build\vcpkg_installed\x64-windows\tools\Qt6\bin\windeployqt.exe --release --no-translations dist\TokenBucket\TokenBucket.exe || exit /b 1
 copy build\vcpkg_installed\x64-windows\bin\libsodium.dll dist\TokenBucket\ || exit /b 1
 rem windeployqt не переносит не-Qt зависимости vcpkg (pcre2-16, double-conversion, zstd, z, harfbuzz, freetype, libpng, brotli и др.) — копируем весь bin
