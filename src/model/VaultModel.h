@@ -22,7 +22,7 @@ public:
     static constexpr int ExpiryWarningDays = 30; // горизонт подсветки «скоро истекает»
     static constexpr int MaxTags = 16;      // тегов на запись: верхняя граница UI-чипов и CBOR
     static constexpr int MaxTagChars = 32;  // длина одного тега в символах QString
-    static constexpr int CurrentVersion = 5; // версия писателя; старее — требует согласия на обновление
+    static constexpr int CurrentVersion = 6; // версия писателя; старее — требует согласия на обновление
     static constexpr int MaxViews = 50, MaxViewName = 64, MaxViewSearch = 256;
 
     QString addNode(Id id, Id parent, const QString& name);
@@ -40,6 +40,18 @@ public:
     QList<Id> entriesInGroup(Id groupId) const;
     QList<Id> entriesInSubtree(Id groupId) const;
     QList<Id> search(const QString& needle) const;
+    struct SshMatch {
+        Id id;
+        QString title;
+        QList<SshTarget> targets;
+        bool operator==(const SshMatch&) const = default;
+    };
+    struct SshLookup {
+        bool tooMany = false;
+        QList<SshMatch> matches;
+        bool operator==(const SshLookup&) const = default;
+    };
+    SshLookup sshMatches(const QString& machine, const QString& user, int port) const;
 
     // Нормализация тегов: trim, пустые отбрасываются, дедупликация без учёта регистра —
     // каноничным считается первое написание. Инвариант всех тегов, хранящихся в модели.

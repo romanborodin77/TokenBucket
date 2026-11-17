@@ -221,7 +221,10 @@ bool Application::storeCandidate(Outcome& result,quint64 expected) {
     const auto canceled=[&] {return generation()!=expected;};
     if(canceled()) return fail(&result.error,"Запись отменена.");
     if(result.legacyCurrent) {
-        if(!result.upgradeApproved) return fail(&result.error,"Требуется подтверждение обновления формата до v4.");
+        if(!result.upgradeApproved) {
+            result.error = QStringLiteral("Требуется подтверждение обновления формата до v%1.").arg(model::VaultModel::CurrentVersion);
+            return false;
+        }
         QByteArray safety;
         if(!result.safetyPath.isEmpty() && (store_.loadBytes(result.safetyPath,&safety)!=store::VaultStore::Load::Ok || safety!=result.previousFile))
             result.safetyPath.clear();

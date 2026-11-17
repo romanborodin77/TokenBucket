@@ -16,6 +16,11 @@ struct TextFileData {
     QList<int> visibleLines;
     bool operator==(const TextFileData&) const = default;
 };
+struct SshTarget {
+    QString alias, host, username;
+    int port = 22;
+    bool operator==(const SshTarget&) const = default;
+};
 // Запись хранилища — value-тип: копируется при правках (точечный откат в MainWindow::commitEntry
 // держит запасную копию), мутация в модели только через VaultModel::setEntry.
 // Секретные поля (token/password/sshPrivate/sshPassphrase) живут как обычные Qt-строки:
@@ -26,6 +31,7 @@ struct Entry {
     EntryType type = EntryType::ApiToken;
     QString title, note, url, login, password, token, sshPassphrase, sshComment;
     QByteArray sshPrivate, sshPublic; // SSH-ключи — байты (файл как есть), не строки
+    QList<SshTarget> sshTargets;
     QDateTime created, modified;
     QDateTime expiresAt; // срок действия секрета; null — бессрочно (UTC, полночь даты)
     bool favorite = false, reverify = false; // reverify: повторная проверка владельца перед доступом к секрету

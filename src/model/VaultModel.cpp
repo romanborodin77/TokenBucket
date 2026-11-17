@@ -1,4 +1,5 @@
 #include "VaultModel.h"
+#include "SshTarget.h"
 #include "TextFile.h"
 #include <QCborArray>
 #include <QCborMap>
@@ -19,6 +20,43 @@ Id idFrom(const QCborValue& v) { return QUuid::fromString(v.toString()); }
 QString idStr(const Id& id) { return id.toString(QUuid::WithoutBraces); }
 QString utf8(QByteArrayView bytes) {
     return QStringDecoder(QStringConverter::Utf8,QStringConverter::Flag::ConvertInitialBom)(bytes);
+}
+QString normalizedHost(const QString& host) {
+    if (host.isEmpty() || host.size() > ssh::MaxHost || host.contains('%')) return {};
+    QHostAddress ip;
+    if (ip.setAddress(host)) {
+        const auto canonical = ip.toString();
+        return ip.protocol() == QAbstractSocket::IPv4Protocol && canonical != host ? QString() : canonical;
+    }
+    auto name = host.toLower();
+    if (name.endsWith('.')) name.chop(1);
+    for (const auto& label : name.split('.')) {
+        if (label.isEmpty() || label.size() > 63 || label.startsWith('-') || label.endsWith('-')) return {};
+        for (const QChar ch : label)
+            if (!(ch >= 'a' && ch <= 'z') && !(ch >= '0' && ch <= '9') && ch != '-') return {};
+    }
+    return name;
+}
+QString normalizeSshTargets(Entry& e) {
+    if (e.sshTargets.isEmpty()) return {};
+    if (e.type != EntryType::SshKey) return QStringLiteral("Машины можно привязать только к ключу SSH.");
+    if (e.sshTargets.size() > ssh::MaxTargets) return QStringLiteral("К одному ключу SSH можно привязать до 16 машин.");
+    QList<SshTarget> normalized;
+    for (auto target : std::as_const(e.sshTargets)) {
+        if (!ssh::printable(target.alias, ssh::MaxAlias) || !ssh::printable(target.host, ssh::MaxHost) || !ssh::validUser(target.username)
+            || target.port < 1 || target.port > ssh::MaxPort)
+            return QStringLiteral("Проверьте имя машины, пользователя и порт (1–65535).");
+        target.alias = target.alias.trimmed();
+        target.host = normalizedHost(target.host.trimmed());
+        if (target.host.isEmpty()) return QStringLiteral("Укажите DNS-имя, IPv4 или IPv6 без URL и порта.");
+        if (std::any_of(normalized.cbegin(), normalized.cend(), [&](const auto& other) {
+            return target.alias.compare(other.alias, Qt::CaseInsensitive) == 0 && target.host == other.host
+                && target.username == other.username && target.port == other.port;
+        })) return QStringLiteral("Эта машина уже привязана к ключу с тем же пользователем и портом.");
+        normalized.push_back(std::move(target));
+    }
+    e.sshTargets = std::move(normalized);
+    return {};
 }
 QString payloadError(const Entry& e) {
     if(int(e.valueFormat)<0 || int(e.valueFormat)>2) return QStringLiteral("Неизвестный формат значения.");
@@ -151,6 +189,7 @@ QString VaultModel::setEntry(const Entry& e) {
         return "Тег длиннее 32 символов.";
     Entry stored = e; // параметр константен: нормализованные теги кладём в копию
     stored.tags = tags;
+    if (const auto error = normalizeSshTargets(stored); !error.isEmpty()) return error;
     entries_.insert(stored.id, stored);
     return {};
 }
@@ -194,7 +233,10 @@ QList<Id> VaultModel::search(const QString& needle) const {
                 if(utf8(QByteArrayView(e.textFile.bytes).sliced(r.offset,r.length)).contains(needle,Qt::CaseInsensitive)) {visibleMatch=true; break;}
             }
         }
-        if (visibleMatch || e.parameterName.contains(needle,Qt::CaseInsensitive) || e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
+        const bool machineMatch = std::any_of(e.sshTargets.cbegin(), e.sshTargets.cend(), [&](const auto& target) {
+            return target.alias.contains(needle, Qt::CaseInsensitive) || target.host.contains(needle, Qt::CaseInsensitive);
+        });
+        if (visibleMatch || machineMatch || e.parameterName.contains(needle,Qt::CaseInsensitive) || e.title.contains(needle, Qt::CaseInsensitive) || e.login.contains(needle, Qt::CaseInsensitive)
             || e.note.contains(needle, Qt::CaseInsensitive)
             // Тег — поисковый атрибут записи; секреты, как и выше, не ищутся.
             || std::any_of(e.tags.cbegin(), e.tags.cend(), [&](const QString& tag) { return tag.contains(needle, Qt::CaseInsensitive); })) {
@@ -207,6 +249,27 @@ QList<Id> VaultModel::search(const QString& needle) const {
             for (auto id : entriesInSubtree(n.id))
                 if (!seen.contains(id)) { seen.insert(id); r << id; }
     return r;
+}
+VaultModel::SshLookup VaultModel::sshMatches(const QString& machine, const QString& user, int port) const {
+    if (!ssh::validLookup(machine, user, port)) return {};
+    const auto host = normalizedHost(machine);
+    SshLookup result;
+    for (const auto& entry : entries_) {
+        QList<SshTarget> matches;
+        for (const auto& target : entry.sshTargets) {
+            if ((!host.isEmpty() && target.host == host) || target.alias.compare(machine, Qt::CaseInsensitive) == 0) {
+                if ((user.isEmpty() || target.username == user) && (!port || target.port == port)) matches.append(target);
+            }
+        }
+        if (matches.isEmpty()) continue;
+        if (result.matches.size() == ssh::MaxMatches) return {true, {}};
+        result.matches.append(SshMatch{entry.id, entry.title, std::move(matches)});
+    }
+    std::sort(result.matches.begin(), result.matches.end(), [](const auto& first, const auto& second) {
+        const auto order = first.title.compare(second.title, Qt::CaseInsensitive);
+        return order == 0 ? first.id < second.id : order < 0;
+    });
+    return result;
 }
 QByteArray VaultModel::toCbor() const {
     QCborMap root;
@@ -234,6 +297,14 @@ QByteArray VaultModel::toCbor() const {
         m[u"fileName"_s]=e.textFile.fileName; m[u"fileBytes"_s]=e.textFile.bytes; m[u"fileSnapshot"_s]=e.textFile.sourceSnapshot;
         QCborArray visible; for(int line:e.textFile.visibleLines) visible.append(line); m[u"fileVisible"_s]=visible;
         m[u"sourceId"_s]=e.sourceEntryId.isNull()?QString():idStr(e.sourceEntryId); m[u"sourceLine"_s]=e.sourceLine;
+        QCborArray targets;
+        for (const auto& target : e.sshTargets) {
+            QCborMap binding;
+            binding[u"alias"_s] = target.alias; binding[u"host"_s] = target.host;
+            binding[u"user"_s] = target.username; binding[u"port"_s] = target.port;
+            targets << binding;
+        }
+        m[u"sshTargets"_s] = targets;
         es << m;
     }
     root[u"entries"_s] = es;
@@ -266,7 +337,7 @@ void VaultModel::encodeTo(cbor::CborWriter& w) const {
     w.text(u"entries"); {
         w.beginArray(size_t(entries_.size()));
         for (auto& e : entries_) {
-            w.beginMap(28);
+            w.beginMap(29);
             w.text(u"id"); w.text(idStr(e.id));
             w.text(u"g"); w.text(idStr(e.groupId));
             w.text(u"type"); w.uint(quint64(int(e.type)));
@@ -298,6 +369,14 @@ void VaultModel::encodeTo(cbor::CborWriter& w) const {
             for(int line:e.textFile.visibleLines) w.uint(quint64(line));
             w.text(u"sourceId"); w.text(e.sourceEntryId.isNull()?QString():idStr(e.sourceEntryId));
             w.text(u"sourceLine"); w.integer(e.sourceLine);
+            w.text(u"sshTargets"); w.beginArray(size_t(e.sshTargets.size()));
+            for (const auto& target : e.sshTargets) {
+                w.beginMap(4);
+                w.text(u"alias"); w.text(target.alias);
+                w.text(u"host"); w.text(target.host);
+                w.text(u"user"); w.text(target.username);
+                w.text(u"port"); w.uint(quint64(target.port));
+            }
         }
     }
     w.text(u"views"); {
@@ -397,6 +476,20 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
         e.password = utf8(m.value(u"pw"_s).toByteArray());
         e.sshPrivate = m.value(u"sshpriv"_s).toByteArray(); e.sshPublic = m.value(u"sshpub"_s).toByteArray();
         e.sshPassphrase = m.value(u"sshph"_s).toString(); e.sshComment = m.value(u"sshc"_s).toString();
+        const auto targets = m.value(u"sshTargets"_s);
+        if (version >= 6) {
+            if (!targets.isArray() || targets.toArray().size() > ssh::MaxTargets) return bad();
+            for (const auto& target : targets.toArray()) {
+                const auto item = target.toMap();
+                const auto port = item.value(u"port"_s);
+                if (item.size() != 4 || !item.value(u"alias"_s).isString() || !item.value(u"host"_s).isString()
+                    || !item.value(u"user"_s).isString() || !port.isInteger() || port.toInteger() < 1 || port.toInteger() > ssh::MaxPort)
+                    return bad();
+                e.sshTargets.append({item.value(u"alias"_s).toString(), item.value(u"host"_s).toString(),
+                    item.value(u"user"_s).toString(), static_cast<int>(port.toInteger())});
+            }
+            if (!normalizeSshTargets(e).isEmpty()) return bad();
+        } else if (!targets.isUndefined()) return bad();
         for(const auto key:{u"key"_s,u"format"_s,u"fileName"_s,u"sourceId"_s})
             if(m.contains(key) && !m.value(key).isString()) return bad();
         for(const auto key:{u"value"_s,u"fileBytes"_s}) if(m.contains(key) && !m.value(key).isByteArray()) return bad();

@@ -1,10 +1,12 @@
 #include "AgentAccess.h"
 #include "EntryAccess.h"
 #include "app/Application.h"
+#include "model/SshTarget.h"
 #include "model/TextFile.h"
 #include "platform/AgentPipe.h"
 #include <QApplication>
 #include <QDeadlineTimer>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMessageBox>
@@ -34,11 +36,12 @@ const char* typeName(model::EntryType type) {
 }
 
 struct Request {
-    QString title;
+    QString title, machine, user;
     model::Id id;
     Field field = Field::Token;
-    int line = -1;
+    int line = -1, port = 0;
     bool find() const { return id.isNull(); }
+    bool findSsh() const { return !machine.isEmpty(); }
     const char* fieldName() const { return ReadFields[static_cast<size_t>(field)]; }
     model::EntryType fieldType() const { return FieldTypes[static_cast<size_t>(field)]; }
 };
@@ -64,6 +67,15 @@ std::optional<Request> parseRequest(QByteArrayView bytes) {
     if (op == "find" && object.size() == 3) {
         request.title = object.value("title").toString();
         if (!request.title.isEmpty() && request.title.isValidUtf16()) return request;
+    }
+    if (op == "find_ssh") {
+        request.machine = object.value("machine").toString();
+        request.user = object.value("user").toString();
+        request.port = object.value("port").toInt(0);
+        const bool hasUser = object.contains("user"), hasPort = object.contains("port");
+        if (object.size() == 3 + int(hasUser) + int(hasPort) && (!hasUser || !request.user.isEmpty())
+            && (!hasPort || request.port > 0) && model::ssh::validLookup(request.machine, request.user, request.port)) return request;
+        return std::nullopt;
     }
     if (op == "read") {
         const auto id = object.value("id").toString();
@@ -135,6 +147,27 @@ SecureBytes readReply(const Request& request, const model::Entry& entry) {
     }
     }
     return SecureBytes(errorReply("invalid_request"));
+}
+
+SecureBytes sshLookupReply(const model::VaultModel::SshLookup& result) {
+    if (result.tooMany) return SecureBytes(errorReply("too_many"));
+    if (result.matches.isEmpty()) return SecureBytes(errorReply("not_found"));
+    // Titles predate binding limits. Bound them before JSON serialisation, as
+    // already done for the number and field sizes of targets and matching keys.
+    QJsonArray entries;
+    for (const auto& match : result.matches) {
+        if (match.title.size() > 512) return SecureBytes(errorReply("too_large"));
+        QJsonArray targets;
+        for (const auto& target : match.targets) {
+            targets.append(QJsonObject{{"alias", target.alias}, {"host", target.host},
+                {"user", target.username}, {"port", target.port}});
+        }
+        entries.append(QJsonObject{{"id", match.id.toString(QUuid::WithoutBraces)}, {"title", match.title},
+            {"type", "sshKey"}, {"targets", targets}});
+    }
+    auto response = QJsonDocument(QJsonObject{{"ok", true}, {"entries", entries}}).toJson(QJsonDocument::Compact) + '\n';
+    if (response.size() > 256 * 1024) return SecureBytes(errorReply("too_large"));
+    return SecureBytes(std::move(response));
 }
 }
 
@@ -274,16 +307,24 @@ private:
             }
             return {match, false};
         };
-        const auto [entry, ambiguous] = lookup();
+        const auto findSsh = [&] { return app_.model()->sshMatches(request->machine, request->user, request->port); };
+        const auto sshBefore = request->findSsh() ? findSsh() : model::VaultModel::SshLookup{};
+        const auto [entry, ambiguous] = request->findSsh() ? std::pair<const model::Entry*, bool>{nullptr, false} : lookup();
         const auto before = entry ? std::optional(*entry) : std::nullopt;
         const auto consistent = [&] {
             if (!requestAlive() || !sessionCurrent() || app_.busy()) return false;
+            if (request->findSsh()) return findSsh() == sshBefore;
             const auto [current, nowAmbiguous] = lookup();
             return nowAmbiguous == ambiguous && (before ? current && *current == *before : !current);
         };
 
         QString description;
-        if (request->find()) {
+        if (request->findSsh()) {
+            description = QStringLiteral("Разрешить поиск ключей SSH для машины %1? Будут переданы названия, ID и подходящие привязки.")
+                .arg(displayTitle(request->machine));
+            if (!request->user.isEmpty()) description += QStringLiteral("\nПользователь: %1").arg(displayTitle(request->user));
+            if (request->port) description += QStringLiteral("\nПорт: %1").arg(request->port);
+        } else if (request->find()) {
             description = QStringLiteral("Разрешить поиск по точному названию %1? Будут переданы только название, тип и ID.")
                 .arg(displayTitle(request->title));
         } else {
@@ -296,8 +337,9 @@ private:
         QMessageBox dialog(QMessageBox::Question, QStringLiteral("TokenBucket — доступ агента"), {}, QMessageBox::Yes | QMessageBox::No);
         dialog.setTextFormat(Qt::PlainText);
         dialog.setText(description);
-        if (request->find() && request->title.size() > InlineTitleLimit)
-            dialog.setDetailedText(displayTitle(request->title, request->title.size()));
+        const auto queryText = request->findSsh() ? request->machine : request->title;
+        if (request->find() && queryText.size() > InlineTitleLimit)
+            dialog.setDetailedText(displayTitle(queryText, queryText.size()));
         dialog.setDefaultButton(QMessageBox::No);
         dialog.setEscapeButton(QMessageBox::No);
         dialog.setWindowModality(Qt::ApplicationModal);
@@ -311,6 +353,10 @@ private:
         const bool approved = consent_ ? consent_(&dialog) : dialog.exec() == QMessageBox::Yes;
         if (!approved) return fail("denied");
         if (!consistent()) return fail("stale");
+        if (request->findSsh()) {
+            if (!sshBefore.tooMany && !sshBefore.matches.isEmpty()) released = true;
+            return sshLookupReply(sshBefore);
+        }
         if (ambiguous) return fail("ambiguous");
         if (!before) return fail("not_found");
         if (request->find()) {

@@ -1,4 +1,5 @@
 #include "Version.h"
+#include "model/SshTarget.h"
 #include "model/TextFile.h"
 #include "platform/AgentClient.h"
 #include <QCoreApplication>
@@ -23,6 +24,7 @@ constexpr auto ClientCapabilities = "io.modelcontextprotocol/clientCapabilities"
 constexpr auto ServerInfo = "io.modelcontextprotocol/serverInfo";
 constexpr auto FindTool = "tokenbucket_find";
 constexpr auto ReadTool = "tokenbucket_read";
+constexpr auto FindSshTool = "tokenbucket_find_ssh";
 constexpr auto Instructions = "Start TokenBucket with --agent-access in the same Windows session. "
     "Wait for owner consent and verification. Do not retry automatically after a denial.";
 
@@ -47,7 +49,11 @@ QJsonArray toolList() {
             {{"id", QJsonObject{{"type", "string"}, {"format", "uuid"}}},
              {"field", QJsonObject{{"type", "string"}, {"enum", fields}}},
              {"line", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::textfile::MaxLines},
-                  {"description", "Required only for textLine. One-based number of a visible line."}}}}, {"id", "field"})
+                  {"description", "Required only for textLine. One-based number of a visible line."}}}}, {"id", "field"}),
+        tool(FindSshTool, "Find SSH keys for an exact machine alias or host after owner consent. Select a returned key ID before requesting a field.",
+            {{"machine", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxHost}}},
+             {"user", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxUser}}},
+             {"port", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::ssh::MaxPort}}}}, {"machine"})
     };
 }
 
@@ -101,6 +107,17 @@ QByteArray brokerRequest(const QJsonObject& params) {
         if (args.size() != 1 || title.isEmpty() || !title.isValidUtf16()) return {};
         request.insert("op", "find");
         request.insert("title", title);
+    } else if (name == FindSshTool) {
+        const auto machine = args.value("machine").toString();
+        const auto user = args.value("user").toString();
+        const int port = args.value("port").toInt();
+        const bool hasUser = args.contains("user"), hasPort = args.contains("port");
+        if (args.size() != 1 + int(hasUser) + int(hasPort) || (hasUser && user.isEmpty()) || (hasPort && port < 1)
+            || !model::ssh::validLookup(machine, user, port)) return {};
+        request.insert("op", "find_ssh");
+        request.insert("machine", machine);
+        if (hasUser) request.insert("user", user);
+        if (hasPort) request.insert("port", port);
     } else if (name == ReadTool) {
         const auto id = args.value("id").toString();
         const auto uuid = QUuid(id);

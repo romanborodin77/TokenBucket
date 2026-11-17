@@ -24,3 +24,7 @@
 ## Привязки ключей SSH к машинам
 
 Новые тесты проверяют один ключ на нескольких машинах, несколько ключей на машине, фильтрацию пользователя и порта в одной привязке, ограничения размера, проверку согласия, безопасный переход с v5 и передачу результата в MCP. Сборка `cmake --build --preset default --target test_model --parallel 12` дала ожидаемый compile-time RED. MSVC выдал `C2039` для отсутствующих `Entry::sshTargets` и `VaultModel::sshMatches`. Вывод сохранён локально в `build/evidence/ssh-targets-red.txt`.
+
+После реализации локальная сборка целей `test_model`, `test_app` и `test_agent_win` завершилась успешно. CTest выполнил `test_model` и `test_agent_win` с результатами `28 passed` и `13 passed` соответственно. Проверка `test_app.exe v5SshVaultUpgradePreservesEncryptedOriginalAndBindings` прошла отдельно, включая проверенную зашифрованную копию, отказ при ошибке её создания, повторное открытие v6 и экспорт с импортом.
+
+В запуске полного `test_app` единственный отказ пришёлся на существующий `upgradeFailures(symlink-main)`. Windows вернула `FALSE` при создании символической ссылки в тестовом окружении. Этот отказ сохранён в отчёте `build/evidence/ssh-targets-green-test_app.txt`. Вывод остальных проверок находится в локальных `build/evidence/ssh-targets-green-*`.
