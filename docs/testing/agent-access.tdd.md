@@ -28,3 +28,9 @@
 После реализации локальная сборка целей `test_model`, `test_app` и `test_agent_win` завершилась успешно. CTest выполнил `test_model` и `test_agent_win` с результатами `28 passed` и `13 passed` соответственно. Проверка `test_app.exe v5SshVaultUpgradePreservesEncryptedOriginalAndBindings` прошла отдельно, включая проверенную зашифрованную копию, отказ при ошибке её создания, повторное открытие v6 и экспорт с импортом.
 
 В запуске полного `test_app` единственный отказ пришёлся на существующий `upgradeFailures(symlink-main)`. Windows вернула `FALSE` при создании символической ссылки в тестовом окружении. Этот отказ сохранён в отчёте `build/evidence/ssh-targets-green-test_app.txt`. Вывод остальных проверок находится в локальных `build/evidence/ssh-targets-green-*`.
+
+После явного разрешения владельца включён режим разработчика Windows (`AllowDevelopmentWithoutDevLicense=1`). Повторная изолированная проверка символической ссылки вернула Win32 `0` вместо `1314`. Локальная сборка `test_app` и `test_store` и `tools\test.cmd -R "^(test_app|test_store)$"` завершились с кодом `0`: 75 и 38 проверок соответственно, без ошибок и пропусков. Журналы и сведения об изменении настройки ОС — `build/evidence/developer-mode-20261118-054754/`.
+
+## Таблица SSH-подключений
+
+После выбора макета собрана цель `test_ui`. Запуск `test_ui.exe sshConnectionsTablePersistsAndPreservesKey sshConnectionsTableBoundsAndTypeChange sshCardBindingsRemainMetadataWhileKeyRequiresVerification` дал `2 passed, 3 failed`. Все три сценария остановились при поиске ещё отсутствовавших элементов редактора и карточки. Журнал сохранён в `build/evidence/ssh-ui-red.txt`.

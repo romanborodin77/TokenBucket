@@ -27,6 +27,7 @@
 #include <QSignalSpy>
 #include <QMenu>
 #include <QScrollArea>
+#include <QTableWidget>
 #include <QScrollBar>
 #include "../src/app/Application.h"
 #include "../src/app/IdleTimer.h"
@@ -503,6 +504,91 @@ private slots:
         ui::MainWindow again(reopened, nullptr, &uiPreferences_); again.show(); again.search()->setText(QStringLiteral("Запись 0"));
         QCOMPARE(again.list()->count(), 1); confirm(again); again.deleteSelected(); QCOMPARE(reopened.model()->entries().size(), 2);
         again.requestExit(); QVERIFY(reopened.unlock("пароль-теста-123", &err)); QCOMPARE(reopened.model()->entries().size(), 2);
+    }
+    void sshConnectionsTablePersistsAndPreservesKey() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        model::Entry key; key.groupId=QUuid::createUuid(); key.id=QUuid::createUuid();
+        key.title="Synthetic SSH"; key.type=model::EntryType::SshKey;
+        key.sshPrivate=QByteArray("priv\r\n\xFF\0",8); key.sshPublic=QByteArray("pub\r\n\xFE\0",7);
+        key.sshPassphrase=QStringLiteral("  фраза  ");
+        key.sshTargets={{"Existing","old.example","ops",22}};
+        QVERIFY(app.model()->addNode(key.groupId,{},"Infrastructure").isEmpty());
+        QVERIFY(app.model()->setEntry(key).isEmpty()); QVERIFY(app.save(&error));
+        ui::MainWindow window(app,nullptr,&uiPreferences_); window.resize(880,650); window.show();
+        window.search()->setText("old.example"); QCOMPARE(window.list()->count(),1); window.list()->setCurrentRow(0);
+        editDialog(window,[&](EntryEditDialog& dialog) {
+            auto* table=dialog.findChild<QTableWidget*>("sshTargets"); QVERIFY(table);
+            auto* add=dialog.findChild<QPushButton*>("sshTargetAdd"); QVERIFY(add);
+            QCOMPARE(table->rowCount(),1); QVERIFY(table->isVisible());
+            add->click(); QCOMPARE(table->rowCount(),2);
+            auto* port=qobject_cast<QSpinBox*>(table->cellWidget(1,3)); QVERIFY(port); QCOMPARE(port->value(),22);
+            const auto set=[&](int row,int column,const QString& value) {
+                auto* editor=qobject_cast<QLineEdit*>(table->cellWidget(row,column)); QVERIFY(editor);
+                QVERIFY(!editor->accessibleName().isEmpty()); editor->setText(value);
+            };
+            set(0,0,"Main"); set(0,1,"NEW.EXAMPLE"); set(1,0,"Fallback"); set(1,1,"192.0.2.45"); set(1,2,"deploy");
+            port->setValue(2222);
+        });
+        window.editSelected();
+        const auto saved=*app.model()->entry(key.id);
+        QVERIFY(saved.sshTargets==(QList<model::SshTarget>{{"Main","new.example","ops",22},{"Fallback","192.0.2.45","deploy",2222}}));
+        QCOMPARE(saved.sshPrivate,key.sshPrivate); QCOMPARE(saved.sshPublic,key.sshPublic); QCOMPARE(saved.sshPassphrase,key.sshPassphrase);
+        window.search()->setText("192.0.2.45"); QCOMPARE(window.list()->count(),1); window.list()->setCurrentRow(0);
+        QTimer::singleShot(0,&window,[&] {
+            auto* editor=qobject_cast<EntryEditDialog*>(QApplication::activeModalWidget()); QVERIFY(editor);
+            QTimer::singleShot(2000,editor,&EntryEditDialog::reject);
+            auto* table=editor->findChild<QTableWidget*>("sshTargets"); QVERIFY(table);
+            auto* remove=qobject_cast<QPushButton*>(table->cellWidget(0,4)); QVERIFY(remove); remove->click();
+            QCOMPARE(table->rowCount(),1); editor->reject();
+        });
+        window.editSelected(); QVERIFY(*app.model()->entry(key.id)==saved);
+        window.requestExit(); QVERIFY(app.unlock("valid-password",&error)); QVERIFY(*app.model()->entry(key.id)==saved);
+    }
+    void sshConnectionsTableBoundsAndTypeChange() {
+        model::VaultModel model; model::Entry key; key.groupId=QUuid::createUuid(); key.id=QUuid::createUuid();
+        key.title="Synthetic key"; key.type=model::EntryType::SshKey; key.sshPrivate="key";
+        key.sshTargets={{"Machine","test.example",{},22}};
+        QVERIFY(model.addNode(key.groupId,{},"Test").isEmpty()); QVERIFY(model.setEntry(key).isEmpty());
+        EntryEditDialog dialog(model,key); dialog.resize(430,480); dialog.show();
+        auto* table=dialog.findChild<QTableWidget*>("sshTargets"); auto* add=dialog.findChild<QPushButton*>("sshTargetAdd");
+        QVERIFY(table && add); QCOMPARE(table->columnCount(),5);
+        for(int i=1;i<16;++i) add->click();
+        QCOMPARE(table->rowCount(),16); QVERIFY(!add->isEnabled());
+        auto* remove=qobject_cast<QPushButton*>(table->cellWidget(15,4)); QVERIFY(remove); remove->click(); QVERIFY(add->isEnabled());
+        QTRY_COMPARE(dialog.findChild<QScrollArea*>()->horizontalScrollBar()->maximum(),0);
+        dialog.accept(); QVERIFY(!dialog.entry()); QVERIFY(dialog.findChild<QLabel*>("entryError")->isVisible());
+        auto* type=dialog.findChild<QComboBox*>("entryType"); QVERIFY(type);
+        QTimer::singleShot(0,&dialog,[&] {if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->reject();});
+        type->setCurrentIndex(0); QCOMPARE(type->currentData().toInt(),int(model::EntryType::SshKey));
+        confirm(dialog); type->setCurrentIndex(0); QCOMPARE(type->currentData().toInt(),int(model::EntryType::ApiToken));
+        QVERIFY(!table->isVisible()); field(dialog,"entryToken")->setText("replacement"); dialog.accept();
+        QVERIFY(dialog.entry()); QVERIFY(dialog.entry()->sshTargets.isEmpty()); QVERIFY(dialog.entry()->sshPrivate.isEmpty());
+        QVERIFY(*model.entry(key.id)==key);
+    }
+    void sshCardBindingsRemainMetadataWhileKeyRequiresVerification() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        model::Entry key; key.id=QUuid::createUuid(); key.groupId=QUuid::createUuid();
+        key.title="Protected SSH"; key.type=model::EntryType::SshKey; key.sshPrivate="raw-private-marker";
+        key.sshPublic="raw-public-marker"; key.sshPassphrase="raw-passphrase-marker";
+        key.sshTargets={{"Primary","protected.example","deploy",2222}};
+        QVERIFY(app.model()->addNode(key.groupId,{},"Infrastructure").isEmpty());
+        QVERIFY(app.model()->setEntry(key).isEmpty()); QVERIFY(app.save(&error));
+        ui::EntryCard card(app); card.show(); card.showEntry(key.id);
+        auto* metadata=card.findChild<QLabel*>("cardSshTargets"); QVERIFY(metadata);
+        QVERIFY(metadata->text().contains("protected.example"));
+        key.reverify=true; QVERIFY(app.model()->setEntry(key).isEmpty()); QVERIFY(app.save(&error)); card.showEntry(key.id);
+        QVERIFY(metadata->text().contains("protected.example"));
+        QVERIFY(metadata->text().contains("2222")); QVERIFY(!metadata->text().contains("raw-")); QVERIFY(!card.secretText().contains("raw-"));
+        QVERIFY(app.model()->search("protected.example").contains(key.id));
+        QSignalSpy copies(&card,&ui::EntryCard::copyRequested);
+        QTimer::singleShot(0,&card,[] {if(auto* d=qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) d->reject();});
+        card.copySecret(); QCOMPARE(copies.size(),0);
+        answerText(card,"valid-password"); card.copySecret(); QCOMPARE(copies.size(),1);
+        QCOMPARE(copies.takeFirst().at(0).toString(),QStringLiteral("raw-private-marker"));
+        card.showSelection(2); QVERIFY(metadata->text().isEmpty());
+        card.showEntry(key.id); app.lock(); QVERIFY(metadata->text().isEmpty()); QVERIFY(!metadata->isVisible());
     }
     void renameMoveAndDeleteNodes() {
         Application app(dir_.path() + "/nodes"); QString err; QVERIFY(app.createPasswordVault("пароль-теста-123", &err));
