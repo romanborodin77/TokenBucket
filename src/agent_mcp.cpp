@@ -8,11 +8,14 @@
 #include <QTimer>
 #include <QUuid>
 #include <algorithm>
-#include <cstdio>
+#include <list>
 
 namespace tb::agent {
 namespace {
 constexpr qsizetype MaxFrame = 64 * 1024;
+constexpr qsizetype MaxQueuedBytes = 3 * 1024 * 1024;
+constexpr size_t MaxQueuedFrames = 32;
+constexpr int OutputTimeoutMs = 15000;
 constexpr auto ModernVersion = "2026-07-28";
 constexpr auto LegacyVersion = "2025-11-25";
 constexpr auto ProtocolVersion = "io.modelcontextprotocol/protocolVersion";
@@ -121,25 +124,86 @@ class McpServer {
 public:
     explicit McpServer(QString suffix) : suffix_(std::move(suffix)) {
         QObject::connect(&timer_, &QTimer::timeout, &timer_, [this] { tick(); });
+    }
+
+    bool start() {
+        // Inherited stdio handles need not support overlapped I/O. The local
+        // pipe's nonblocking mode bounds each write, even when the host stops reading.
+        DWORD mode = PIPE_NOWAIT, outbound = 0, inbound = 0;
+        if (GetFileType(inputHandle_) != FILE_TYPE_PIPE || GetFileType(outputHandle_) != FILE_TYPE_PIPE ||
+            !GetNamedPipeInfo(outputHandle_, nullptr, &outbound, &inbound, nullptr) ||
+            !SetNamedPipeHandleState(outputHandle_, &mode, nullptr, nullptr)) return false;
+        const auto capacity = outbound && inbound ? std::min(outbound, inbound) : std::max(outbound, inbound);
+        outputChunk_ = std::clamp<DWORD>(capacity, 1, 4096);
         timer_.start(10);
+        return true;
     }
 
 private:
     enum class Legacy { BeforeInitialize, BeforeInitialized, Ready };
+    struct OutputFrame {
+        OutputFrame(QByteArray data, QJsonValue requestId, bool tool)
+            : bytes(std::move(data)), id(std::move(requestId)), toolResult(tool) {}
+        ~OutputFrame() { if (toolResult) SecureZeroMemory(bytes.data(), static_cast<size_t>(bytes.size())); }
+        QByteArray bytes;
+        QJsonValue id;
+        bool toolResult;
+        qsizetype offset = 0;
+        QDeadlineTimer deadline{OutputTimeoutMs};
+    };
 
     void stop(int exitCode) {
         timer_.stop();
         call_.reset();
+        output_.clear();
         QCoreApplication::exit(exitCode);
     }
 
-    bool write(QByteArrayView bytes) {
-        if (std::fwrite(bytes.data(), 1, static_cast<size_t>(bytes.size()), stdout) == static_cast<size_t>(bytes.size())) return true;
-        stop(1);
-        return false;
+    void queue(QByteArray bytes, const QJsonValue& id, bool toolResult = false) {
+        if (bytes.size() > MaxQueuedBytes - queuedBytes_ || output_.size() >= MaxQueuedFrames) {
+            if (toolResult) SecureZeroMemory(bytes.data(), static_cast<size_t>(bytes.size()));
+            stop(1);
+            return;
+        }
+        queuedBytes_ += bytes.size();
+        output_.emplace_back(std::move(bytes), id, toolResult);
     }
 
-    void json(QJsonObject object) { write(QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n'); }
+    void flushOutput() {
+        qsizetype allowance = 128 * 1024;
+        while (!output_.empty() && allowance > 0) {
+            auto& frame = output_.front();
+            DWORD written = 0;
+            const auto count = static_cast<DWORD>(std::min({frame.bytes.size() - frame.offset, allowance, qsizetype(outputChunk_)}));
+            if (!WriteFile(outputHandle_, frame.bytes.constData() + frame.offset, count, &written, nullptr)) {
+                stop(1);
+                return;
+            }
+            if (!written) return;
+            allowance -= written;
+            frame.offset += written;
+            if (frame.offset == frame.bytes.size()) {
+                queuedBytes_ -= frame.bytes.size();
+                output_.pop_front();
+            }
+        }
+    }
+
+    void cancel(const QJsonValue& id) {
+        if (!validId(id)) return;
+        if (call_ && id == callId_) call_.reset();
+        const auto frame = std::find_if(output_.begin(), output_.end(), [&](const auto& item) {
+            return item.toolResult && item.id == id;
+        });
+        if (frame == output_.end()) return;
+        // A started response cannot be removed without corrupting the byte stream.
+        // Close the stream before sending any more of the cancelled frame.
+        if (frame->offset) { stop(0); return; }
+        queuedBytes_ -= frame->bytes.size();
+        output_.erase(frame);
+    }
+
+    void json(QJsonObject object) { queue(QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n', object.value("id")); }
 
     void error(const QJsonValue& id, int code, const char* message, QJsonObject data = {}) {
         QJsonObject body{{"code", code}, {"message", message}};
@@ -184,8 +248,7 @@ private:
             }
         }
         encoded += "\"}]}}\n";
-        write(encoded);
-        SecureZeroMemory(encoded.data(), static_cast<size_t>(encoded.size()));
+        queue(std::move(encoded), id, true);
     }
 
     void dispatch(QByteArrayView frame) {
@@ -195,9 +258,12 @@ private:
         const auto request = parsed.toObject();
         const auto id = request.value("id");
         const auto method = request.value("method").toString();
-        if (!parsed.isObject() || jsonMembers(parsed) != jsonSeparators(frame) || request.value("jsonrpc") != "2.0" ||
-            method.isEmpty() || (!id.isUndefined() && !validId(id))) {
+        if (!parsed.isObject() || jsonMembers(parsed) != jsonSeparators(frame)) {
             error({}, -32600, "Invalid request");
+            return;
+        }
+        if (request.value("jsonrpc") != "2.0" || method.isEmpty() || (!id.isUndefined() && !validId(id))) {
+            error(id, -32600, "Invalid request");
             return;
         }
         const auto paramsValue = request.value("params");
@@ -208,12 +274,17 @@ private:
         const auto params = paramsValue.toObject();
         if (id.isUndefined()) {
             if (method == "notifications/initialized" && legacy_ == Legacy::BeforeInitialized) legacy_ = Legacy::Ready;
-            if (method == "notifications/cancelled" && call_ && params.value("requestId") == callId_) call_.reset();
+            if (method == "notifications/cancelled") cancel(params.value("requestId"));
             return;
         }
-        if (call_ && id == callId_) { error({}, -32600, "Request ID already active"); return; }
+        if ((call_ && id == callId_) || std::any_of(output_.begin(), output_.end(), [&](const auto& frame) { return frame.id == id; })) {
+            error({}, -32600, "Request ID already active");
+            return;
+        }
 
-        if (method == "initialize") {
+        const auto metadata = params.value("_meta").toObject();
+        const auto version = metadata.value(ProtocolVersion);
+        if (method == "initialize" && version.isUndefined()) {
             const auto info = params.value("clientInfo").toObject();
             if (legacy_ != Legacy::BeforeInitialize || !params.value("protocolVersion").isString() ||
                 !params.value("capabilities").isObject() || !info.value("name").isString() || !info.value("version").isString()) {
@@ -226,10 +297,8 @@ private:
             return;
         }
 
-        const auto metadata = params.value("_meta").toObject();
-        const auto version = metadata.value(ProtocolVersion);
         const bool modern = method == "server/discover" || !version.isUndefined() || legacy_ != Legacy::Ready;
-        if (method == "ping" && version.isUndefined() && legacy_ != Legacy::BeforeInitialize) { result(id, {}, false); return; }
+        if (method == "ping" && version.isUndefined()) { result(id, {}, false); return; }
         if (modern) {
             if (!version.isString() || !metadata.value(ClientCapabilities).isObject()) {
                 error(id, -32602, "Missing MCP protocol metadata");
@@ -262,12 +331,10 @@ private:
     }
 
     void tick() {
+        if (!output_.empty() && output_.front().deadline.hasExpired()) { stop(1); return; }
+        if (!input_.isEmpty() && inputDeadline_.hasExpired()) { stop(1); return; }
         DWORD available = 0;
-        const auto type = GetFileType(inputHandle_);
-        if (type == FILE_TYPE_PIPE) {
-            if (!PeekNamedPipe(inputHandle_, nullptr, 0, nullptr, &available, nullptr)) { stop(0); return; }
-        } else if (type == FILE_TYPE_DISK) available = 4096;
-        else { stop(1); return; }
+        if (!PeekNamedPipe(inputHandle_, nullptr, 0, nullptr, &available, nullptr)) { stop(0); return; }
 
         if (available) {
             char chunk[4096];
@@ -276,6 +343,7 @@ private:
                 stop(0);
                 return;
             }
+            if (input_.isEmpty()) inputDeadline_ = QDeadlineTimer(RequestTimeoutMs);
             input_.append(chunk, received);
             // Take complete input messages, in order, before publishing a pending response.
             // In particular, an observed cancellation closes the local pipe first.
@@ -283,24 +351,31 @@ private:
                 dispatch(QByteArrayView(input_.constData(), newline));
                 if (!timer_.isActive()) return;
                 input_.remove(0, newline + 1);
+                inputDeadline_ = QDeadlineTimer(RequestTimeoutMs);
             }
-            if (input_.size() > MaxFrame) {
-                error({}, -32700, "MCP frame too large");
-                stop(1);
-                return;
-            }
+            if (input_.size() > MaxFrame) { stop(1); return; }
+            if (!PeekNamedPipe(inputHandle_, nullptr, 0, nullptr, &available, nullptr)) { stop(0); return; }
         }
-        if (!call_ || !call_->advance()) return;
-        const auto completed = std::move(call_);
-        const auto response = completed->reply();
-        if (response.isEmpty() || !response.isValidUtf8()) toolResult(callId_, errorReply("unavailable"), callModern_);
-        else toolResult(callId_, response, callModern_);
+        const bool complete = call_ && call_->advance();
+        if (available || !input_.isEmpty()) return;
+        if (complete) {
+            const auto completed = std::move(call_);
+            const auto response = completed->reply();
+            if (response.isEmpty() || !response.isValidUtf8()) toolResult(callId_, errorReply("unavailable"), callModern_);
+            else toolResult(callId_, response, callModern_);
+        }
+        flushOutput();
     }
 
     QString suffix_;
     HANDLE inputHandle_ = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE outputHandle_ = GetStdHandle(STD_OUTPUT_HANDLE);
     QTimer timer_;
     QByteArray input_;
+    QDeadlineTimer inputDeadline_;
+    std::list<OutputFrame> output_;
+    qsizetype queuedBytes_ = 0;
+    DWORD outputChunk_ = 0;
     std::unique_ptr<Exchange> call_;
     QJsonValue callId_;
     bool callModern_ = false;
@@ -310,6 +385,6 @@ private:
 
 int runMcp(const QString& endpointSuffix) {
     McpServer server(endpointSuffix);
-    return QCoreApplication::exec();
+    return server.start() ? QCoreApplication::exec() : 1;
 }
 }
