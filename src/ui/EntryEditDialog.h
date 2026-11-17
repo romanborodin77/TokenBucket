@@ -4,7 +4,7 @@
 #include "../model/VaultModel.h"
 #include "../vault/PasswordGenerator.h"
 class QSettings; class QSpinBox; class QAction; class QComboBox; class QLineEdit; class QPlainTextEdit; class QCheckBox; class QLabel; class QDateEdit;
-class QDialogButtonBox; class QPushButton;
+class QDialogButtonBox; class QPushButton; class QTableWidget;
 namespace tb::ui { void populateGroups(QComboBox& combo, const model::VaultModel& model); }
 class EntryEditDialog : public QDialog {
     Q_OBJECT
@@ -29,12 +29,16 @@ private:
     void loadGeneratorOptions(const tb::crypto::GeneratorOptions&);
     void fitToContents();
     void showError(const QString& message);
+    void appendSshTarget(const tb::model::SshTarget& target);
+    void updateSshTargets();
     const tb::model::VaultModel& model_;
     tb::model::Entry original_;
     std::optional<tb::model::Entry> result_;
     QComboBox *type_{}, *group_{};
     QLineEdit *title_{}, *url_{}, *login_{}, *password_{}, *token_{}, *sshPass_{}, *sshPath_{}, *sshComment_{}, *tags_{};
     QPlainTextEdit *note_{}, *sshPublic_{};
+    QTableWidget* sshTargets_{};
+    QPushButton* sshTargetAdd_{};
     QLineEdit *parameter_{},*plainValue_{},*fileName_{};
     QComboBox* valueFormat_{};
     QPlainTextEdit* fileBody_{};

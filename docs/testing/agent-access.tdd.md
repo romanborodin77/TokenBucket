@@ -34,3 +34,5 @@
 ## Таблица SSH-подключений
 
 После выбора макета собрана цель `test_ui`. Запуск `test_ui.exe sshConnectionsTablePersistsAndPreservesKey sshConnectionsTableBoundsAndTypeChange sshCardBindingsRemainMetadataWhileKeyRequiresVerification` дал `2 passed, 3 failed`. Все три сценария остановились при поиске ещё отсутствовавших элементов редактора и карточки. Журнал сохранён в `build/evidence/ssh-ui-red.txt`.
+
+После реализации повторный запуск трёх сценариев и `aboutDialogShowsBrandAndStack` дал `6 passed, 0 failed`. Проверены сохранение и повторное открытие, отмена удаления, сохранность всех полей ключа, переход Tab между ячейками, ограничение в 16 строк, подтверждение смены типа и проверка владельца перед копированием ключа. Журнал — `build/evidence/ssh-ui-green.txt`. Светлая, тёмная и узкая версии таблицы сохранены в `build/evidence/ssh-table-*.png`.

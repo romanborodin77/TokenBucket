@@ -24,6 +24,9 @@
 #include <QScopedValueRollback>
 #include <QSignalBlocker>
 #include <QScrollArea>
+#include <QHeaderView>
+#include <QTableWidget>
+#include "../model/SshTarget.h"
 #include <QScreen>
 #include <QTextDocument>
 #include <QVBoxLayout>
@@ -198,6 +201,34 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     qobject_cast<QLabel*>(sshForm->labelForField(keyRow))->setBuddy(sshPath_);
     sshForm->addRow(QStringLiteral("Публичный ключ:"), sshPublic_);
     sshForm->addRow(QStringLiteral("Парольная фраза:"), sshPass_); sshForm->addRow(QStringLiteral("Описание ключа:"), sshComment_);
+    auto* targetSection = new QWidget(ssh);
+    auto* targetLayout = new QVBoxLayout(targetSection); targetLayout->setContentsMargins(0,6,0,0); targetLayout->setSpacing(6);
+    auto* targetHeading = new QHBoxLayout;
+    auto* targetLabel = new QLabel(QStringLiteral("Подключения этого ключа"), targetSection);
+    auto targetFont = targetLabel->font(); targetFont.setBold(true); targetLabel->setFont(targetFont);
+    sshTargetAdd_ = new QPushButton(QStringLiteral("&Добавить"), targetSection);
+    sshTargetAdd_->setObjectName(QStringLiteral("sshTargetAdd"));
+    sshTargetAdd_->setAccessibleName(QStringLiteral("Добавить SSH-подключение")); sshTargetAdd_->setAutoDefault(false);
+    targetHeading->addWidget(targetLabel,1); targetHeading->addWidget(sshTargetAdd_); targetLayout->addLayout(targetHeading);
+    sshTargets_ = new QTableWidget(0,5,targetSection);
+    sshTargets_->setObjectName(QStringLiteral("sshTargets")); sshTargets_->setAccessibleName(targetLabel->text());
+    sshTargets_->setHorizontalHeaderLabels({QStringLiteral("Машина"),QStringLiteral("Адрес"),QStringLiteral("Пользователь"),QStringLiteral("Порт"),QString()});
+    sshTargets_->verticalHeader()->hide(); sshTargets_->setFocusPolicy(Qt::NoFocus);
+    sshTargets_->setSelectionMode(QAbstractItemView::NoSelection); sshTargets_->setTabKeyNavigation(false);
+    sshTargets_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    const int rowHeight = sshTargetAdd_->sizeHint().height() + 6;
+    sshTargets_->verticalHeader()->setDefaultSectionSize(rowHeight);
+    auto* targetHeader = sshTargets_->horizontalHeader();
+    targetHeader->setSectionResizeMode(QHeaderView::Stretch);
+    targetHeader->setSectionResizeMode(3,QHeaderView::Fixed); targetHeader->setSectionResizeMode(4,QHeaderView::Fixed);
+    sshTargets_->setColumnWidth(3,sshTargets_->fontMetrics().horizontalAdvance(QStringLiteral("65535")) + 32);
+    sshTargets_->setColumnWidth(4,sshTargets_->fontMetrics().horizontalAdvance(QStringLiteral("Убрать")) + 26);
+    targetLayout->addWidget(sshTargets_); sshForm->addRow(targetSection);
+    connect(sshTargetAdd_,&QPushButton::clicked,this,[this] {
+        if (sshTargets_->rowCount() >= tb::model::ssh::MaxTargets) return;
+        appendSshTarget({}); updateSshTargets(); fitToContents();
+        sshTargets_->scrollToBottom(); sshTargets_->cellWidget(sshTargets_->rowCount()-1,1)->setFocus();
+    });
     pageLayout->addWidget(ssh);
     auto* plain=new QWidget(pages); auto* plainForm=new QFormLayout(plain);
     parameter_=line(plain,"entryParameterName"); parameter_->setMaxLength(128); parameter_->setAccessibleName(QStringLiteral("Имя параметра"));
@@ -242,6 +273,11 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
         if(type!=original_.type && !original_.id.isNull()
             && (payloadCount(original_)>1 || original_.type==EntryType::TextFile || type==EntryType::TextFile)) {
             showError(QStringLiteral("Эта смена типа потеряет полезные поля. Создайте отдельную запись; исходная останется без изменений.")); revert(); return;
+        }
+        if (shownType_==EntryType::SshKey && type!=EntryType::SshKey && !original_.sshTargets.isEmpty()
+            && !confirmChange(this,QStringLiteral("Смена типа записи"),
+                QStringLiteral("При сохранении нового типа сохранённый SSH-ключ и его подключения будут удалены из этой записи. Продолжить?"))) {
+            revert(); return;
         }
         QString source;
         if(shownType_==EntryType::ApiToken) source=token_->text();
@@ -299,6 +335,8 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     token_->setText(original_.token); login_->setText(original_.login); password_->setText(original_.password);
     sshPass_->setText(original_.sshPassphrase); sshComment_->setText(original_.sshComment);
     sshPublic_->setPlainText(QString::fromUtf8(original_.sshPublic)); sshPublic_->document()->setModified(false);
+    for (const auto& target : original_.sshTargets) appendSshTarget(target);
+    updateSshTargets();
     parameter_->setText(original_.parameterName); plainValue_->setText(original_.plainValue); valueFormat_->setCurrentIndex(valueFormat_->findData(int(original_.valueFormat)));
     fileName_->setText(original_.textFile.fileName.isEmpty()?QStringLiteral("document.txt"):original_.textFile.fileName);
     const bool storedFile=existing && original_.type==EntryType::TextFile;
@@ -306,6 +344,48 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     favorite_->setChecked(original_.favorite); reverify_->setChecked(original_.reverify);
     if (original_.expiresAt.isValid()) { expiry_->setChecked(true); expiryDate_->setDate(original_.expiresAt.date()); }
     showType(type_->currentIndex()); title_->setFocus();
+}
+void EntryEditDialog::appendSshTarget(const tb::model::SshTarget& target) {
+    const int row=sshTargets_->rowCount(); sshTargets_->insertRow(row);
+    const QString values[]={target.alias,target.host,target.username};
+    const int limits[]={tb::model::ssh::MaxAlias,tb::model::ssh::MaxHost,tb::model::ssh::MaxUser};
+    for (int col=0; col<3; ++col) {
+        auto* field = new QLineEdit(values[col],sshTargets_);
+        field->setMaxLength(limits[col]);
+        sshTargets_->setCellWidget(row,col,field);
+    }
+    auto* port=new QSpinBox(sshTargets_);
+    port->setRange(1,tb::model::ssh::MaxPort); port->setValue(target.port);
+    sshTargets_->setCellWidget(row,3,port);
+    auto* remove=new QPushButton(QStringLiteral("Убрать"),sshTargets_);
+    remove->setAutoDefault(false); sshTargets_->setCellWidget(row,4,remove);
+    connect(remove,&QPushButton::clicked,this,[this,remove] {
+        for (int i=0; i<sshTargets_->rowCount(); ++i) {
+            if (sshTargets_->cellWidget(i,4)!=remove) continue;
+            sshTargets_->removeRow(i); updateSshTargets(); fitToContents();
+            if (sshTargets_->rowCount()) sshTargets_->cellWidget(qMin(i,sshTargets_->rowCount()-1),1)->setFocus();
+            else sshTargetAdd_->setFocus();
+            break;
+        }
+    });
+}
+void EntryEditDialog::updateSshTargets() {
+    const int rows=sshTargets_->rowCount();
+    sshTargets_->setVisible(rows>0);
+    sshTargetAdd_->setEnabled(rows<tb::model::ssh::MaxTargets);
+    sshTargets_->setFixedHeight(sshTargets_->horizontalHeader()->sizeHint().height()
+        + qMin(3,rows)*sshTargets_->verticalHeader()->defaultSectionSize()+2*sshTargets_->frameWidth());
+    QWidget::setTabOrder(sshComment_,sshTargetAdd_);
+    QWidget* previous=sshTargetAdd_;
+    for (int row=0; row<rows; ++row) {
+        for (int col=0; col<5; ++col) {
+            auto* editor=sshTargets_->cellWidget(row,col);
+            const auto name = col==4?QStringLiteral("Убрать подключение"):sshTargets_->horizontalHeaderItem(col)->text();
+            editor->setAccessibleName(QStringLiteral("%1 %2").arg(name).arg(row+1));
+            QWidget::setTabOrder(previous,editor); previous=editor;
+        }
+    }
+    QWidget::setTabOrder(previous,favorite_);
 }
 void EntryEditDialog::fitToContents() {
     const auto available = screen()->availableGeometry();
@@ -349,6 +429,7 @@ void EntryEditDialog::setGroup(Id id) { group_->setCurrentIndex(id.isNull() ? -1
 void EntryEditDialog::clearSecrets() {
     token_->clear(); password_->clear(); sshPass_->clear(); plainValue_->clear(); fileBody_->clear(); bodyBaseline_.clear();
     login_->clear(); note_->clear(); sshPublic_->clear(); original_ = Entry{}; result_.reset();
+    sshTargets_->setRowCount(0);
 }
 void EntryEditDialog::reject() { canceled_ = true; clearSecrets(); QDialog::reject(); }
 void EntryEditDialog::accept() {
@@ -373,7 +454,18 @@ void EntryEditDialog::accept() {
     else if(e.type==EntryType::SshKey) {
         e.sshPrivate = original_.sshPrivate;
         e.sshPublic = sshPublic_->document()->isModified() ? sshPublic_->toPlainText().toUtf8() : original_.sshPublic;
-        e.sshPassphrase = sshPass_->text(); e.sshComment = sshComment_->text();
+        if (original_.id.isNull() || original_.type!=EntryType::SshKey || sshPass_->isModified()) e.sshPassphrase = sshPass_->text();
+        e.sshComment = sshComment_->text();
+        e.sshTargets.clear();
+        for (int row=0; row<sshTargets_->rowCount(); ++row) {
+            const auto text=[&](int col) { return static_cast<QLineEdit*>(sshTargets_->cellWidget(row,col))->text(); };
+            const int port=static_cast<QSpinBox*>(sshTargets_->cellWidget(row,3))->value();
+            if (text(1).trimmed().isEmpty()) {
+                sshTargets_->cellWidget(row,1)->setFocus();
+                showError(QStringLiteral("Укажите адрес подключения %1.").arg(row+1)); return;
+            }
+            e.sshTargets.append({text(0),text(1),text(2),port});
+        }
         if (!sshPath_->text().isEmpty()) {
             QScopedValueRollback guard(reading_, true);
             fields_->setEnabled(false); buttons_->button(QDialogButtonBox::Save)->setEnabled(false);

@@ -29,6 +29,7 @@
 #include <QScrollArea>
 #include <QTableWidget>
 #include <QScrollBar>
+#include <QScopeGuard>
 #include "../src/app/Application.h"
 #include "../src/app/IdleTimer.h"
 #include "../src/ui/MainWindow.h"
@@ -511,7 +512,7 @@ private slots:
         model::Entry key; key.groupId=QUuid::createUuid(); key.id=QUuid::createUuid();
         key.title="Synthetic SSH"; key.type=model::EntryType::SshKey;
         key.sshPrivate=QByteArray("priv\r\n\xFF\0",8); key.sshPublic=QByteArray("pub\r\n\xFE\0",7);
-        key.sshPassphrase=QStringLiteral("  фраза  ");
+        key.sshPassphrase=QStringLiteral("  фраза  ")+QChar(0)+QStringLiteral("\r\n");
         key.sshTargets={{"Existing","old.example","ops",22}};
         QVERIFY(app.model()->addNode(key.groupId,{},"Infrastructure").isEmpty());
         QVERIFY(app.model()->setEntry(key).isEmpty()); QVERIFY(app.save(&error));
@@ -529,6 +530,20 @@ private slots:
             };
             set(0,0,"Main"); set(0,1,"NEW.EXAMPLE"); set(1,0,"Fallback"); set(1,1,"192.0.2.45"); set(1,2,"deploy");
             port->setValue(2222);
+            QApplication::setActiveWindow(&dialog);
+            table->cellWidget(1,1)->setFocus(); QTest::keyClick(table->cellWidget(1,1),Qt::Key_Tab);
+            QCOMPARE(dialog.focusWidget(),table->cellWidget(1,2));
+            const auto capture=qEnvironmentVariable("TOKENBUCKET_UI_CAPTURE_DIR");
+            if (!capture.isEmpty()) {
+                const auto reset=qScopeGuard([&] { ui::theme::apply(ui::theme::load(&uiPreferences_)); });
+                ui::theme::apply(ui::theme::Mode::Light); QCoreApplication::processEvents();
+                QVERIFY(dialog.grab().save(QDir(capture).filePath("ssh-table-light.png")));
+                ui::theme::apply(ui::theme::Mode::Dark); QCoreApplication::processEvents();
+                QVERIFY(dialog.grab().save(QDir(capture).filePath("ssh-table-dark.png")));
+                dialog.resize(430,490); QCoreApplication::processEvents();
+                dialog.findChild<QScrollArea*>()->ensureWidgetVisible(table);
+                QVERIFY(dialog.grab().save(QDir(capture).filePath("ssh-table-narrow.png")));
+            }
         });
         window.editSelected();
         const auto saved=*app.model()->entry(key.id);

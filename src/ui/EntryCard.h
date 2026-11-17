@@ -43,7 +43,7 @@ private:
     Application& app_;
     model::Id id_;
     quint64 selection_ = 0; // generation при показе: модель могла очиститься в QtConcurrent — ссылки на Entry не хранятся
-    QLabel *title_{}, *identity_{}, *flags_{}, *metadata_{}, *error_{},*valueLabel_{};
+    QLabel *title_{}, *identity_{}, *flags_{}, *metadata_{}, *sshTargets_{}, *error_{},*valueLabel_{};
     QPlainTextEdit* value_{};
     QPushButton *reveal_{}, *copySecret_{}, *copyLogin_{}, *copyPhrase_{}, *sshToFile_{};
     QPushButton *edit_{}, *more_{}, *document_{};

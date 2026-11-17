@@ -1,6 +1,7 @@
 #include "AboutDialog.h"
 #include "Brand.h"
 #include "Version.h"
+#include "../model/VaultModel.h"
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDialogButtonBox>
@@ -96,7 +97,7 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
     bodyLayout->addSpacing(10);
     bodyLayout->addWidget(keyValue(tr("Контейнер"), tr("TBVK v1 · мастер-пароль / Windows Hello (DPAPI)"), body));
     bodyLayout->addWidget(keyValue(tr("Шифрование"), tr("XChaCha20-Poly1305 · ключ Argon2id (64 МиБ, opslimit 3)"), body));
-    bodyLayout->addWidget(keyValue(tr("Формат данных"), tr("CBOR v3 (теги, сроки) · до 10 000 записей · секрет до 1 МиБ"), body));
+    bodyLayout->addWidget(keyValue(tr("Формат данных"), tr("CBOR v%1 · до 10 000 записей · секрет до 1 МиБ").arg(tb::model::VaultModel::CurrentVersion), body));
     bodyLayout->addWidget(keyValue(tr("Интерфейс"), qtLicense, body));
     bodyLayout->addWidget(keyValue(tr("Криптография"), sodium, body));
     bodyLayout->addWidget(keyValue(tr("Сборка"), QStringLiteral("%1 · %2")

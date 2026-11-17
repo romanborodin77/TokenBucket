@@ -40,7 +40,9 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     identity_ = new QLabel(this); identity_->setObjectName(QStringLiteral("cardIdentity"));
     flags_ = new QLabel(this); flags_->setObjectName(QStringLiteral("cardFlags"));
     metadata_ = new QLabel(this); metadata_->setObjectName(QStringLiteral("cardMetadata")); error_ = new QLabel(this);
-    for (auto* label : {title_, identity_, flags_, metadata_, error_}) { label->setTextFormat(Qt::PlainText); label->setWordWrap(true); }
+    sshTargets_ = new QLabel(this); sshTargets_->setObjectName(QStringLiteral("cardSshTargets"));
+    for (auto* label : {title_, identity_, flags_, metadata_, sshTargets_, error_}) { label->setTextFormat(Qt::PlainText); label->setWordWrap(true); }
+    sshTargets_->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);
     auto titleFont = title_->font(); titleFont.setPointSize(titleFont.pointSize() + 5); titleFont.setBold(true); title_->setFont(titleFont);
     auto* heading = new QHBoxLayout; heading->addWidget(title_, 1);
     edit_ = new QPushButton(QStringLiteral("Изменить"), this); edit_->setObjectName(QStringLiteral("cardEdit")); heading->addWidget(edit_);
@@ -60,7 +62,7 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     compare_=new QPushButton(QStringLiteral("Сравнить с источником…"),this); compare_->setObjectName("cardCompare"); layout->addWidget(compare_);
     openUrl_=new QPushButton(QStringLiteral("Открыть HTTP(S)-адрес…"),this); openUrl_->setObjectName("cardOpenUrl"); layout->addWidget(openUrl_);
     for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) layout->addWidget(button);
-    layout->addWidget(more_); layout->addSpacing(10); layout->addWidget(metadata_); layout->addStretch(1);
+    layout->addWidget(more_); layout->addSpacing(10); layout->addWidget(sshTargets_); layout->addWidget(metadata_); layout->addStretch(1);
     layout->addWidget(error_);
     hideTimer_.setParent(this); hideTimer_.setObjectName(QStringLiteral("secretHideTimer")); hideTimer_.setSingleShot(true); hideTimer_.setInterval(15000);
     connect(&hideTimer_, &QTimer::timeout, this, &EntryCard::hideNowForTest);
@@ -112,7 +114,7 @@ void EntryCard::setRevealSeconds(int seconds) {
     hideTimer_.setInterval(seconds*1000);
     reveal_->setText(QStringLiteral("Показать на %1 секунд").arg(seconds));
 }
-void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); identity_->clear(); flags_->clear(); metadata_->clear(); error_->clear(); updateEnabled(); }
+void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); identity_->clear(); flags_->clear(); metadata_->clear(); sshTargets_->clear(); sshTargets_->hide(); error_->clear(); updateEnabled(); }
 void EntryCard::showSelection(int count) { clear(); title_->setText(QStringLiteral("Выбрано записей: %1").arg(count)); }
 void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();
@@ -126,6 +128,16 @@ void EntryCard::showEntry(model::Id id) {
     title_->setText(entry->title); metadata_->setText(QStringLiteral("Заметки: %1\n\nАдрес: %2\n\nИзменено: %3%4\n%5").arg(
         entry->note, entry->url, entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")), expiryNote, entry->sshComment));
     const bool ssh = entry->type == model::EntryType::SshKey;
+    QStringList targets;
+    for (const auto& target : entry->sshTargets) {
+        const auto host = target.host.contains(':') ? QStringLiteral("[%1]").arg(target.host) : target.host;
+        auto line = QStringLiteral("%1:%2").arg(host).arg(target.port);
+        if (!target.alias.isEmpty()) line.prepend(target.alias+QStringLiteral(" · "));
+        if (!target.username.isEmpty()) line.append(QStringLiteral(" · ")+target.username);
+        targets << line;
+    }
+    sshTargets_->setText(targets.isEmpty()?QString():QStringLiteral("SSH-подключения\n%1").arg(targets.join('\n')));
+    sshTargets_->setVisible(!targets.isEmpty());
     QStringList path;
     auto node = entry->groupId;
     for (int depth = 0; !node.isNull() && depth < model::VaultModel::MaxDepth; ++depth) {
