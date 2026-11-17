@@ -1,0 +1,315 @@
+#include "Version.h"
+#include "model/TextFile.h"
+#include "platform/AgentClient.h"
+#include <QCoreApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
+#include <QUuid>
+#include <algorithm>
+#include <cstdio>
+
+namespace tb::agent {
+namespace {
+constexpr qsizetype MaxFrame = 64 * 1024;
+constexpr auto ModernVersion = "2026-07-28";
+constexpr auto LegacyVersion = "2025-11-25";
+constexpr auto ProtocolVersion = "io.modelcontextprotocol/protocolVersion";
+constexpr auto ClientCapabilities = "io.modelcontextprotocol/clientCapabilities";
+constexpr auto ServerInfo = "io.modelcontextprotocol/serverInfo";
+constexpr auto FindTool = "tokenbucket_find";
+constexpr auto ReadTool = "tokenbucket_read";
+constexpr auto Instructions = "Start TokenBucket with --agent-access in the same Windows session. "
+    "Wait for owner consent and verification. Do not retry automatically after a denial.";
+
+QJsonObject serverInfo() { return {{"name", "TokenBucket"}, {"version", TOKENBUCKET_VERSION}}; }
+QJsonObject capabilities() { return {{"tools", QJsonObject{}}}; }
+QJsonArray supportedVersions() { return {ModernVersion, LegacyVersion}; }
+
+QJsonArray toolList() {
+    const QJsonObject text{{"type", "string"}, {"minLength", 1}};
+    QJsonArray fields;
+    for (const auto* field : ReadFields) fields.append(field);
+    const auto tool = [](const char* name, const char* description, QJsonObject properties, QJsonArray required) {
+        return QJsonObject{{"name", name}, {"description", description},
+            {"annotations", QJsonObject{{"readOnlyHint", true}, {"openWorldHint", false}, {"idempotentHint", false}}},
+            {"inputSchema", QJsonObject{{"type", "object"}, {"additionalProperties", false},
+                {"properties", properties}, {"required", required}}}};
+    };
+    return {
+        tool(FindTool, "Find one TokenBucket entry by exact case-sensitive title after owner consent. Returns ID, title and type.",
+            {{"title", text}}, {"title"}),
+        tool(ReadTool, "Retrieve one field after owner consent and verification. Returns raw bytes in base64. The MCP client or model can retain or forward this value.",
+            {{"id", QJsonObject{{"type", "string"}, {"format", "uuid"}}},
+             {"field", QJsonObject{{"type", "string"}, {"enum", fields}}},
+             {"line", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::textfile::MaxLines},
+                  {"description", "Required only for textLine. One-based number of a visible line."}}}}, {"id", "field"})
+    };
+}
+
+bool validId(const QJsonValue& id) {
+    if (id.isString()) return id.toString().isValidUtf16();
+    return id.isDouble() && id == QJsonValue(id.toInteger());
+}
+
+// Qt folds duplicate keys. Count both the original separators and the parsed
+// members so a second key cannot silently replace a validated parameter.
+int jsonMembers(const QJsonValue& value, int depth = 0) {
+    if (depth > 32) return -1;
+    int count = 0;
+    if (value.isObject()) {
+        const auto object = value.toObject();
+        count = static_cast<int>(object.size());
+        for (const auto& child : object) {
+            const int nested = jsonMembers(child, depth + 1);
+            if (nested < 0) return -1;
+            count += nested;
+        }
+    } else if (value.isArray()) {
+        const auto array = value.toArray();
+        for (const auto& child : array) {
+            const int nested = jsonMembers(child, depth + 1);
+            if (nested < 0) return -1;
+            count += nested;
+        }
+    }
+    return count;
+}
+
+int jsonSeparators(QByteArrayView text) {
+    int count = 0;
+    bool inString = false;
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        const char ch = text[i];
+        if (inString && ch == '\\') ++i;
+        else if (ch == '"') inString = !inString;
+        else if (!inString && ch == ':') ++count;
+    }
+    return count;
+}
+
+QByteArray brokerRequest(const QJsonObject& params) {
+    const auto name = params.value("name");
+    const auto args = params.value("arguments").toObject();
+    QJsonObject request{{"v", 1}};
+    if (name == FindTool) {
+        const auto title = args.value("title").toString();
+        if (args.size() != 1 || title.isEmpty() || !title.isValidUtf16()) return {};
+        request.insert("op", "find");
+        request.insert("title", title);
+    } else if (name == ReadTool) {
+        const auto id = args.value("id").toString();
+        const auto uuid = QUuid(id);
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != id.toLower()) return {};
+        const auto field = args.value("field").toString();
+        if (std::none_of(ReadFields.begin(), ReadFields.end(), [&](const char* item) { return field == QLatin1StringView(item); })) return {};
+        if (field == "textLine") {
+            const int line = args.value("line").toInt();
+            if (args.size() != 3 || line < 1 || line > model::textfile::MaxLines) return {};
+            request.insert("line", line);
+        } else if (args.size() != 2) return {};
+        request.insert("op", "read");
+        request.insert("id", id);
+        request.insert("field", field);
+    } else return {};
+    const auto encoded = QJsonDocument(request).toJson(QJsonDocument::Compact);
+    return encoded.size() <= MaxRequest ? encoded : QByteArray{};
+}
+
+class McpServer {
+public:
+    explicit McpServer(QString suffix) : suffix_(std::move(suffix)) {
+        QObject::connect(&timer_, &QTimer::timeout, &timer_, [this] { tick(); });
+        timer_.start(10);
+    }
+
+private:
+    enum class Legacy { BeforeInitialize, BeforeInitialized, Ready };
+
+    void stop(int exitCode) {
+        timer_.stop();
+        call_.reset();
+        QCoreApplication::exit(exitCode);
+    }
+
+    bool write(QByteArrayView bytes) {
+        if (std::fwrite(bytes.data(), 1, static_cast<size_t>(bytes.size()), stdout) == static_cast<size_t>(bytes.size())) return true;
+        stop(1);
+        return false;
+    }
+
+    void json(QJsonObject object) { write(QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n'); }
+
+    void error(const QJsonValue& id, int code, const char* message, QJsonObject data = {}) {
+        QJsonObject body{{"code", code}, {"message", message}};
+        if (!data.isEmpty()) body.insert("data", data);
+        QJsonObject envelope{{"jsonrpc", "2.0"}, {"error", body}};
+        if (validId(id)) envelope.insert("id", id);
+        json(envelope);
+    }
+
+    void result(const QJsonValue& id, QJsonObject body, bool modern) {
+        if (modern) {
+            body.insert("resultType", "complete");
+            body.insert("_meta", QJsonObject{{ServerInfo, serverInfo()}});
+        }
+        json({{"jsonrpc", "2.0"}, {"id", id}, {"result", body}});
+    }
+
+    void toolResult(const QJsonValue& id, QByteArrayView response, bool modern) {
+        // Wrap the single broker reply without creating additional JSON DOM copies of the secret.
+        constexpr char Hex[] = "0123456789abcdef";
+        const auto identifier = id.toJson(QJsonValue::JsonFormat::Compact);
+        QByteArray encoded;
+        encoded.reserve(response.size() * 2 + identifier.size() + 256);
+        encoded += "{\"jsonrpc\":\"2.0\",\"id\":";
+        encoded += identifier;
+        encoded += ",\"result\":{";
+        if (modern) {
+            encoded += "\"resultType\":\"complete\",\"_meta\":";
+            encoded += QJsonDocument(QJsonObject{{ServerInfo, serverInfo()}}).toJson(QJsonDocument::Compact);
+            encoded += ',';
+        }
+        encoded += Exchange::success(response) ? "\"isError\":false," : "\"isError\":true,";
+        encoded += "\"content\":[{\"type\":\"text\",\"text\":\"";
+        for (const unsigned char ch : response.first(response.size() - 1)) {
+            if (ch < 32) {
+                encoded += "\\u00";
+                encoded += Hex[ch >> 4];
+                encoded += Hex[ch & 15];
+            } else {
+                if (ch == '"' || ch == '\\') encoded += '\\';
+                encoded += static_cast<char>(ch);
+            }
+        }
+        encoded += "\"}]}}\n";
+        write(encoded);
+        SecureZeroMemory(encoded.data(), static_cast<size_t>(encoded.size()));
+    }
+
+    void dispatch(QByteArrayView frame) {
+        QJsonParseError parseError{};
+        const auto parsed = QJsonValue::fromJson(frame, &parseError);
+        if (parseError.error != QJsonParseError::NoError) { error({}, -32700, "Parse error"); return; }
+        const auto request = parsed.toObject();
+        const auto id = request.value("id");
+        const auto method = request.value("method").toString();
+        if (!parsed.isObject() || jsonMembers(parsed) != jsonSeparators(frame) || request.value("jsonrpc") != "2.0" ||
+            method.isEmpty() || (!id.isUndefined() && !validId(id))) {
+            error({}, -32600, "Invalid request");
+            return;
+        }
+        const auto paramsValue = request.value("params");
+        if (!paramsValue.isUndefined() && !paramsValue.isObject()) {
+            if (!id.isUndefined()) error(id, -32602, "Invalid params");
+            return;
+        }
+        const auto params = paramsValue.toObject();
+        if (id.isUndefined()) {
+            if (method == "notifications/initialized" && legacy_ == Legacy::BeforeInitialized) legacy_ = Legacy::Ready;
+            if (method == "notifications/cancelled" && call_ && params.value("requestId") == callId_) call_.reset();
+            return;
+        }
+        if (call_ && id == callId_) { error({}, -32600, "Request ID already active"); return; }
+
+        if (method == "initialize") {
+            const auto info = params.value("clientInfo").toObject();
+            if (legacy_ != Legacy::BeforeInitialize || !params.value("protocolVersion").isString() ||
+                !params.value("capabilities").isObject() || !info.value("name").isString() || !info.value("version").isString()) {
+                error(id, -32602, "Invalid initialize params");
+                return;
+            }
+            legacy_ = Legacy::BeforeInitialized;
+            result(id, {{"protocolVersion", LegacyVersion}, {"capabilities", capabilities()}, {"serverInfo", serverInfo()},
+                {"instructions", Instructions}}, false);
+            return;
+        }
+
+        const auto metadata = params.value("_meta").toObject();
+        const auto version = metadata.value(ProtocolVersion);
+        const bool modern = method == "server/discover" || !version.isUndefined() || legacy_ != Legacy::Ready;
+        if (method == "ping" && version.isUndefined() && legacy_ != Legacy::BeforeInitialize) { result(id, {}, false); return; }
+        if (modern) {
+            if (!version.isString() || !metadata.value(ClientCapabilities).isObject()) {
+                error(id, -32602, "Missing MCP protocol metadata");
+                return;
+            }
+            if (version != ModernVersion) {
+                error(id, -32022, "Unsupported protocol version", {{"requested", version}, {"supported", supportedVersions()}});
+                return;
+            }
+        }
+        if (method == "server/discover") {
+            result(id, {{"supportedVersions", supportedVersions()}, {"capabilities", capabilities()},
+                {"instructions", Instructions}, {"ttlMs", 300000}, {"cacheScope", "public"}}, true);
+        } else if (method == "tools/list") {
+            if (params.contains("cursor")) { error(id, -32602, "Invalid cursor"); return; }
+            QJsonObject body{{"tools", toolList()}};
+            if (modern) {
+                body.insert("ttlMs", 300000);
+                body.insert("cacheScope", "public");
+            }
+            result(id, body, modern);
+        } else if (method == "tools/call") {
+            auto encoded = brokerRequest(params);
+            if (encoded.isEmpty()) { error(id, -32602, "Unknown tool or invalid arguments"); return; }
+            if (call_) { toolResult(id, errorReply("busy"), modern); return; }
+            callId_ = id;
+            callModern_ = modern;
+            call_ = std::make_unique<Exchange>(std::move(encoded), suffix_);
+        } else error(id, -32601, "Method not found");
+    }
+
+    void tick() {
+        DWORD available = 0;
+        const auto type = GetFileType(inputHandle_);
+        if (type == FILE_TYPE_PIPE) {
+            if (!PeekNamedPipe(inputHandle_, nullptr, 0, nullptr, &available, nullptr)) { stop(0); return; }
+        } else if (type == FILE_TYPE_DISK) available = 4096;
+        else { stop(1); return; }
+
+        if (available) {
+            char chunk[4096];
+            DWORD received = 0;
+            if (!ReadFile(inputHandle_, chunk, std::min<DWORD>(available, sizeof(chunk)), &received, nullptr) || !received) {
+                stop(0);
+                return;
+            }
+            input_.append(chunk, received);
+            // Take complete input messages, in order, before publishing a pending response.
+            // In particular, an observed cancellation closes the local pipe first.
+            for (auto newline = input_.indexOf('\n'); newline >= 0 && newline <= MaxFrame; newline = input_.indexOf('\n')) {
+                dispatch(QByteArrayView(input_.constData(), newline));
+                if (!timer_.isActive()) return;
+                input_.remove(0, newline + 1);
+            }
+            if (input_.size() > MaxFrame) {
+                error({}, -32700, "MCP frame too large");
+                stop(1);
+                return;
+            }
+        }
+        if (!call_ || !call_->advance()) return;
+        const auto completed = std::move(call_);
+        const auto response = completed->reply();
+        if (response.isEmpty() || !response.isValidUtf8()) toolResult(callId_, errorReply("unavailable"), callModern_);
+        else toolResult(callId_, response, callModern_);
+    }
+
+    QString suffix_;
+    HANDLE inputHandle_ = GetStdHandle(STD_INPUT_HANDLE);
+    QTimer timer_;
+    QByteArray input_;
+    std::unique_ptr<Exchange> call_;
+    QJsonValue callId_;
+    bool callModern_ = false;
+    Legacy legacy_ = Legacy::BeforeInitialize;
+};
+}
+
+int runMcp(const QString& endpointSuffix) {
+    McpServer server(endpointSuffix);
+    return QCoreApplication::exec();
+}
+}

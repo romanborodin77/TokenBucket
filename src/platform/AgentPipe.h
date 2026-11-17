@@ -1,6 +1,7 @@
 #pragma once
 #include <QByteArray>
 #include <QString>
+#include <array>
 #include <memory>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -13,6 +14,9 @@ inline constexpr DWORD MaxReply = 1400000;
 inline constexpr int RequestTimeoutMs = 3000;
 inline constexpr int ApprovalTimeoutMs = 60000;
 inline constexpr int ReplyTimeoutMs = 3000;
+inline constexpr std::array ReadFields{
+    "token", "login", "password", "sshPrivate", "sshPublic", "sshPassphrase", "plainValue", "textLine"
+};
 
 struct CloseHandleOnExit {
     void operator()(void* handle) const { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }

@@ -11,23 +11,17 @@
 #include <QScopeGuard>
 #include <QTimer>
 #include <QWinEventNotifier>
-#include <algorithm>
 #include <array>
 
 namespace tb::agent {
 namespace {
 enum class Field { Token, Login, Password, Private, Public, Passphrase, Value, TextLine };
-struct FieldInfo { const char* name; model::EntryType type; };
-constexpr FieldInfo Fields[] = {
-    {"token", model::EntryType::ApiToken},
-    {"login", model::EntryType::Credentials},
-    {"password", model::EntryType::Credentials},
-    {"sshPrivate", model::EntryType::SshKey},
-    {"sshPublic", model::EntryType::SshKey},
-    {"sshPassphrase", model::EntryType::SshKey},
-    {"plainValue", model::EntryType::PlainValue},
-    {"textLine", model::EntryType::TextFile},
+constexpr model::EntryType FieldTypes[] = {
+    model::EntryType::ApiToken, model::EntryType::Credentials, model::EntryType::Credentials,
+    model::EntryType::SshKey, model::EntryType::SshKey, model::EntryType::SshKey,
+    model::EntryType::PlainValue, model::EntryType::TextFile,
 };
+static_assert(std::size(FieldTypes) == ReadFields.size());
 const char* typeName(model::EntryType type) {
     switch (type) {
     case model::EntryType::ApiToken: return "apiToken";
@@ -45,7 +39,8 @@ struct Request {
     Field field = Field::Token;
     int line = -1;
     bool find() const { return id.isNull(); }
-    const FieldInfo& fieldInfo() const { return Fields[static_cast<size_t>(field)]; }
+    const char* fieldName() const { return ReadFields[static_cast<size_t>(field)]; }
+    model::EntryType fieldType() const { return FieldTypes[static_cast<size_t>(field)]; }
 };
 
 std::optional<Request> parseRequest(QByteArrayView bytes) {
@@ -75,8 +70,8 @@ std::optional<Request> parseRequest(QByteArrayView bytes) {
         request.id = model::Id(id);
         if (request.id.isNull() || request.id.toString(QUuid::WithoutBraces) != id.toLower()) return std::nullopt;
         const auto field = object.value("field");
-        for (size_t i = 0; i < std::size(Fields); ++i) {
-            if (field != QJsonValue(Fields[i].name)) continue;
+        for (size_t i = 0; i < ReadFields.size(); ++i) {
+            if (field != QJsonValue(ReadFields[i])) continue;
             request.field = static_cast<Field>(i);
             if (request.field != Field::TextLine && object.size() == 4) return request;
             if (request.field == Field::TextLine && object.size() == 5) {
@@ -293,7 +288,7 @@ private:
                 .arg(displayTitle(request->title));
         } else {
             description = QStringLiteral("Передать поле %1 из записи %2?\nID записи: %3\n\nЗначение покинет хранилище. Программа или ИИ-агент могут сохранить его или отправить дальше.")
-                .arg(QString::fromLatin1(request->fieldInfo().name), before ? displayTitle(before->title) : QStringLiteral("(недоступна)"),
+                .arg(QString::fromLatin1(request->fieldName()), before ? displayTitle(before->title) : QStringLiteral("(недоступна)"),
                     request->id.toString(QUuid::WithoutBraces));
             if (request->field == Field::TextLine) description += QStringLiteral("\nНомер строки: %1").arg(request->line + 1);
         }
@@ -308,9 +303,10 @@ private:
         dialog.setWindowModality(Qt::ApplicationModal);
         dialog.setWindowFlag(Qt::WindowStaysOnTopHint);
         dialog_ = &dialog;
+        bool released = false;
         const auto finishDialog = qScopeGuard([&] {
             dialog_ = nullptr;
-            cooldown_ = QDeadlineTimer(750);
+            if (!released) cooldown_ = QDeadlineTimer(750);
         });
         const bool approved = consent_ ? consent_(&dialog) : dialog.exec() == QMessageBox::Yes;
         if (!approved) return fail("denied");
@@ -320,12 +316,14 @@ private:
         if (request->find()) {
             const QJsonObject match{{"id", before->id.toString(QUuid::WithoutBraces)},
                 {"title", before->title}, {"type", QString::fromLatin1(typeName(before->type))}};
+            released = true;
             return SecureBytes(QJsonDocument(QJsonObject{{"ok", true}, {"entry", match}}).toJson(QJsonDocument::Compact) + '\n');
         }
-        if (request->fieldInfo().type != before->type || (request->field == Field::TextLine &&
+        if (request->fieldType() != before->type || (request->field == Field::TextLine &&
             !model::textfile::isVisible(before->textFile, request->line))) return fail("unavailable_field");
         if (!ui::authorizeEntry(app_, request->id, &dialog, true)) return fail("denied");
         if (!consistent()) return fail("stale");
+        released = true;
         return readReply(*request, *app_.model()->entry(request->id));
     }
 
