@@ -74,6 +74,14 @@ class TestStorageUi : public QObject {
         return QApplication::clipboard()->text();
 #endif
     }
+    static QString publishedClipboardText() {
+        QString snapshot;
+        QTest::qWaitFor([&] {
+            snapshot=clipboardText();
+            return snapshot!=QStringLiteral("<unavailable>");
+        },5000);
+        return snapshot;
+    }
     static void answer(bool yes) {
         QTimer::singleShot(0,[yes] {
             auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); QVERIFY(box);
@@ -573,17 +581,21 @@ private slots:
         for(auto role:{Qt::DisplayRole,Qt::ToolTipRole,Qt::AccessibleTextRole,Qt::UserRole,Qt::EditRole})
             QVERIFY(!table->model()->index(1,1).data(role).toString().contains("synthetic-password"));
         table->setCurrentIndex(table->model()->index(0,1)); table->setFocus(); QTest::keySequence(table,QKeySequence::Copy);
-        QCOMPARE(QApplication::clipboard()->text(),QStringLiteral("public value")); QVERIFY(clip.snapshot().owned);
+        // ClipboardGuard publishes CF_UNICODETEXT on Windows. Compare that format
+        // directly so Qt's CF_TEXT fallback cannot include the transport terminator.
+        QCOMPARE(publishedClipboardText(),QStringLiteral("public value")); QVERIFY(clip.snapshot().owned);
         table->setCurrentIndex(table->model()->index(1,1));
         QTimer::singleShot(0,[] {auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(auth); auth->reject();});
-        dialog.findChild<QPushButton*>("copyTextLine")->click(); QCOMPARE(QApplication::clipboard()->text(),QStringLiteral("public value"));
+        dialog.findChild<QPushButton*>("copyTextLine")->click();
+        QCOMPARE(publishedClipboardText(),QStringLiteral("public value"));
         const auto verify=[] {QTimer::singleShot(0,[] {auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget()); QVERIFY(auth); auth->setTextValue("valid-password"); auth->accept();});};
         verify(); dialog.findChild<QPushButton*>("revealTextLine")->click(); QCOMPARE(table->model()->index(1,1).data().toString(),QString("synthetic-password"));
         auto* timer=dialog.findChild<QTimer*>("textLineHideTimer"); QVERIFY(timer->isActive()); QCOMPARE(timer->interval(),5000);
         QMetaObject::invokeMethod(timer,"timeout"); QVERIFY(!table->model()->index(1,1).data().toString().contains("synthetic-password"));
         verify(); dialog.findChild<QPushButton*>("revealTextLine")->click(); table->setCurrentIndex(table->model()->index(0,1));
         QVERIFY(!table->model()->index(1,1).data().toString().contains("synthetic-password"));
-        table->setCurrentIndex(table->model()->index(1,1)); verify(); dialog.findChild<QPushButton*>("copyTextLine")->click(); QCOMPARE(QApplication::clipboard()->text(),QString("synthetic-password"));
+        table->setCurrentIndex(table->model()->index(1,1)); verify(); dialog.findChild<QPushButton*>("copyTextLine")->click();
+        QCOMPARE(publishedClipboardText(),QString("synthetic-password"));
         app.lock(); QCOMPARE(table->model()->rowCount(),0); QVERIFY(!clip.snapshot().owned); QVERIFY(!dialog.isVisible());
     }
     void documentRevealRejectsChangedRecord_data() {
@@ -610,13 +622,15 @@ private slots:
         QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));
         const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty()); const auto e=document(group);
         QVERIFY(app.model()->setEntry(e).isEmpty()); ClipboardGuard clip; ui::TextFileDialog dialog(app,e.id,clip);
-        QVERIFY(clip.copySecret("synthetic-marker",&error)); answer(false); dialog.findChild<QPushButton*>("copyTextFile")->click(); QCOMPARE(QApplication::clipboard()->text(),QString("synthetic-marker"));
+        QVERIFY(clip.copySecret("synthetic-marker",&error)); answer(false); dialog.findChild<QPushButton*>("copyTextFile")->click();
+        QCOMPARE(publishedClipboardText(),QString("synthetic-marker"));
         QTimer driver; driver.setInterval(10); connect(&driver,&QTimer::timeout,&dialog,[] {
             if(auto* box=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->button(QMessageBox::Yes)->click();
             else if(auto* auth=qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {auth->setTextValue("valid-password"); auth->accept();}
         }); driver.start(); dialog.findChild<QPushButton*>("copyTextFile")->click(); driver.stop();
-        QCOMPARE(clipboardText().toUtf8(),e.textFile.bytes);
-        QApplication::clipboard()->setText("synthetic-foreign"); clip.clearIfOurs(); QCOMPARE(QApplication::clipboard()->text(),QString("synthetic-foreign"));
+        QCOMPARE(publishedClipboardText().toUtf8(),e.textFile.bytes);
+        QApplication::clipboard()->setText("synthetic-foreign"); clip.clearIfOurs();
+        QCOMPARE(publishedClipboardText(),QString("synthetic-foreign"));
         QApplication::clipboard()->clear();
     }
     void exportDocumentKeepsBytes_data() {
