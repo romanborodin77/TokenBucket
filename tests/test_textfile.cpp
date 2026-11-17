@@ -127,7 +127,12 @@ private slots:
         QCOMPARE(decoded.fromCbor(QCborValue(badLinks).toCbor(),&error),VaultModel::ParseStatus::Bad);
         QCOMPARE(decoded.toCbor(),bytes);
         auto root=QCborValue::fromCbor(bytes).toMap(); QCborArray oldEntries;
-        for(auto item:root.value(u"entries"_s).toArray()) if(item.toMap().value(u"type"_s).toInteger()==0) oldEntries.append(item);
+        for(const auto& item:root.value(u"entries"_s).toArray()) {
+            auto entry=item.toMap();
+            if(entry.value(u"type"_s).toInteger()!=0) continue;
+            entry.remove(u"sshTargets"_s); // полями v6 нельзя помечать снимок v1–v3
+            oldEntries.append(entry);
+        }
         root[u"entries"_s]=oldEntries; root.remove(u"views"_s);
         for(int version=1;version<=3;++version) {
             root[u"v"_s]=version; QCOMPARE(decoded.fromCbor(QCborValue(root).toCbor(),&error),VaultModel::ParseStatus::Ok);
