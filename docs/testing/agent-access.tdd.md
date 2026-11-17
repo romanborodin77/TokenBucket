@@ -20,3 +20,7 @@
 В RED (`d8502b9`) сборка `cmake --build --preset default --target test_agent_win --parallel 12` завершилась успешно. CTest вернул код `1`, а QtTest сообщил `4 passed, 4 failed`. После изменений та же сборка и CTest завершились успешно. QtTest сообщил `8 passed, 0 failed`, CTest прошёл за 15,04 с. Вывод сохранён локально в `build/evidence/test_agent_win-red.txt` и `build/evidence/test_agent_win-green.txt`.
 
 После независимого ревью четыре новых теста были собраны и запущены через `build/Release/test_agent_win.exe` с именами методов из таблицы. Второй RED (`eecf835`) дал `2 passed, 4 failed`. После исправлений полный `test_agent_win` дал `12 passed, 0 failed` за 15,61 с. Вывод сохранён локально в `build/evidence/test_agent_win-hardening-red.txt` и `build/evidence/test_agent_win-hardening-green.txt`.
+
+## Привязки ключей SSH к машинам
+
+Новые тесты проверяют один ключ на нескольких машинах, несколько ключей на машине, фильтрацию пользователя и порта в одной привязке, ограничения размера, проверку согласия, безопасный переход с v5 и передачу результата в MCP. Сборка `cmake --build --preset default --target test_model --parallel 12` дала ожидаемый compile-time RED. MSVC выдал `C2039` для отсутствующих `Entry::sshTargets` и `VaultModel::sshMatches`. Вывод сохранён локально в `build/evidence/ssh-targets-red.txt`.

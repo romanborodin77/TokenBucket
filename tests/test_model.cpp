@@ -89,6 +89,102 @@ private slots:
         QCOMPARE(m2.entry(e.id)->reverify, true);
         QVERIFY(m2.search("🚀").contains(e.id));
     }
+    void sshTargetsLookupAndSecureRoundtrip() {
+        Entry first;
+        first.id = QUuid::createUuid(); first.groupId = g1; first.type = EntryType::SshKey;
+        first.title = "A shared key"; first.sshPrivate = QByteArray("x\0\r\ny", 5);
+        first.sshTargets = {{"Primary lab", "LAB.EXAMPLE", "Build", 2222},
+            {"Main lab", "lab.example", "ops", 22}, {"Backup", "2001:DB8::1", {}, 22}};
+        Entry second = first;
+        second.id = QUuid::createUuid(); second.title = "B fallback";
+        second.sshTargets = {{"Fallback", "lab.example", "ops", 22}};
+        QVERIFY(m.setEntry(first).isEmpty()); QVERIFY(m.setEntry(second).isEmpty());
+        QCOMPARE(m.entry(first.id)->sshTargets.at(0).host, QStringLiteral("lab.example"));
+        QCOMPARE(m.entry(first.id)->sshTargets.at(2).host, QStringLiteral("2001:db8::1"));
+        QVERIFY(m.sshMatches("LAB.EXAMPLE", "Build", 22).matches.isEmpty());
+        QVERIFY(m.sshMatches("LAB.EXAMPLE", "build", 2222).matches.isEmpty());
+        QVERIFY(m.sshMatches("lab", {}, 0).matches.isEmpty());
+        const auto alias = m.sshMatches("primary LAB", "Build", 2222);
+        QCOMPARE(alias.matches.size(), 1);
+        QCOMPARE(alias.matches.first().id, first.id);
+        QCOMPARE(alias.matches.first().targets.size(), 1);
+        QCOMPARE(m.sshMatches("2001:0DB8:0:0::1", {}, 22).matches.first().id, first.id);
+        const auto shared = m.sshMatches("lab.example", {}, 0);
+        QCOMPARE(shared.matches.size(), 2);
+        QCOMPARE(shared.matches.at(0).id, first.id);
+        QCOMPARE(shared.matches.at(0).targets.size(), 2);
+        QCOMPARE(shared.matches.at(1).id, second.id);
+        QVERIFY(m.search("primary lab").contains(first.id));
+
+        const auto reference = m.toCbor();
+        const auto secure = m.toCborSecure();
+        QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(secure.data()), qsizetype(secure.size())), reference);
+        VaultModel loaded;
+        QCOMPARE(loaded.fromCbor(reference, nullptr), VaultModel::ParseStatus::Ok);
+        QCOMPARE(loaded.decodedVersion(), 6);
+        QVERIFY(*loaded.entry(first.id) == *m.entry(first.id));
+        QVERIFY(loaded.sshMatches("lab.example", {}, 0) == shared);
+    }
+    void sshTargetsValidateAndRejectMalformedCbor() {
+        Entry entry;
+        entry.id = QUuid::createUuid(); entry.groupId = g1; entry.type = EntryType::SshKey;
+        entry.title = "synthetic SSH key"; entry.sshPrivate = "synthetic private data";
+        const SshTarget valid{"Lab", "lab.example", "ops", 22};
+        entry.sshTargets = {valid};
+        QVERIFY(m.setEntry(entry).isEmpty());
+        for (const auto& target : QList<SshTarget>{{{}, "ssh://lab.example", {}, 22},
+                {{}, "lab.example:2222", {}, 22}, {{}, "a..example", {}, 22}, {{}, {}, {}, 22},
+                {QStringLiteral("unsafe\u202e"), "lab.example", {}, 22}, {{}, "lab.example", "bad user", 22},
+                {{}, "lab.example", {}, 0}, {{}, "lab.example", {}, 65536}}) {
+            auto candidate = entry;
+            candidate.sshTargets = {target};
+            QVERIFY(!m.setEntry(candidate).isEmpty());
+        }
+        auto duplicate = entry;
+        duplicate.sshTargets.append({"lab", "LAB.EXAMPLE", "ops", 22});
+        QVERIFY(!m.setEntry(duplicate).isEmpty());
+        auto excessive = entry;
+        for (int i = 0; i < 16; ++i) excessive.sshTargets.append({{}, QStringLiteral("node-%1.example").arg(i), {}, 22});
+        QVERIFY(!m.setEntry(excessive).isEmpty());
+        auto other = entry;
+        other.type = EntryType::ApiToken;
+        QVERIFY(!m.setEntry(other).isEmpty());
+        QVERIFY(*m.entry(entry.id) == entry);
+
+        const auto before = m.toCbor();
+        auto root = QCborValue::fromCbor(before).toMap();
+        auto entries = root.value(u"entries"_s).toArray();
+        auto item = entries.at(0).toMap();
+        auto targets = item.value(u"sshTargets"_s).toArray();
+        QCOMPARE(targets.size(), 1);
+        auto savedTarget = targets.at(0).toMap();
+        savedTarget[u"port"_s] = QStringLiteral("22");
+        targets[0] = savedTarget;
+        item[u"sshTargets"_s] = targets;
+        entries[0] = item;
+        root[u"entries"_s] = entries;
+        QCOMPARE(m.fromCbor(QCborValue(root).toCbor(), nullptr), VaultModel::ParseStatus::Bad);
+        QCOMPARE(m.toCbor(), before);
+        root[u"v"_s] = 5; // Real v5 records did not have a binding list.
+        QCOMPARE(m.fromCbor(QCborValue(root).toCbor(), nullptr), VaultModel::ParseStatus::Bad);
+        item.remove(u"sshTargets"_s);
+        entries[0] = item;
+        root[u"entries"_s] = entries;
+        QCOMPARE(m.fromCbor(QCborValue(root).toCbor(), nullptr), VaultModel::ParseStatus::Ok);
+        QVERIFY(m.entry(entry.id)->sshTargets.isEmpty());
+    }
+    void sshTargetLookupBoundsCandidates() {
+        Entry entry;
+        entry.groupId=g1; entry.type=EntryType::SshKey; entry.title="same machine";
+        entry.sshTargets={{{}, "lab.example", {}, 22}};
+        for (int i=0;i<17;++i) {
+            entry.id=QUuid::createUuid();
+            QVERIFY(m.setEntry(entry).isEmpty());
+        }
+        const auto result=m.sshMatches("lab.example", {}, 0);
+        QVERIFY(result.tooMany);
+        QVERIFY(result.matches.isEmpty());
+    }
     void cborRejectsGarbageAndOversize() {
         VaultModel m2; QString err;
         QVERIFY(m2.fromCbor(QByteArray("мусор"), &err) == VaultModel::ParseStatus::Bad);
@@ -216,7 +312,7 @@ private slots:
         model::VaultModel bad; err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("теги")));
-        root[u"v"_s] = 6; // будущая версия не поддержана
+        root[u"v"_s] = VaultModel::CurrentVersion + 1; // будущая версия не поддержана
         err.clear();
         QCOMPARE(bad.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
@@ -241,6 +337,7 @@ private slots:
         const auto full = QCborValue::fromCbor(fresh.toCbor()).toMap();
         QCborMap one = full.value(u"entries"_s).toArray().first().toMap();
         one.remove(u"exp"_s);
+        one.remove(u"sshTargets"_s);
         QCborMap root; root[u"v"_s] = 2;
         root[u"nodes"_s] = full.value(u"nodes"_s).toArray(); // узлы как в реальном снимке
         root[u"entries"_s] = QCborArray{one};
@@ -255,7 +352,7 @@ private slots:
         err.clear();
         QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("срок")));
-        root[u"v"_s] = 6;
+        root[u"v"_s] = VaultModel::CurrentVersion + 1;
         QCOMPARE(v2reader.fromCbor(QCborValue(root).toCbor(), &err), model::VaultModel::ParseStatus::Bad);
         QVERIFY(err.contains(QStringLiteral("Неподдерживаемая версия")));
     }
@@ -322,7 +419,7 @@ private slots:
         cbor::SecureBuffer produced = m.toCborSecure();
         QCOMPARE(QByteArray::fromRawData(reinterpret_cast<const char*>(produced.data()), qsizetype(produced.size())), m.toCbor());
         model::VaultModel r; QString err; QCOMPARE(r.fromCbor(m.toCbor(), &err), model::VaultModel::ParseStatus::Ok);
-        QCOMPARE(r.views(), (QList<model::SavedView>{v, all})); QCOMPARE(r.decodedVersion(), 5);
+        QCOMPARE(r.views(), (QList<model::SavedView>{v, all})); QCOMPARE(r.decodedVersion(), VaultModel::CurrentVersion);
         QVERIFY(!m.setViews({v, v}).isEmpty());
         model::SavedView twin = v; twin.name = QStringLiteral("истекают в ci"); QVERIFY(!m.setViews({v, twin}).isEmpty());
         model::SavedView bad = v; bad.name.clear(); QVERIFY(!m.setViews({bad}).isEmpty());
@@ -350,7 +447,8 @@ private slots:
         QCOMPARE(parse(wrongType, target), model::VaultModel::ParseStatus::Bad);
         auto dup = good; { auto a = dup[QStringLiteral("views")].toArray(); a.append(a.at(0)); dup[QStringLiteral("views")] = a; }
         QCOMPARE(parse(dup, target), model::VaultModel::ParseStatus::Bad);
-        auto v6 = good; v6[QStringLiteral("v")] = 6; QCOMPARE(parse(v6, target), model::VaultModel::ParseStatus::Bad);
+        auto future = good; future[QStringLiteral("v")] = VaultModel::CurrentVersion + 1;
+        QCOMPARE(parse(future, target), model::VaultModel::ParseStatus::Bad);
         QCOMPARE(target.views().size(), 1); // отказы не меняют прежнюю модель
     }
     void secureCborRoundtrip() {

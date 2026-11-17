@@ -25,6 +25,13 @@ QByteArray find(const QString& title) {
     return QJsonDocument(QJsonObject{{"v", 1}, {"op", "find"}, {"title", title}}).toJson(QJsonDocument::Compact);
 }
 
+QByteArray findSsh(const QString& machine, const QString& user = {}, int port = 0) {
+    QJsonObject request{{"v", 1}, {"op", "find_ssh"}, {"machine", machine}};
+    if (!user.isEmpty()) request.insert("user", user);
+    if (port) request.insert("port", port);
+    return QJsonDocument(request).toJson(QJsonDocument::Compact);
+}
+
 QByteArray read(const model::Id& id, const QString& field, int line = 0) {
     QJsonObject request{{"v", 1}, {"op", "read"}, {"id", id.toString(QUuid::WithoutBraces)}, {"field", field}};
     if (line) request.insert("line", line);
@@ -314,6 +321,56 @@ private slots:
         QCOMPARE(app.gate(), Application::Gate::NeedUnlock);
     }
 
+    void sshLookupShowsOnlyApprovedMatchingBindings() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Application app(directory.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault(Password, &error), qPrintable(error));
+        model::Entry key;
+        key.groupId = QUuid::createUuid(); key.id = QUuid::createUuid(); key.type = model::EntryType::SshKey;
+        key.title = "A shared SSH key"; key.sshPrivate = "synthetic private key bytes";
+        key.sshTargets = {{"Build", "node.example", "Build", 2222}, {"Ops", "node.example", "ops", 22},
+            {"Unrelated", "hidden.example", "root", 22}};
+        auto second = key;
+        second.id = QUuid::createUuid(); second.title = "B fallback SSH key";
+        second.sshTargets = {{"Fallback", "node.example", "ops", 22}};
+        QVERIFY(app.model()->addNode(key.groupId, {}, "synthetic machines").isEmpty());
+        QVERIFY(app.model()->setEntry(key).isEmpty());
+        QVERIFY(app.model()->setEntry(second).isEmpty());
+        int decisions = 0;
+        bool allow = false, edit = false;
+        QString editError;
+        agent::Access access(app, EndpointSuffix, [&](QWidget*) {
+            ++decisions;
+            if (edit) {
+                key.sshTargets[1].username = "other-ops";
+                editError = app.model()->setEntry(key);
+            }
+            return allow;
+        });
+        QVERIFY(access.start());
+        QCOMPARE(query(findSsh("node.example", "ops", 22)).error(), QStringLiteral("denied"));
+        QCOMPARE(decisions, 1);
+        QTest::qWait(780);
+        allow = true;
+        const auto found = query(findSsh("NODE.EXAMPLE", "ops", 22));
+        QCOMPARE(found.exitCode, 0);
+        const auto entries = found.json().value("entries").toArray();
+        QCOMPARE(entries.size(), 2);
+        const QJsonObject matching{{"alias", "Ops"}, {"host", "node.example"}, {"user", "ops"}, {"port", 22}};
+        QCOMPARE(entries.at(0).toObject(), (QJsonObject{{"id", key.id.toString(QUuid::WithoutBraces)}, {"title", key.title},
+            {"type", "sshKey"}, {"targets", QJsonArray{matching}}}));
+        QCOMPARE(entries.at(1).toObject().value("id").toString(), second.id.toString(QUuid::WithoutBraces));
+        QVERIFY(!found.raw.contains("hidden.example"));
+        QVERIFY(!found.raw.contains(key.sshPrivate));
+        QCOMPARE(query(findSsh("node.example", "Build", 22)).error(), QStringLiteral("not_found"));
+        QTest::qWait(780);
+        edit = true;
+        QCOMPARE(query(findSsh("node.example", "ops", 22)).error(), QStringLiteral("stale"));
+        QVERIFY(editError.isEmpty());
+    }
+
     void requiresHelloWhenVaultUsesHello() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -379,6 +436,7 @@ private slots:
         ssh.sshPrivate = QByteArray("private\r\n\0\xff", 11);
         ssh.sshPublic = "synthetic-public-key";
         ssh.sshPassphrase = "synthetic-ssh-passphrase";
+        ssh.sshTargets = {{"Deployment", "node.example", "deploy", 2222}, {"Backup", "other.example", "ops", 22}};
         QVERIFY(app.model()->addNode(ssh.groupId, {}, "synthetic MCP data").isEmpty());
         QVERIFY(app.model()->setEntry(ssh).isEmpty());
         QVERIFY2(app.save(&error), qPrintable(error));
@@ -405,9 +463,10 @@ private slots:
         QVERIFY(pong.value("result").isObject());
         sendMcp(child, "tools/list", {}, 2);
         const auto tools = receiveMcp(child).value("result").toObject().value("tools").toArray();
-        QCOMPARE(tools.size(), 2);
+        QCOMPARE(tools.size(), 3);
         QCOMPARE(tools.at(0).toObject().value("name").toString(), QStringLiteral("tokenbucket_find"));
         QCOMPARE(tools.at(1).toObject().value("name").toString(), QStringLiteral("tokenbucket_read"));
+        QCOMPARE(tools.at(2).toObject().value("name").toString(), QStringLiteral("tokenbucket_find_ssh"));
         QVERIFY(tools.at(1).toObject().value("inputSchema").toObject().value("properties").toObject().contains("field"));
         sendMcp(child, "vault/unlock", {}, 3);
         QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32601);
@@ -432,12 +491,19 @@ private slots:
         sendMcp(child, "tools/call", {{"name", "tokenbucket_find"}, {"arguments", QJsonObject{{"title", ssh.title}}}}, 5);
         const auto found = toolOutput(receiveMcp(child, approve)).value("entry").toObject();
         QCOMPARE(found.value("id").toString(), ssh.id.toString(QUuid::WithoutBraces));
+        sendMcp(child, "tools/call", {{"name", "tokenbucket_find_ssh"},
+            {"arguments", QJsonObject{{"machine", "deployment"}, {"user", "deploy"}, {"port", 2222}}}}, 8);
+        const auto candidates = toolOutput(receiveMcp(child, approve)).value("entries").toArray();
+        QCOMPARE(candidates.size(), 1);
+        const auto selected = candidates.at(0).toObject();
+        QCOMPARE(selected.value("id"), found.value("id"));
+        QCOMPARE(selected.value("targets").toArray().size(), 1);
         const QJsonObject readArgs{{"name", "tokenbucket_read"},
-            {"arguments", QJsonObject{{"id", found.value("id")}, {"field", "sshPrivate"}}}};
+            {"arguments", QJsonObject{{"id", selected.value("id")}, {"field", "sshPrivate"}}}};
         sendMcp(child, "tools/call", readArgs, 6);
         const auto result = receiveMcp(child, approve);
         QCOMPARE(result.value("id").toInt(), 6);
-        QCOMPARE(approvals, 2);
+        QCOMPARE(approvals, 3);
         QCOMPARE(verifications, 1);
         QCOMPARE(toolOutput(result), (QJsonObject{{"ok", true}, {"encoding", "base64"},
             {"value", QString::fromLatin1(ssh.sshPrivate.toBase64())}}));
@@ -479,7 +545,7 @@ private slots:
         QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32602);
         sendMcp(child, "tools/list", params, 3);
         const auto catalog = receiveMcp(child).value("result").toObject();
-        QCOMPARE(catalog.value("tools").toArray().size(), 2);
+        QCOMPARE(catalog.value("tools").toArray().size(), 3);
         QVERIFY(catalog.value("ttlMs").isDouble());
         QCOMPARE(catalog.value("cacheScope").toString(), QStringLiteral("public"));
         auto unsupported = meta;

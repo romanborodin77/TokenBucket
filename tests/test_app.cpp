@@ -73,7 +73,64 @@ private slots:
         Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),4);
         QVERIFY(app.schemaUpgradeRequired()); QVERIFY(!app.save(&error)); QCOMPARE(readFile(path),bytes);
         QVERIFY(app.approveSchemaUpgrade(&error)); QVERIFY(app.save(&error)); QCOMPARE(readFile(app.upgradeSafetyPath()),bytes);
-        app.lock(); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),5); QVERIFY(!app.schemaUpgradeRequired());
+        app.lock(); QVERIFY(app.unlock("valid-password",&error)); QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion); QVERIFY(!app.schemaUpgradeRequired());
+    }
+    void v5SshVaultUpgradePreservesEncryptedOriginalAndBindings() {
+        QTemporaryDir directory;
+        QVERIFY(store::ensurePrivateDir(directory.path()));
+        crypto::init();
+        model::VaultModel source;
+        model::Entry key;
+        key.groupId=QUuid::createUuid(); key.id=QUuid::createUuid(); key.type=model::EntryType::SshKey;
+        key.title="synthetic shared key"; key.sshPrivate=QByteArray("private\0\r\n", 10);
+        key.sshPublic="synthetic public key"; key.sshPassphrase="synthetic passphrase";
+        QVERIFY(source.addNode(key.groupId, {}, "machines").isEmpty());
+        QVERIFY(source.setEntry(key).isEmpty());
+        model::SavedView view; view.name="saved SSH view"; view.type=2;
+        QVERIFY(source.setViews({view}).isEmpty());
+        auto root=QCborValue::fromCbor(source.toCbor()).toMap(); root[QStringLiteral("v")]=5;
+        auto entries=root.value(QStringLiteral("entries")).toArray(); auto entry=entries.at(0).toMap();
+        entry.remove(QStringLiteral("sshTargets")); entries[0]=entry; root[QStringLiteral("entries")]=entries;
+        const auto oldFile=container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr);
+        const auto file=directory.filePath("vault.tb");
+        QVERIFY(store::realFileOps().writeAll(file,oldFile));
+        FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(directory.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(directory.path(),nullptr,ops);
+#endif
+        QString error;
+        QVERIFY2(app.unlock("valid-password",&error),qPrintable(error));
+        QCOMPARE(app.model()->decodedVersion(),5);
+        QVERIFY(app.model()->entry(key.id)->sshTargets.isEmpty());
+        QVERIFY(app.schemaUpgradeRequired());
+        key.sshTargets={{"Build lab","build.example","build",2222},{"Recovery","192.0.2.18","ops",22}};
+        QVERIFY(app.model()->setEntry(key).isEmpty());
+        QVERIFY(!app.save(&error));
+        QCOMPARE(readFile(file),oldFile);
+        QVERIFY(app.approveSchemaUpgrade(&error));
+        ops.failWrite=true;
+        QVERIFY(!app.save(&error));
+        QCOMPARE(readFile(file),oldFile);
+        ops.failWrite=false;
+        QVERIFY2(app.save(&error),qPrintable(error));
+        QCOMPARE(readFile(app.upgradeSafetyPath()),oldFile);
+        app.lock();
+        QVERIFY2(app.unlock("valid-password",&error),qPrintable(error));
+        QCOMPARE(app.model()->decodedVersion(),6);
+        QCOMPARE(app.model()->entry(key.id)->sshPrivate,key.sshPrivate);
+        QCOMPARE(app.model()->entry(key.id)->sshPublic,key.sshPublic);
+        QCOMPARE(app.model()->entry(key.id)->sshPassphrase,key.sshPassphrase);
+        QVERIFY(app.model()->entry(key.id)->sshTargets==key.sshTargets);
+        QVERIFY(app.model()->views()==QList<model::SavedView>{view});
+        const auto exported=app.exportContainer("export-password",&error);
+        QVERIFY2(!exported.isEmpty(),qPrintable(error));
+        QTemporaryDir destination;
+        Application restored(destination.path());
+        QVERIFY2(restored.importContainer(exported,"export-password","new-local-password",&error),qPrintable(error));
+        QVERIFY(*restored.model()->entry(key.id)==*app.model()->entry(key.id));
+        QVERIFY(restored.model()->views()==app.model()->views());
     }
     void legacySaveRequiresExplicitConsent() {
         QTemporaryDir dir; QVERIFY(store::ensurePrivateDir(dir.path())); const auto bytes=legacyV3(); QVERIFY(!bytes.isEmpty());
