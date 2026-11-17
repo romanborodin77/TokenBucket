@@ -9,6 +9,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QTimer>
@@ -87,6 +88,11 @@ QJsonObject receiveMcp(QProcess& child, const std::function<void()>& drive = {})
 QJsonObject toolOutput(const QJsonObject& response) {
     const auto content = response.value("result").toObject().value("content").toArray();
     return QJsonDocument::fromJson(content.at(0).toObject().value("text").toString().toUtf8()).object();
+}
+
+QJsonObject modernMcpMetadata() {
+    return {{"io.modelcontextprotocol/protocolVersion", "2026-07-28"},
+        {"io.modelcontextprotocol/clientCapabilities", QJsonObject{}}};
 }
 }
 
@@ -460,8 +466,7 @@ private slots:
         child.write("{not-json\n");
         const auto invalid = receiveMcp(child);
         QCOMPARE(invalid.value("error").toObject().value("code").toInt(), -32700);
-        const QJsonObject meta{{"io.modelcontextprotocol/protocolVersion", "2026-07-28"},
-            {"io.modelcontextprotocol/clientCapabilities", QJsonObject{}}};
+        const auto meta = modernMcpMetadata();
         const QJsonObject params{{"_meta", meta}};
         sendMcp(child, "server/discover", params, 1);
         const auto discovery = receiveMcp(child).value("result").toObject();
@@ -516,6 +521,116 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!QApplication::activeModalWidget(), 1500);
         QVERIFY(child.readAllStandardOutput().isEmpty());
         QVERIFY(child.readAllStandardError().isEmpty());
+    }
+
+    void mcpProcessesQueuedCancellationBeforeResult() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Application app(directory.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault(Password, &error), qPrintable(error));
+        model::Entry token;
+        token.groupId = QUuid::createUuid();
+        token.id = QUuid::createUuid();
+        token.title = "synthetic cancellable metadata";
+        QVERIFY(app.model()->addNode(token.groupId, {}, "synthetic MCP data").isEmpty());
+        QVERIFY(app.model()->setEntry(token).isEmpty());
+        agent::Access access(app, EndpointSuffix);
+        QVERIFY(access.start());
+
+        QProcess child;
+        child.start(helperPath(), {"--mcp"});
+        QVERIFY(child.waitForStarted(5000));
+        const auto meta = modernMcpMetadata();
+        sendMcp(child, "tools/call", {{"_meta", meta}, {"name", "tokenbucket_find"},
+            {"arguments", QJsonObject{{"title", token.title}}}}, 1);
+        bool sent = false;
+        const auto response = receiveMcp(child, [&] {
+            if (sent) return;
+            if (auto* prompt = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                sent = true;
+                sendMcp(child, "notifications/unknown", {{"padding", QString(60 * 1024, 'x')}});
+                sendMcp(child, "notifications/cancelled", {{"requestId", 1}});
+                sendMcp(child, "tools/list", {{"_meta", meta}}, 2);
+                QTimer::singleShot(30, prompt, [prompt] { prompt->button(QMessageBox::Yes)->click(); });
+            }
+        });
+        QVERIFY(sent);
+        QCOMPARE(response.value("id").toInt(), 2);
+        child.closeWriteChannel();
+        QTRY_COMPARE_WITH_TIMEOUT(child.state(), QProcess::NotRunning, 3000);
+        QVERIFY(child.readAllStandardOutput().isEmpty());
+    }
+
+    void mcpEofExitsWithFullOutputPipe() {
+        SECURITY_ATTRIBUTES inheritable{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        HANDLE rawInput = nullptr, rawWriter = nullptr, rawReader = nullptr, rawOutput = nullptr;
+        QVERIFY(CreatePipe(&rawInput, &rawWriter, &inheritable, 4096));
+        agent::Handle input(rawInput), writer(rawWriter);
+        QVERIFY(CreatePipe(&rawReader, &rawOutput, &inheritable, 4096));
+        agent::Handle reader(rawReader), output(rawOutput);
+        QVERIFY(SetHandleInformation(writer.get(), HANDLE_FLAG_INHERIT, 0));
+        QVERIFY(SetHandleInformation(reader.get(), HANDLE_FLAG_INHERIT, 0));
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = input.get();
+        startup.hStdOutput = output.get();
+        startup.hStdError = output.get();
+        PROCESS_INFORMATION process{};
+        const auto program = helperPath().toStdWString();
+        auto command = (QStringLiteral("\"") + helperPath() + QStringLiteral("\" --mcp")).toStdWString();
+        QVERIFY(CreateProcessW(program.c_str(), command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+            nullptr, nullptr, &startup, &process));
+        agent::Handle child(process.hProcess), thread(process.hThread);
+        const auto cleanup = qScopeGuard([&] {
+            if (WaitForSingleObject(child.get(), 0) == WAIT_TIMEOUT) TerminateProcess(child.get(), 1);
+            WaitForSingleObject(child.get(), 3000);
+        });
+        input.reset();
+        output.reset();
+
+        QByteArray requests;
+        for (int id = 1; id <= 16; ++id) {
+            const QJsonObject list{{"jsonrpc", "2.0"}, {"method", "tools/list"}, {"id", id},
+                {"params", QJsonObject{{"_meta", modernMcpMetadata()}}}};
+            requests += QJsonDocument(list).toJson(QJsonDocument::Compact) + '\n';
+        }
+        QVERIFY(requests.size() <= 4096);
+        DWORD written = 0;
+        QVERIFY(WriteFile(writer.get(), requests.constData(), static_cast<DWORD>(requests.size()), &written, nullptr));
+        QCOMPARE(written, static_cast<DWORD>(requests.size()));
+        QTest::qWait(250); // The reader deliberately never consumes stdout.
+        QCOMPARE(WaitForSingleObject(child.get(), 0), DWORD(WAIT_TIMEOUT));
+        writer.reset();
+        QCOMPARE(WaitForSingleObject(child.get(), 1500), DWORD(WAIT_OBJECT_0));
+    }
+
+    void mcpModernTrafficRejectsLegacyInitialize() {
+        QProcess child;
+        child.start(helperPath(), {"--mcp"});
+        QVERIFY(child.waitForStarted(5000));
+        sendMcp(child, "initialize", {{"_meta", modernMcpMetadata()}, {"protocolVersion", "2025-11-25"},
+            {"capabilities", QJsonObject{}}, {"clientInfo", QJsonObject{{"name", "synthetic"}, {"version", "1"}}}}, 1);
+        QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32601);
+        child.closeWriteChannel();
+        QTRY_COMPARE_WITH_TIMEOUT(child.state(), QProcess::NotRunning, 3000);
+    }
+
+    void mcpMalformedRequestKeepsUnambiguousId() {
+        QProcess child;
+        child.start(helperPath(), {"--mcp"});
+        QVERIFY(child.waitForStarted(5000));
+        child.write("{\"jsonrpc\":\"2.0\",\"id\":\"synthetic-request\",\"method\":17}\n");
+        const auto invalid = receiveMcp(child);
+        QCOMPARE(invalid.value("error").toObject().value("code").toInt(), -32600);
+        QCOMPARE(invalid.value("id").toString(), QStringLiteral("synthetic-request"));
+        child.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"id\":2,\"method\":\"tools/list\"}\n");
+        const auto duplicate = receiveMcp(child);
+        QCOMPARE(duplicate.value("error").toObject().value("code").toInt(), -32600);
+        QVERIFY(!duplicate.contains("id"));
+        child.closeWriteChannel();
+        QTRY_COMPARE_WITH_TIMEOUT(child.state(), QProcess::NotRunning, 3000);
     }
 };
 
