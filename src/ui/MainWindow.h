@@ -115,6 +115,7 @@ private:
     QSettings runSettings_{QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"),QSettings::NativeFormat};
     QSettings* runPreferences_{};
     agent::Access* agentAccess_{};
+    bool sshOffSavePending() const;
 #endif
     prefs::ApplyResult applyPreferences(const prefs::Values&);
     QSplitter* splitter_{};

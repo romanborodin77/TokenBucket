@@ -12,17 +12,20 @@ bool boolean(QSettings& s,const QString& key,bool fallback) {
     return fallback;
 }
 }
-Values read(QSettings& s, bool defaultMcpSsh) {
+bool readMcpSshEnabled(QSettings& s, bool fallback) {
+    const bool fallbacks=s.fallbacksEnabled();
+    s.setFallbacksEnabled(false);
+    const bool enabled=s.contains(McpSshSetting)?boolean(s,McpSshSetting,false):fallback;
+    s.setFallbacksEnabled(fallbacks);
+    return s.status()==QSettings::NoError && enabled;
+}
+Values read(QSettings& s) {
     Values v;
     const auto theme=s.value("theme","system").toString();
     if(theme=="light" || theme=="dark") v.theme=theme;
     v.notifications=boolean(s,"trayNotifications",true);
     v.clearEnvironmentOnExit=boolean(s,"env-clear-on-exit",false);
-    const bool fallbacks=s.fallbacksEnabled();
-    s.setFallbacksEnabled(false);
-    const bool mcpSsh=s.contains(McpSshSetting)?boolean(s,McpSshSetting,false):defaultMcpSsh;
-    s.setFallbacksEnabled(fallbacks);
-    v.mcpSshEnabled=s.status()==QSettings::NoError && mcpSsh;
+    v.mcpSshEnabled=readMcpSshEnabled(s);
     v.idleMinutes=qBound(1,integer(s,"idleTimeoutMinutes",5),60);
     const int reveal=integer(s,"secretRevealSeconds",15), clipboard=integer(s,"clipboardClearSeconds",20);
     if(reveal==5 || reveal==10 || reveal==15 || reveal==30) v.revealSeconds=reveal;

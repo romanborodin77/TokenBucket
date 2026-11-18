@@ -385,13 +385,20 @@ MainWindow::~MainWindow() { saveUiState(); }
 #ifdef Q_OS_WIN
 void MainWindow::setAgentAccess(agent::Access* access) {
     agentAccess_=access;
-    if(access && access->sshEnabled()) appliedPreferences_.mcpSshEnabled=true;
+    if(access) appliedPreferences_.mcpSshEnabled=access->sshEnabled();
+}
+bool MainWindow::sshOffSavePending() const {
+    return agentAccess_ && !agentAccess_->sshEnabled() &&
+        (agentAccess_->sshOffSavePending() || prefs::readMcpSshEnabled(*preferences_));
 }
 #endif
 void MainWindow::showSettings() {
     if(!ready() || restoring_) return;
     card_->hideNowForTest();
     appliedPreferences_.clearEnvironmentOnExit=prefs::read(*preferences_).clearEnvironmentOnExit;
+#ifdef Q_OS_WIN
+    if(agentAccess_) appliedPreferences_.mcpSshEnabled=agentAccess_->sshEnabled();
+#endif
     SettingsDialog dialog(appliedPreferences_,app_.backupInfo(),
 #ifdef Q_OS_WIN
         hotkey_->sequence().toString(QKeySequence::NativeText),
@@ -400,11 +407,19 @@ void MainWindow::showSettings() {
 #endif
         this);
     dialog.setUnlockMode(app_.mode(),helloAvailable_);
+#ifdef Q_OS_WIN
+    dialog.setSshOffSavePending(sshOffSavePending());
+#endif
     connect(&dialog,&SettingsDialog::saveRequested,this,[&] {
         if(restoring_) return;
         if(!ready()) {dialog.reject(); return;}
         const auto result=applyPreferences(dialog.draft());
-        if(ready()) dialog.setApplyResult(result,appliedPreferences_);
+        if(ready()) {
+#ifdef Q_OS_WIN
+            dialog.setSshOffSavePending(sshOffSavePending());
+#endif
+            dialog.setApplyResult(result,appliedPreferences_);
+        }
     });
     connect(&dialog,&SettingsDialog::changePasswordRequested,this,[&] {
         changeMasterPassword(); if(ready()) dialog.setUnlockMode(app_.mode(),helloAvailable_);
@@ -529,7 +544,7 @@ prefs::ApplyResult MainWindow::applyPreferences(const prefs::Values& requested) 
     if(!persist("closeBehavior",requested.closeBehavior,appliedPreferences_.closeBehavior,closing,[] {})) return result;
 #ifdef Q_OS_WIN
     if(!persist("env-clear-on-exit",requested.clearEnvironmentOnExit,appliedPreferences_.clearEnvironmentOnExit,requested.clearEnvironmentOnExit,[] {})) return result;
-    if(requested.mcpSshEnabled!=appliedPreferences_.mcpSshEnabled) {
+    if(requested.mcpSshEnabled!=appliedPreferences_.mcpSshEnabled || sshOffSavePending()) {
         const auto key=QString::fromLatin1(prefs::McpSshSetting);
         if(!allowed(key)) return result;
         if(requested.mcpSshEnabled && (!agentAccess_ || !agentAccess_->start())) {
@@ -540,14 +555,24 @@ prefs::ApplyResult MainWindow::applyPreferences(const prefs::Values& requested) 
         const bool fallbacks=preferences_->fallbacksEnabled();
         preferences_->setFallbacksEnabled(false);
         const auto restoreFallbacks=qScopeGuard([&] {preferences_->setFallbacksEnabled(fallbacks);});
-        if(!requested.mcpSshEnabled && agentAccess_) agentAccess_->setSshEnabled(false);
-        if(!persist(key,requested.mcpSshEnabled,appliedPreferences_.mcpSshEnabled,requested.mcpSshEnabled,[&] {
-            if(requested.mcpSshEnabled) agentAccess_->setSshEnabled(true);
-        })) {
-            if(!requested.mcpSshEnabled && agentAccess_)
+        if(!requested.mcpSshEnabled && agentAccess_) {
+            agentAccess_->setSshEnabled(false);
+            appliedPreferences_.mcpSshEnabled=false;
+        }
+        if(!prefs::writeValue(*preferences_,key,requested.mcpSshEnabled,&result.error)) {
+            result.failedKey=key;
+            if(!requested.mcpSshEnabled && agentAccess_) {
+                agentAccess_->setSshOffSavePending(true);
                 result.error+=QStringLiteral(" SSH-команды выключены в текущем сеансе. Повторите сохранение, чтобы выключить их и после перезапуска.");
+            }
             return result;
         }
+        if(agentAccess_) {
+            agentAccess_->setSshOffSavePending(false);
+            if(requested.mcpSshEnabled) agentAccess_->setSshEnabled(true);
+        }
+        appliedPreferences_.mcpSshEnabled=requested.mcpSshEnabled;
+        result.appliedKeys<<key;
     }
 #endif
     refreshStatus(); return result;

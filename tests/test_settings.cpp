@@ -27,6 +27,9 @@
 #include "../src/ui/EnvExportDialog.h"
 #include "../src/platform/EnvOps.h"
 #include "../src/ui/UnlockDialog.h"
+#ifdef Q_OS_WIN
+#include "../src/ui/AgentAccess.h"
+#endif
 #include "FaultFileOps.h"
 using namespace tb;
 class TestSettings : public QObject {
@@ -66,6 +69,99 @@ private slots:
         save->click();
         QCOMPARE(requested.size(), 1);
         QVERIFY(preferences.allKeys().isEmpty());
+    }
+
+    void mcpSshBindFailureKeepsSettingsRetryable() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Application app(dir.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault("test-password-123",&error),qPrintable(error));
+        QSettings preferences(dir.filePath("prefs.ini"),QSettings::IniFormat);
+        QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
+        QVERIFY(prefs::writeValue(preferences,prefs::McpSshSetting,true));
+        const auto suffix=QStringLiteral(".settings.")+QUuid::createUuid().toString(QUuid::WithoutBraces);
+        auto collision=std::make_unique<agent::Access>(app,suffix);
+        QVERIFY(collision->start());
+        agent::Access access(app,suffix,{},false,{},false);
+        QVERIFY(!access.start());
+        ui::MainWindow window(app,nullptr,&preferences,&run);
+        window.setAgentAccess(&access);
+        bool failed=false,retried=false;
+        const auto apply=[&](bool expectError) {
+            QTimer::singleShot(0,&window,[&,expectError] {
+                auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                auto* ssh=dialog->findChild<QCheckBox*>(prefs::McpSshSetting);
+                QVERIFY(!ssh->isChecked());
+                auto* save=dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save);
+                QVERIFY(save->isEnabled()); // A saved value differs from the unavailable runtime.
+                ssh->setChecked(true);
+                save->click();
+                if(expectError) {
+                    failed=dialog->isVisible() && !dialog->findChild<QLabel*>("settingsError")->text().isEmpty();
+                } else retried=dialog->result()==QDialog::Accepted;
+                if(dialog->isVisible()) dialog->reject();
+            });
+            window.showSettings();
+        };
+        apply(true);
+        QVERIFY(failed); QVERIFY(!access.sshEnabled());
+        QVERIFY(prefs::readMcpSshEnabled(preferences));
+        collision.reset();
+        apply(false);
+        QVERIFY(retried); QVERIFY(access.sshEnabled());
+        QVERIFY(prefs::readMcpSshEnabled(preferences));
+    }
+
+    void mcpSshFailedOffSaveRevokesAndCanBeRetried() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Application app(dir.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault("test-password-123",&error),qPrintable(error));
+        QFile blocked(dir.filePath("blocked"));
+        QVERIFY(blocked.open(QIODevice::WriteOnly)); blocked.close();
+        QSettings preferences(blocked.fileName()+"/prefs.ini",QSettings::IniFormat);
+        QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
+        agent::Access access(app,QStringLiteral(".settings.")+QUuid::createUuid().toString(QUuid::WithoutBraces),{},true);
+        QVERIFY(access.start());
+        {
+            ui::MainWindow window(app,nullptr,&preferences,&run);
+            window.setAgentAccess(&access);
+            bool failed=false;
+            QTimer::singleShot(0,&window,[&] {
+                auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                auto* ssh=dialog->findChild<QCheckBox*>(prefs::McpSshSetting);
+                QVERIFY(ssh->isChecked());
+                ssh->setChecked(false);
+                dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+                failed=dialog->isVisible() && !dialog->findChild<QLabel*>("settingsError")->text().isEmpty();
+                if(dialog->isVisible()) dialog->reject();
+            });
+            window.showSettings();
+            QVERIFY(failed); QVERIFY(!access.sshEnabled()); QVERIFY(access.sshOffSavePending());
+        }
+        QVERIFY(blocked.remove()); QVERIFY(QDir().mkpath(blocked.fileName()));
+        QSettings recovered(preferences.fileName(),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&recovered,&run);
+        window.setAgentAccess(&access);
+        bool saved=false;
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            QVERIFY(!dialog->findChild<QCheckBox*>(prefs::McpSshSetting)->isChecked());
+            auto* save=dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save);
+            QVERIFY(save->isEnabled());
+            save->click();
+            saved=dialog->result()==QDialog::Accepted;
+            if(dialog->isVisible()) dialog->reject();
+        });
+        window.showSettings();
+        QVERIFY(saved); QVERIFY(!access.sshEnabled()); QVERIFY(!access.sshOffSavePending());
+        QVERIFY(recovered.contains(prefs::McpSshSetting));
+        QVERIFY(!prefs::readMcpSshEnabled(recovered,true));
     }
 #endif
     void backupDialogFlow_data() {

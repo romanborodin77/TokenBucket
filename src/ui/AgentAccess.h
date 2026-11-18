@@ -15,8 +15,11 @@ public:
     bool start();
     bool sshEnabled() const;
     void setSshEnabled(bool enabled);
+    bool sshOffSavePending() const { return sshOffSavePending_; }
+    void setSshOffSavePending(bool pending) { sshOffSavePending_ = pending; }
 private:
     class Broker;
     std::unique_ptr<Broker> broker_;
+    bool sshOffSavePending_ = false;
 };
 }

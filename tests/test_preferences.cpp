@@ -24,6 +24,36 @@ private slots:
         const auto v=prefs::read(s);
         QCOMPARE(v,prefs::Values{}); QVERIFY(s.allKeys().isEmpty()); QVERIFY(!QFile::exists(s.fileName()));
     }
+    void mcpSshPreferenceIgnoresFallbacksAndInvalidValues() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,dir.filePath("user"));
+        QSettings::setPath(QSettings::IniFormat,QSettings::SystemScope,dir.filePath("system"));
+        QSettings system(QSettings::IniFormat,QSettings::SystemScope,"SyntheticOrg","SyntheticApp");
+        system.setValue(prefs::McpSshSetting,true); system.setValue("theme","dark"); system.sync();
+        QCOMPARE(system.status(),QSettings::NoError);
+        QSettings user(QSettings::IniFormat,QSettings::UserScope,"SyntheticOrg","SyntheticApp");
+        QVERIFY(user.contains(prefs::McpSshSetting));
+        QVERIFY(!prefs::read(user).mcpSshEnabled);
+        QCOMPARE(prefs::read(user).theme,QStringLiteral("dark"));
+        QVERIFY(user.fallbacksEnabled());
+        QVERIFY(prefs::readMcpSshEnabled(user,true));
+        for(const QVariant& invalid:QList<QVariant>{QStringLiteral("enabled"),QStringLiteral(" true "),2}) {
+            user.setValue(prefs::McpSshSetting,invalid);
+            QVERIFY(!prefs::read(user).mcpSshEnabled);
+            QVERIFY(!prefs::readMcpSshEnabled(user,true));
+        }
+        user.setValue(prefs::McpSshSetting,false);
+        QVERIFY(!prefs::readMcpSshEnabled(user,true));
+        user.setValue(prefs::McpSshSetting,true); user.sync();
+        QSettings reopened(QSettings::IniFormat,QSettings::UserScope,"SyntheticOrg","SyntheticApp");
+        QVERIFY(prefs::read(reopened).mcpSshEnabled);
+        QFile corrupt(dir.filePath("bad.ini"));
+        QVERIFY(corrupt.open(QIODevice::WriteOnly)); corrupt.write("[broken\n"); corrupt.close();
+        QSettings broken(corrupt.fileName(),QSettings::IniFormat);
+        QVERIFY(!prefs::readMcpSshEnabled(broken,true));
+        QCOMPARE(broken.status(),QSettings::FormatError);
+    }
     void legacyAndInvalidValues() {
         QTemporaryDir dir; QSettings s(dir.filePath("prefs.ini"),QSettings::IniFormat);
         s.setValue("theme","dark"); s.setValue("trayNotifications",false);

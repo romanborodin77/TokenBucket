@@ -3,7 +3,11 @@
 #include "platform/CrashPolicy.h"
 #include "platform/SshExec.h"
 #include "ui/AgentAccess.h"
+#include "ui/MainWindow.h"
+#include "ui/SettingsDialog.h"
 #include <QApplication>
+#include <QCheckBox>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QInputDialog>
@@ -557,6 +561,135 @@ private slots:
         child.closeWriteChannel();
         QTRY_COMPARE_WITH_TIMEOUT(child.state(), QProcess::NotRunning, 3000);
         QVERIFY(child.readAllStandardError().isEmpty());
+    }
+
+    void sshSettingsEnableAndRevokeWithoutLegacyAccess() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Application app(directory.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault(Password,&error),qPrintable(error));
+        model::Entry key;
+        key.groupId=QUuid::createUuid(); key.id=QUuid::createUuid(); key.type=model::EntryType::SshKey;
+        key.title="synthetic settings key"; key.sshPrivate=SshSyntheticKey;
+        key.sshTargets={{"Known","node.example","owner",2222}};
+        QVERIFY(app.model()->addNode(key.groupId,{},"synthetic machines").isEmpty());
+        QVERIFY(app.model()->setEntry(key).isEmpty());
+        QVERIFY2(app.save(&error),qPrintable(error));
+        QSettings preferences(directory.filePath("preferences.ini"),QSettings::IniFormat);
+        QSettings run(directory.filePath("run.ini"),QSettings::IniFormat);
+        agent::Access access(app,EndpointSuffix,{},false,QCoreApplication::applicationFilePath(),false);
+        ui::MainWindow window(app,nullptr,&preferences,&run);
+        window.setAgentAccess(&access);
+        const auto setInSettings=[&](bool on,bool save) {
+            bool found=false;
+            QTimer::singleShot(0,&window,[&] {
+                auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget());
+                if(!dialog) return;
+                auto* checkbox=dialog->findChild<QCheckBox*>(prefs::McpSshSetting);
+                if(checkbox) {
+                    found=true;
+                    checkbox->setChecked(on);
+                    if(save) dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+                }
+                if(dialog->isVisible()) dialog->reject();
+            });
+            window.showSettings();
+            return found;
+        };
+        const auto executionRequest=execRequest(sshArguments(key.id));
+        QCOMPARE(query(executionRequest).error(),QStringLiteral("unavailable"));
+        QVERIFY(setInSettings(true,false));
+        QVERIFY(!access.sshEnabled());
+        QVERIFY(!preferences.contains(prefs::McpSshSetting));
+        QVERIFY(setInSettings(true,true));
+        QVERIFY(access.sshEnabled());
+        QVERIFY(prefs::read(preferences).mcpSshEnabled);
+
+        const auto forbidden=read(key.id,"sshPrivate");
+        QCOMPARE(query(forbidden).error(),QStringLiteral("agent_access_disabled"));
+        QCOMPARE(query(find(key.title)).error(),QStringLiteral("agent_access_disabled"));
+        QVERIFY(!QApplication::activeModalWidget());
+
+        int approvals=0,verifications=0;
+        const auto accept=[&](QProcess&) {
+            if(auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                ++verifications;
+                dialog->setTextValue(QString::fromLatin1(Password));
+                dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            } else if(auto* consent=qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                if(auto* yes=consent->button(QMessageBox::Yes)) {++approvals; yes->click();}
+            }
+        };
+        QCOMPARE(query(findSsh("known","owner",2222),accept).json().value("entries").toArray().size(),1);
+        QCOMPARE(approvals,1); QCOMPARE(verifications,0);
+        QCOMPARE(query(executionRequest,accept).json().value("stdout").toString(),QStringLiteral("hostname"));
+        QCOMPARE(approvals,2); QCOMPARE(verifications,1);
+
+        bool revokedApproval=false;
+        const auto revoked=query(executionRequest,[&](QProcess&) {
+            if(!revokedApproval && qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                revokedApproval=true;
+                access.setSshEnabled(false);
+                access.setSshEnabled(true);
+            }
+        });
+        QVERIFY(revokedApproval);
+        QCOMPARE(revoked.error(),QStringLiteral("ssh_disabled"));
+        QCOMPARE(verifications,1);
+        QTest::qWait(780);
+
+        bool revokedVerification=false;
+        const auto revokedVerify=query(executionRequest,[&](QProcess& process) {
+            if(!revokedVerification && qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                revokedVerification=true;
+                access.setSshEnabled(false);
+                access.setSshEnabled(true);
+            } else accept(process);
+        });
+        QVERIFY(revokedVerification);
+        QCOMPARE(revokedVerify.error(),QStringLiteral("ssh_disabled"));
+        QCOMPARE(verifications,1);
+        QTest::qWait(780);
+
+        const auto baseline=scratchStages();
+        bool revokedExecution=false;
+        const auto revokedRun=query(execRequest(sshArguments(key.id,"hold")),[&](QProcess& process) {
+            if(!revokedExecution && !runningStage(scratchStages(),baseline).isEmpty()) {
+                revokedExecution=true;
+                access.setSshEnabled(false);
+                access.setSshEnabled(true);
+            } else accept(process);
+        });
+        QVERIFY(revokedExecution);
+        QCOMPARE(revokedRun.error(),QStringLiteral("ssh_disabled"));
+        QVERIFY(!revokedRun.json().contains("stdout"));
+        QVERIFY(access.sshEnabled());
+        QCOMPARE(scratchStages(),baseline);
+
+        bool savedOff=false;
+        const auto cancelled=query(execRequest(sshArguments(key.id,"hold")),[&](QProcess& process) {
+            if(!savedOff && !runningStage(scratchStages(),baseline).isEmpty()) {
+                savedOff=true;
+                QVERIFY(setInSettings(false,true));
+            } else accept(process);
+        });
+        QVERIFY(savedOff);
+        QCOMPARE(cancelled.error(),QStringLiteral("ssh_disabled"));
+        QVERIFY(!cancelled.json().contains("stdout"));
+        QVERIFY(!access.sshEnabled());
+        QCOMPARE(verifications,3);
+        QCOMPARE(scratchStages(),baseline);
+        QCOMPARE(query(executionRequest).error(),QStringLiteral("ssh_disabled"));
+        QCOMPARE(query(findSsh("Known","owner",2222)).error(),QStringLiteral("ssh_disabled"));
+        QCOMPARE(query(forbidden).error(),QStringLiteral("agent_access_disabled"));
+        QSettings reopened(preferences.fileName(),QSettings::IniFormat);
+        QVERIFY(reopened.contains(prefs::McpSshSetting));
+        QVERIFY(!prefs::readMcpSshEnabled(reopened,true));
+
+        QVERIFY(setInSettings(true,true));
+        QCOMPARE(query(executionRequest,accept).json().value("stdout").toString(),QStringLiteral("hostname"));
+        QCOMPARE(verifications,4);
     }
 
     void sshExecUsesExactBindingAndKeepsSecretsLocal() {

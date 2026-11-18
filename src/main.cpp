@@ -29,7 +29,7 @@ int start() {
 #ifdef Q_OS_WIN
     const auto args=QCoreApplication::arguments();
     const bool legacyAccess=args.contains(QStringLiteral("--agent-access"));
-    const bool sshEnabled=tb::prefs::read(settings,legacyAccess && args.contains(QStringLiteral("--ssh-exec"))).mcpSshEnabled;
+    const bool sshEnabled=tb::prefs::readMcpSshEnabled(settings,legacyAccess && args.contains(QStringLiteral("--ssh-exec")));
     tb::agent::Access agentAccess(core,{}, {},false,{},legacyAccess);
     if (legacyAccess || sshEnabled) {
         if (agentAccess.start()) agentAccess.setSshEnabled(sshEnabled);

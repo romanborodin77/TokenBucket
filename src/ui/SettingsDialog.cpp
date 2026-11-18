@@ -79,6 +79,8 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
 #ifdef Q_OS_WIN
     check(security,QStringLiteral("Разрешить команды SSH через MCP"),prefs::McpSshSetting,initial.mcpSshEnabled);
     security->addRow(text(QStringLiteral("Каждая команда требует согласия и проверки владельца.")));
+    auto* sshStatus=text({}); sshStatus->setObjectName("mcpSshStatus"); sshStatus->hide();
+    security->addRow(sshStatus);
 #endif
     auto* quick=page(QStringLiteral("Быстрая вставка"));
     auto* hotkey=new QKeySequenceEdit(initial.hotkey,this); hotkey->setObjectName("hotkey");
@@ -152,7 +154,7 @@ prefs::Values SettingsDialog::draft() const {
 }
 void SettingsDialog::updateDraft() {
     const bool dirty=draft()!=baseline_;
-    dirtyHint_->setVisible(dirty); buttons_->button(QDialogButtonBox::Save)->setEnabled(dirty);
+    dirtyHint_->setVisible(dirty); buttons_->button(QDialogButtonBox::Save)->setEnabled(dirty || sshOffSavePending_);
     password_->setEnabled(!dirty && passwordAllowed_); unlock_->setEnabled(!dirty && unlockAllowed_);
     restore_->setEnabled(!dirty && backupAvailable_);
     restore_->setToolTip(dirty?dirtyHint_->text():!backupAvailable_?QStringLiteral("Доступной резервной копии нет."):QString());
@@ -171,6 +173,14 @@ void SettingsDialog::setUnlockMode(Application::Mode mode,bool helloAvailable) {
     updateDraft();
 }
 void SettingsDialog::setOperationError(const QString& error) {error_->setText(error);}
+void SettingsDialog::setSshOffSavePending(bool pending) {
+    sshOffSavePending_=pending;
+    if(auto* status=findChild<QLabel*>("mcpSshStatus")) {
+        status->setText(QStringLiteral("Сейчас SSH-команды выключены. Сохраните настройку, чтобы оставить их выключенными после перезапуска."));
+        status->setVisible(pending);
+    }
+    updateDraft();
+}
 void SettingsDialog::setApplyResult(const prefs::ApplyResult& result,const prefs::Values& current) {
     baseline_=current;
     if(result.error.isEmpty() && result.failedKey.isEmpty()) {accept(); return;}

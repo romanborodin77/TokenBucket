@@ -20,7 +20,8 @@ struct Values {
     bool operator==(const Values&) const = default;
 };
 struct ApplyResult { QStringList appliedKeys; QString failedKey, error; };
-Values read(QSettings& settings, bool defaultMcpSsh = false);
+Values read(QSettings& settings);
+bool readMcpSshEnabled(QSettings& settings, bool fallback = false);
 QString validate(const Values& values);
 bool writeValue(QSettings& settings,const QString& key,const QVariant& value,QString* error=nullptr);
 }

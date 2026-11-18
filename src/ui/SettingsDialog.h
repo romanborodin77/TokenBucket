@@ -14,6 +14,7 @@ public:
     void setApplyResult(const prefs::ApplyResult&,const prefs::Values& current);
     void setUnlockMode(Application::Mode mode,bool helloAvailable);
     void setOperationError(const QString& error);
+    void setSshOffSavePending(bool pending);
 signals:
     void saveRequested();
     void changePasswordRequested();
@@ -33,5 +34,6 @@ private:
     QPushButton *password_{},*unlock_{},*clearEnvironment_{},*restore_{};
     bool passwordAllowed_=false,unlockAllowed_=false;
     bool backupAvailable_=false;
+    bool sshOffSavePending_=false;
 };
 }
