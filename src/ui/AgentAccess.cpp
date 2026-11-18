@@ -4,6 +4,7 @@
 #include "model/SshTarget.h"
 #include "model/TextFile.h"
 #include "platform/AgentPipe.h"
+#include "platform/SshExec.h"
 #include <QApplication>
 #include <QDeadlineTimer>
 #include <QJsonArray>
@@ -40,6 +41,7 @@ struct Request {
     model::Id id;
     Field field = Field::Token;
     int line = -1, port = 0;
+    std::optional<SshCommand> exec;
     bool find() const { return id.isNull(); }
     bool findSsh() const { return !machine.isEmpty(); }
     const char* fieldName() const { return ReadFields[static_cast<size_t>(field)]; }
@@ -64,6 +66,15 @@ std::optional<Request> parseRequest(QByteArrayView bytes) {
     if (members != object.size() || object.value("v") != QJsonValue(1)) return std::nullopt;
     Request request;
     const auto op = object.value("op");
+    if (op == "ssh_exec") {
+        auto args = object;
+        args.remove("v");
+        args.remove("op");
+        request.exec = parseSshCommand(args);
+        if (!request.exec) return std::nullopt;
+        request.id = request.exec->id;
+        return request;
+    }
     if (op == "find" && object.size() == 3) {
         request.title = object.value("title").toString();
         if (!request.title.isEmpty() && request.title.isValidUtf16()) return request;
@@ -169,21 +180,36 @@ SecureBytes sshLookupReply(const model::VaultModel::SshLookup& result) {
     if (response.size() > 256 * 1024) return SecureBytes(errorReply("too_large"));
     return SecureBytes(std::move(response));
 }
+
+SecureBytes sshExecReply(const SshResult& result) {
+    if (result.error) return SecureBytes(errorReply(result.error));
+    const QJsonObject fields{{"exitCode", result.exitCode}, {"stdout", QString::fromUtf8(result.out)},
+        {"stderr", QString::fromUtf8(result.err)}};
+    auto json = QJsonDocument(fields).toJson(QJsonDocument::Compact);
+    json.replace(0, 1, result.exitCode == 0 ? "{\"ok\":true," : "{\"ok\":false,\"error\":\"remote_exit\",");
+    return SecureBytes(std::move(json) + '\n');
+}
 }
 
 class Access::Broker : public QObject {
 public:
-    Broker(Application& app, QString endpointSuffix, Decision consent)
-        : app_(app), suffix_(std::move(endpointSuffix)), consent_(std::move(consent)), endpoint_(Endpoint::current()) {
+    Broker(Application& app, QString endpointSuffix, Decision consent, bool sshExec)
+        : app_(app), suffix_(std::move(endpointSuffix)), consent_(std::move(consent)), sshExec_(sshExec),
+          endpoint_(Endpoint::current()) {
         connect(&notifier_, &QWinEventNotifier::activated, this, [this] { complete(); });
         connect(&timer_, &QTimer::timeout, this, [this] {
             if (phase_ == Phase::Approval) {
                 if (!requestAlive()) cancelApproval();
-            } else reset();
+            } else if (phase_ == Phase::Execution) checkExecution();
+            else reset();
         });
         connect(&app_, &Application::stateChanged, this, [this] {
             if (phase_ == Phase::Approval && !sessionCurrent()) cancelApproval();
+            else if (phase_ == Phase::Execution) checkExecution();
             else if (phase_ == Phase::Reply && !sessionCurrent()) reset();
+        });
+        connect(&app_, &Application::busyChanged, this, [this](bool busy) {
+            if (busy && phase_ == Phase::Execution) checkExecution();
         });
     }
 
@@ -199,7 +225,7 @@ public:
     }
 
 private:
-    enum class Phase { Connect, Request, Approval, Reply, Drain };
+    enum class Phase { Connect, Request, Approval, Execution, Reply, Drain };
 
     void arm(Phase phase) {
         phase_ = phase;
@@ -222,7 +248,8 @@ private:
             // A blocked client cannot hold it indefinitely.
             timer_.start(ReplyTimeoutMs);
             ready = ReadFile(pipe_.get(), input_.data(), MaxRequest, &count, &overlapped_); break;
-        case Phase::Approval: return;
+        case Phase::Approval:
+        case Phase::Execution: return;
         }
         status_ = ready ? ERROR_SUCCESS : GetLastError();
         count_ = count;
@@ -261,6 +288,7 @@ private:
             cancelled_ = false;
             timer_.start(100);
             output_ = handleRequest(QByteArrayView(input_.data(), count_));
+            if (phase_ == Phase::Execution) return;
             if (requestAlive()) arm(Phase::Reply);
             else reset();
         } else if (phase_ == Phase::Reply && status_ == ERROR_SUCCESS && count_ == output_.size()) {
@@ -271,10 +299,28 @@ private:
 
     bool sessionCurrent() const { return app_.gate() == Application::Gate::Ready && app_.generation() == generation_; }
 
-    bool requestAlive() const {
+    bool pipeAlive() const {
         DWORD available = 0;
-        return !cancelled_ && !deadline_.hasExpired() &&
-            PeekNamedPipe(pipe_.get(), nullptr, 0, nullptr, &available, nullptr) && available == 0;
+        return PeekNamedPipe(pipe_.get(), nullptr, 0, nullptr, &available, nullptr) && available == 0;
+    }
+    bool requestAlive() const { return !cancelled_ && !deadline_.hasExpired() && pipeAlive(); }
+
+    void checkExecution() {
+        const bool client = pipeAlive();
+        const bool current = sessionCurrent();
+        const auto* entry = current && executingEntry_ ? app_.model()->entry(executingEntry_->id) : nullptr;
+        if (!client || !current || app_.busy() || !entry || *entry != *executingEntry_) {
+            if (!executionError_) executionError_ = current ? "stale" : "locked";
+            executingEntry_.reset();
+            execution_->cancel();
+        }
+        const auto* result = execution_->result();
+        if (!result) return;
+        if (client) output_ = executionError_ ? SecureBytes(errorReply(executionError_)) : sshExecReply(*result);
+        execution_.reset();
+        executingEntry_.reset();
+        if (client) arm(Phase::Reply);
+        else reset();
     }
 
     void cancelApproval() {
@@ -293,6 +339,7 @@ private:
             !GetNamedPipeClientProcessId(pipe_.get(), &pid)) return fail("denied");
         const auto request = parseRequest(bytes);
         if (!request) return fail("invalid_request");
+        if (request->exec && !sshExec_) return fail("ssh_disabled");
         if (!sessionCurrent()) return fail("locked");
         if (app_.busy() || QApplication::activeModalWidget() || !cooldown_.hasExpired()) return fail("busy");
         if (!requestAlive()) return fail("cancelled");
@@ -311,6 +358,14 @@ private:
         const auto sshBefore = request->findSsh() ? findSsh() : model::VaultModel::SshLookup{};
         const auto [entry, ambiguous] = request->findSsh() ? std::pair<const model::Entry*, bool>{nullptr, false} : lookup();
         const auto before = entry ? std::optional(*entry) : std::nullopt;
+        QList<model::SshTarget> targets;
+        if (request->exec) {
+            const auto& command = *request->exec;
+            targets = app_.model()->sshTargetsFor(command.id, command.machine, command.user, command.port);
+            if (targets.isEmpty()) return fail("ssh_binding_not_found");
+            if (targets.size() != 1) return fail("ssh_binding_ambiguous");
+            if (before->sshPrivate.isEmpty()) return fail("ssh_identity_missing");
+        }
         const auto consistent = [&] {
             if (!requestAlive() || !sessionCurrent() || app_.busy()) return false;
             if (request->findSsh()) return findSsh() == sshBefore;
@@ -319,7 +374,13 @@ private:
         };
 
         QString description;
-        if (request->findSsh()) {
+        if (request->exec) {
+            const auto& target = targets.front();
+            description = QStringLiteral("Выполнить команду SSH из записи %1?\nID записи: %2\nХост: %3\nПользователь: %4\nПорт: %5\n\nКоманда:\n")
+                .arg(displayTitle(before->title), request->id.toString(QUuid::WithoutBraces),
+                    target.host, target.username, QString::number(target.port));
+            description += request->exec->command;
+        } else if (request->findSsh()) {
             description = QStringLiteral("Разрешить поиск ключей SSH для машины %1? Будут переданы названия, ID и подходящие привязки.")
                 .arg(displayTitle(request->machine));
             if (!request->user.isEmpty()) description += QStringLiteral("\nПользователь: %1").arg(displayTitle(request->user));
@@ -365,6 +426,18 @@ private:
             released = true;
             return SecureBytes(QJsonDocument(QJsonObject{{"ok", true}, {"entry", match}}).toJson(QJsonDocument::Compact) + '\n');
         }
+        if (request->exec) {
+            if (!ui::authorizeEntry(app_, request->id, &dialog, true)) return fail("denied");
+            if (!consistent()) return fail("stale");
+            execution_ = std::make_unique<SshExecution>(targets.front(), *request->exec, before->sshPrivate,
+                before->sshPassphrase);
+            executingEntry_ = before;
+            executionError_ = nullptr;
+            phase_ = Phase::Execution;
+            released = true;
+            timer_.start(25);
+            return {};
+        }
         if (request->fieldType() != before->type || (request->field == Field::TextLine &&
             !model::textfile::isVisible(before->textFile, request->line))) return fail("unavailable_field");
         if (!ui::authorizeEntry(app_, request->id, &dialog, true)) return fail("denied");
@@ -376,6 +449,7 @@ private:
     Application& app_;
     QString suffix_;
     Decision consent_;
+    bool sshExec_;
     Endpoint endpoint_;
     Handle pipe_, event_;
     QWinEventNotifier notifier_;
@@ -389,10 +463,13 @@ private:
     quint64 generation_ = 0;
     bool cancelled_ = false;
     QMessageBox* dialog_ = nullptr;
+    std::optional<model::Entry> executingEntry_;
+    std::unique_ptr<SshExecution> execution_;
+    const char* executionError_ = nullptr;
 };
 
-Access::Access(Application& app, const QString& endpointSuffix, Decision consent)
-    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent))) {}
+Access::Access(Application& app, const QString& endpointSuffix, Decision consent, bool sshExec)
+    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent), sshExec)) {}
 Access::~Access() = default;
 bool Access::start() { return broker_->start(); }
 }

@@ -7,6 +7,7 @@
 #ifdef Q_OS_WIN
 #include "platform/EnvOps.h"
 #include "platform/CrashPolicy.h"
+#include "platform/SshExec.h"
 #include "ui/AgentAccess.h"
 #endif
 #include "ui/Theme.h"
@@ -23,7 +24,8 @@ int start() {
 #ifdef Q_OS_WIN
     std::unique_ptr<tb::agent::Access> agentAccess;
     if (QCoreApplication::arguments().contains(QStringLiteral("--agent-access"))) {
-        agentAccess = std::make_unique<tb::agent::Access>(core);
+        agentAccess = std::make_unique<tb::agent::Access>(core, QString{}, tb::agent::Access::Decision{},
+            QCoreApplication::arguments().contains(QStringLiteral("--ssh-exec")));
         if (!agentAccess->start()) {
             agentAccess.reset();
             QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"),
@@ -45,6 +47,7 @@ int main(int argc, char** argv) {
     // Раньше всего: запретить аварийные дампы и системные диалоги ошибок до того,
     // как в памяти появятся секреты (снимок дампа содержит всю кучу процесса).
     tb::platform::crash::disableDumps();
+    if (tb::agent::isSshAskpass()) return tb::agent::runSshAskpass();
 #endif
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TokenBucket")); app.setOrganizationName(QStringLiteral("TokenBucket"));

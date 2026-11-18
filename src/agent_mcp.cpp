@@ -2,6 +2,7 @@
 #include "model/SshTarget.h"
 #include "model/TextFile.h"
 #include "platform/AgentClient.h"
+#include "platform/SshExecRequest.h"
 #include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -25,6 +26,7 @@ constexpr auto ServerInfo = "io.modelcontextprotocol/serverInfo";
 constexpr auto FindTool = "tokenbucket_find";
 constexpr auto ReadTool = "tokenbucket_read";
 constexpr auto FindSshTool = "tokenbucket_find_ssh";
+constexpr auto SshExecTool = "tokenbucket_ssh_exec";
 constexpr auto Instructions = "Start TokenBucket with --agent-access in the same Windows session. "
     "Wait for owner consent and verification. Do not retry automatically after a denial.";
 
@@ -36,9 +38,10 @@ QJsonArray toolList() {
     const QJsonObject text{{"type", "string"}, {"minLength", 1}};
     QJsonArray fields;
     for (const auto* field : ReadFields) fields.append(field);
-    const auto tool = [](const char* name, const char* description, QJsonObject properties, QJsonArray required) {
+    const auto tool = [](const char* name, const char* description, QJsonObject properties, QJsonArray required,
+                         bool remote = false) {
         return QJsonObject{{"name", name}, {"description", description},
-            {"annotations", QJsonObject{{"readOnlyHint", true}, {"openWorldHint", false}, {"idempotentHint", false}}},
+            {"annotations", QJsonObject{{"readOnlyHint", !remote}, {"openWorldHint", remote}, {"idempotentHint", false}}},
             {"inputSchema", QJsonObject{{"type", "object"}, {"additionalProperties", false},
                 {"properties", properties}, {"required", required}}}};
     };
@@ -53,7 +56,18 @@ QJsonArray toolList() {
         tool(FindSshTool, "Find SSH keys for an exact machine alias or host after owner consent. Select a returned key ID before requesting a field.",
             {{"machine", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxHost}}},
              {"user", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxUser}}},
-             {"port", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::ssh::MaxPort}}}}, {"machine"})
+             {"port", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::ssh::MaxPort}}}}, {"machine"}),
+        tool(SshExecTool, "Run one command on an exact stored SSH binding after owner consent and verification. "
+            "Requires the TokenBucket GUI to be started with --agent-access --ssh-exec. "
+            "Use the selected ID, machine alias or host, exact user and port. Returns command output and exit status.",
+            {{"id", QJsonObject{{"type", "string"}, {"format", "uuid"}}},
+             {"machine", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxHost}}},
+             {"user", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxUser}}},
+             {"port", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::ssh::MaxPort}}},
+             {"command", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", MaxSshCommandBytes},
+                 {"description", "One printable command, at most 1024 UTF-8 bytes."}}},
+             {"timeoutSeconds", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", MaxSshSeconds},
+                 {"default", DefaultSshSeconds}}}}, {"id", "machine", "user", "port", "command"}, true)
     };
 }
 
@@ -118,6 +132,11 @@ QByteArray brokerRequest(const QJsonObject& params) {
         request.insert("machine", machine);
         if (hasUser) request.insert("user", user);
         if (hasPort) request.insert("port", port);
+    } else if (name == SshExecTool) {
+        if (!parseSshCommand(args)) return {};
+        request = args;
+        request.insert("v", 1);
+        request.insert("op", "ssh_exec");
     } else if (name == ReadTool) {
         const auto id = args.value("id").toString();
         const auto uuid = QUuid(id);

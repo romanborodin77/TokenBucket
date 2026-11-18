@@ -250,17 +250,30 @@ QList<Id> VaultModel::search(const QString& needle) const {
                 if (!seen.contains(id)) { seen.insert(id); r << id; }
     return r;
 }
+static QList<SshTarget> matchingTargets(const Entry& entry, const QString& machine, const QString& host,
+                                        const QString& user, int port) {
+    QList<SshTarget> matches;
+    for (const auto& target : entry.sshTargets) {
+        if ((!host.isEmpty() && target.host == host) || target.alias.compare(machine, Qt::CaseInsensitive) == 0) {
+            if ((user.isEmpty() || target.username == user) && (!port || target.port == port)) matches.append(target);
+        }
+    }
+    return matches;
+}
+
+QList<SshTarget> VaultModel::sshTargetsFor(Id id, const QString& machine, const QString& user, int port) const {
+    const auto* selected = entry(id);
+    if (!selected || selected->type != EntryType::SshKey || user.isEmpty() || port < 1 ||
+        !ssh::validLookup(machine, user, port)) return {};
+    return matchingTargets(*selected, machine, normalizedHost(machine), user, port);
+}
+
 VaultModel::SshLookup VaultModel::sshMatches(const QString& machine, const QString& user, int port) const {
     if (!ssh::validLookup(machine, user, port)) return {};
     const auto host = normalizedHost(machine);
     SshLookup result;
     for (const auto& entry : entries_) {
-        QList<SshTarget> matches;
-        for (const auto& target : entry.sshTargets) {
-            if ((!host.isEmpty() && target.host == host) || target.alias.compare(machine, Qt::CaseInsensitive) == 0) {
-                if ((user.isEmpty() || target.username == user) && (!port || target.port == port)) matches.append(target);
-            }
-        }
+        auto matches = matchingTargets(entry, machine, host, user, port);
         if (matches.isEmpty()) continue;
         if (result.matches.size() == ssh::MaxMatches) return {true, {}};
         result.matches.append(SshMatch{entry.id, entry.title, std::move(matches)});

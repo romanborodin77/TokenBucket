@@ -52,6 +52,7 @@ public:
         bool operator==(const SshLookup&) const = default;
     };
     SshLookup sshMatches(const QString& machine, const QString& user, int port) const;
+    QList<SshTarget> sshTargetsFor(Id id, const QString& machine, const QString& user, int port) const;
 
     // Нормализация тегов: trim, пустые отбрасываются, дедупликация без учёта регистра —
     // каноничным считается первое написание. Инвариант всех тегов, хранящихся в модели.

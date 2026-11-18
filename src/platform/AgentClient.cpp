@@ -1,4 +1,5 @@
 #include "AgentClient.h"
+#include "SshExecRequest.h"
 
 namespace tb::agent {
 Exchange::Exchange(QByteArray request, const QString& endpointSuffix)
@@ -24,7 +25,8 @@ void Exchange::arm(Phase phase) {
         deadline_ = QDeadlineTimer(RequestTimeoutMs, Qt::PreciseTimer);
         done = WriteFile(pipe_.get(), request_.constData(), static_cast<DWORD>(request_.size()), &bytes_, &operation_);
     } else {
-        deadline_ = QDeadlineTimer(ApprovalTimeoutMs + RequestTimeoutMs + ReplyTimeoutMs, Qt::PreciseTimer);
+        deadline_ = QDeadlineTimer(ApprovalTimeoutMs + RequestTimeoutMs + ReplyTimeoutMs + MaxSshSeconds * 1000,
+            Qt::PreciseTimer);
         done = ReadFile(pipe_.get(), reply_.data(), MaxReply, &bytes_, &operation_);
     }
     status_ = done ? ERROR_SUCCESS : GetLastError();
