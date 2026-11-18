@@ -48,6 +48,26 @@ class TestSettings : public QObject {
     }
 #endif
 private slots:
+#ifdef Q_OS_WIN
+    void mcpSshToggleDefaultsOffAndCanBeSaved() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QSettings preferences(dir.filePath("ssh.ini"), QSettings::IniFormat);
+        ui::SettingsDialog dialog(prefs::read(preferences), {}, {});
+        auto* ssh = dialog.findChild<QCheckBox*>("mcpSshEnabled");
+        QVERIFY(ssh);
+        QVERIFY(!ssh->isChecked());
+        QVERIFY(!ssh->accessibleName().isEmpty());
+        auto* save = dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save);
+        QVERIFY(!save->isEnabled());
+        ssh->setChecked(true);
+        QVERIFY(save->isEnabled());
+        QSignalSpy requested(&dialog, &ui::SettingsDialog::saveRequested);
+        save->click();
+        QCOMPARE(requested.size(), 1);
+        QVERIFY(preferences.allKeys().isEmpty());
+    }
+#endif
     void backupDialogFlow_data() {
         QTest::addColumn<int>("action");
         QTest::newRow("wrong-password")<<0; QTest::newRow("decline-confirmation")<<1; QTest::newRow("cancel-auth")<<2;
