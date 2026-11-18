@@ -182,20 +182,21 @@ SecureBytes sshLookupReply(const model::VaultModel::SshLookup& result) {
 }
 
 SecureBytes sshExecReply(const SshResult& result) {
-    if (result.error) return SecureBytes(errorReply(result.error));
+    if (result.error && result.exitCode != 255) return SecureBytes(errorReply(result.error));
     const QJsonObject fields{{"exitCode", result.exitCode}, {"stdout", QString::fromUtf8(result.out)},
         {"stderr", QString::fromUtf8(result.err)}};
     auto json = QJsonDocument(fields).toJson(QJsonDocument::Compact);
-    json.replace(0, 1, result.exitCode == 0 ? "{\"ok\":true," : "{\"ok\":false,\"error\":\"remote_exit\",");
+    json.replace(0, 1, result.exitCode == 0 ? "{\"ok\":true," : result.error ?
+        "{\"ok\":false,\"error\":\"ssh_status_unknown\"," : "{\"ok\":false,\"error\":\"remote_exit\",");
     return SecureBytes(std::move(json) + '\n');
 }
 }
 
 class Access::Broker : public QObject {
 public:
-    Broker(Application& app, QString endpointSuffix, Decision consent, bool sshExec)
+    Broker(Application& app, QString endpointSuffix, Decision consent, bool sshExec, QString testSshProgram)
         : app_(app), suffix_(std::move(endpointSuffix)), consent_(std::move(consent)), sshExec_(sshExec),
-          endpoint_(Endpoint::current()) {
+          testSshProgram_(std::move(testSshProgram)), endpoint_(Endpoint::current()) {
         connect(&notifier_, &QWinEventNotifier::activated, this, [this] { complete(); });
         connect(&timer_, &QTimer::timeout, this, [this] {
             if (phase_ == Phase::Approval) {
@@ -359,12 +360,13 @@ private:
         const auto [entry, ambiguous] = request->findSsh() ? std::pair<const model::Entry*, bool>{nullptr, false} : lookup();
         const auto before = entry ? std::optional(*entry) : std::nullopt;
         QList<model::SshTarget> targets;
+        const char* bindingError = nullptr;
         if (request->exec) {
             const auto& command = *request->exec;
             targets = app_.model()->sshTargetsFor(command.id, command.machine, command.user, command.port);
-            if (targets.isEmpty()) return fail("ssh_binding_not_found");
-            if (targets.size() != 1) return fail("ssh_binding_ambiguous");
-            if (before->sshPrivate.isEmpty()) return fail("ssh_identity_missing");
+            if (targets.isEmpty()) bindingError = "ssh_binding_not_found";
+            else if (targets.size() != 1) bindingError = "ssh_binding_ambiguous";
+            else if (before->sshPrivate.isEmpty()) bindingError = "ssh_identity_missing";
         }
         const auto consistent = [&] {
             if (!requestAlive() || !sessionCurrent() || app_.busy()) return false;
@@ -374,7 +376,12 @@ private:
         };
 
         QString description;
-        if (request->exec) {
+        if (request->exec && bindingError) {
+            const auto& command = *request->exec;
+            description = QStringLiteral("Разрешить проверить пригодность привязки SSH для машины %1?\nID записи: %2\nПользователь: %3\nПорт: %4")
+                .arg(displayTitle(command.machine), command.id.toString(QUuid::WithoutBraces),
+                    command.user, QString::number(command.port));
+        } else if (request->exec) {
             const auto& target = targets.front();
             description = QStringLiteral("Выполнить команду SSH из записи %1?\nID записи: %2\nХост: %3\nПользователь: %4\nПорт: %5\n\nКоманда:\n")
                 .arg(displayTitle(before->title), request->id.toString(QUuid::WithoutBraces),
@@ -414,6 +421,7 @@ private:
         const bool approved = consent_ ? consent_(&dialog) : dialog.exec() == QMessageBox::Yes;
         if (!approved) return fail("denied");
         if (!consistent()) return fail("stale");
+        if (bindingError) return fail(bindingError);
         if (request->findSsh()) {
             if (!sshBefore.tooMany && !sshBefore.matches.isEmpty()) released = true;
             return sshLookupReply(sshBefore);
@@ -430,7 +438,7 @@ private:
             if (!ui::authorizeEntry(app_, request->id, &dialog, true)) return fail("denied");
             if (!consistent()) return fail("stale");
             execution_ = std::make_unique<SshExecution>(targets.front(), *request->exec, before->sshPrivate,
-                before->sshPassphrase);
+                before->sshPassphrase, testSshProgram_);
             executingEntry_ = before;
             executionError_ = nullptr;
             phase_ = Phase::Execution;
@@ -450,6 +458,7 @@ private:
     QString suffix_;
     Decision consent_;
     bool sshExec_;
+    QString testSshProgram_;
     Endpoint endpoint_;
     Handle pipe_, event_;
     QWinEventNotifier notifier_;
@@ -468,8 +477,8 @@ private:
     const char* executionError_ = nullptr;
 };
 
-Access::Access(Application& app, const QString& endpointSuffix, Decision consent, bool sshExec)
-    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent), sshExec)) {}
+Access::Access(Application& app, const QString& endpointSuffix, Decision consent, bool sshExec, const QString& testSshProgram)
+    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent), sshExec, testSshProgram)) {}
 Access::~Access() = default;
 bool Access::start() { return broker_->start(); }
 }

@@ -15,7 +15,7 @@ struct SshResult {
 class SshExecution {
 public:
     SshExecution(const model::SshTarget& target, const SshCommand& command, QByteArrayView privateKey,
-                 const QString& passphrase, const QString& testProgram = {});
+                 const QString& passphrase, const QString& testProgram = {}, const QString& testKnownHosts = {});
     void cancel() { worker_.request_stop(); }
     const SshResult* result() const { return done_.load(std::memory_order_acquire) ? &result_ : nullptr; }
 
@@ -27,4 +27,5 @@ private:
 
 bool isSshAskpass();
 int runSshAskpass();
+void cleanAbandonedSshStages();
 }

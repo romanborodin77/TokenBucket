@@ -9,7 +9,8 @@ namespace tb::agent {
 class Access {
 public:
     using Decision = std::function<bool(QWidget*)>;
-    explicit Access(Application& app, const QString& endpointSuffix = {}, Decision consent = {}, bool sshExec = false);
+    explicit Access(Application& app, const QString& endpointSuffix = {}, Decision consent = {}, bool sshExec = false,
+                    const QString& testSshProgram = {});
     ~Access();
     bool start();
 private:

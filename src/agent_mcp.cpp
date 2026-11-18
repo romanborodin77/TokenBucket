@@ -53,7 +53,7 @@ QJsonArray toolList() {
              {"field", QJsonObject{{"type", "string"}, {"enum", fields}}},
              {"line", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::textfile::MaxLines},
                   {"description", "Required only for textLine. One-based number of a visible line."}}}}, {"id", "field"}),
-        tool(FindSshTool, "Find SSH keys for an exact machine alias or host after owner consent. Select a returned key ID before requesting a field.",
+        tool(FindSshTool, "Find SSH keys for an exact machine alias or host after owner consent. Select a returned key ID and binding before SSH execution.",
             {{"machine", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxHost}}},
              {"user", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxUser}}},
              {"port", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::ssh::MaxPort}}}}, {"machine"}),

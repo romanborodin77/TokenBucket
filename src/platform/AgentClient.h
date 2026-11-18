@@ -23,6 +23,7 @@ private:
     QByteArray request_, reply_;
     OVERLAPPED operation_{};
     QDeadlineTimer deadline_;
+    int extraReplyMs_ = 0;
     Phase phase_ = Phase::Complete;
     DWORD status_ = ERROR_SUCCESS, bytes_ = 0, received_ = 0;
 };

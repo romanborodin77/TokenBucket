@@ -20,6 +20,9 @@ int start() {
     QString error;
     auto instanceLock = tb::Application::acquireInstanceLock(dir, &error);
     if(!instanceLock) {QMessageBox::critical(nullptr,QStringLiteral("TokenBucket"),error); return 1;}
+#ifdef Q_OS_WIN
+    std::jthread sshCleanup(tb::agent::cleanAbandonedSshStages);
+#endif
     tb::Application core(dir);
 #ifdef Q_OS_WIN
     std::unique_ptr<tb::agent::Access> agentAccess;

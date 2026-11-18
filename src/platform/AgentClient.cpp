@@ -1,10 +1,13 @@
 #include "AgentClient.h"
 #include "SshExecRequest.h"
+#include <QJsonDocument>
 
 namespace tb::agent {
 Exchange::Exchange(QByteArray request, const QString& endpointSuffix)
     : pipe_(openClient(Endpoint::current(), endpointSuffix)), request_(std::move(request)) {
     if (pipe_.get() == INVALID_HANDLE_VALUE) return;
+    if (QJsonDocument::fromJson(request_).object().value("op") == "ssh_exec")
+        extraReplyMs_ = MaxSshSeconds * 1000 + 2000;
     event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (event_) arm(Phase::Writing);
 }
@@ -25,7 +28,7 @@ void Exchange::arm(Phase phase) {
         deadline_ = QDeadlineTimer(RequestTimeoutMs, Qt::PreciseTimer);
         done = WriteFile(pipe_.get(), request_.constData(), static_cast<DWORD>(request_.size()), &bytes_, &operation_);
     } else {
-        deadline_ = QDeadlineTimer(ApprovalTimeoutMs + RequestTimeoutMs + ReplyTimeoutMs + MaxSshSeconds * 1000,
+        deadline_ = QDeadlineTimer(ApprovalTimeoutMs + RequestTimeoutMs + ReplyTimeoutMs + extraReplyMs_,
             Qt::PreciseTimer);
         done = ReadFile(pipe_.get(), reply_.data(), MaxReply, &bytes_, &operation_);
     }
