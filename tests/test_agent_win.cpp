@@ -422,6 +422,54 @@ private slots:
         QCOMPARE(verificationCount.load(), 4);
     }
 
+    void sshExecIsDisabledByDefault() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Application app(directory.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault(Password, &error), qPrintable(error));
+        model::Entry key;
+        key.groupId = QUuid::createUuid();
+        key.id = QUuid::createUuid();
+        key.type = model::EntryType::SshKey;
+        key.title = "synthetic command key";
+        key.sshPrivate = "synthetic-private-canary";
+        key.sshPassphrase = "synthetic-passphrase-canary";
+        key.sshTargets = {{"Local", "localhost", "owner", 22}};
+        QVERIFY(app.model()->addNode(key.groupId, {}, "synthetic machines").isEmpty());
+        QVERIFY(app.model()->setEntry(key).isEmpty());
+        int decisions = 0;
+        agent::Access access(app, EndpointSuffix, [&](QWidget*) {
+            ++decisions;
+            return false;
+        });
+        QVERIFY(access.start());
+        const QJsonObject arguments{{"id", key.id.toString(QUuid::WithoutBraces)}, {"machine", "Local"},
+            {"user", "owner"}, {"port", 22}, {"command", "hostname"}};
+        auto direct = arguments;
+        direct.insert("v", 1);
+        direct.insert("op", "ssh_exec");
+        const auto denied = query(QJsonDocument(direct).toJson(QJsonDocument::Compact));
+        QCOMPARE(denied.error(), QStringLiteral("ssh_disabled"));
+        QVERIFY(denied.standardError.isEmpty());
+
+        QProcess child;
+        child.start(helperPath(), {"--mcp"});
+        QVERIFY(child.waitForStarted(5000));
+        sendMcp(child, "tools/call", {{"_meta", modernMcpMetadata()}, {"name", "tokenbucket_ssh_exec"},
+            {"arguments", arguments}}, 1);
+        const auto response = receiveMcp(child);
+        QVERIFY(response.value("result").toObject().value("isError").toBool());
+        QCOMPARE(toolOutput(response).value("error").toString(), QStringLiteral("ssh_disabled"));
+        const auto payload = QJsonDocument(response).toJson(QJsonDocument::Compact);
+        QVERIFY(!payload.contains(key.sshPrivate));
+        QVERIFY(!payload.contains(key.sshPassphrase.toUtf8()));
+        QCOMPARE(decisions, 0);
+        child.closeWriteChannel();
+        QTRY_COMPARE_WITH_TIMEOUT(child.state(), QProcess::NotRunning, 3000);
+        QVERIFY(child.readAllStandardError().isEmpty());
+    }
+
     void mcpLegacyDiscoveryAndCalls() {
         QTemporaryDir directory;
         QVERIFY(directory.isValid());
@@ -463,10 +511,14 @@ private slots:
         QVERIFY(pong.value("result").isObject());
         sendMcp(child, "tools/list", {}, 2);
         const auto tools = receiveMcp(child).value("result").toObject().value("tools").toArray();
-        QCOMPARE(tools.size(), 3);
+        QCOMPARE(tools.size(), 4);
         QCOMPARE(tools.at(0).toObject().value("name").toString(), QStringLiteral("tokenbucket_find"));
         QCOMPARE(tools.at(1).toObject().value("name").toString(), QStringLiteral("tokenbucket_read"));
         QCOMPARE(tools.at(2).toObject().value("name").toString(), QStringLiteral("tokenbucket_find_ssh"));
+        const auto exec = tools.at(3).toObject();
+        QCOMPARE(exec.value("name").toString(), QStringLiteral("tokenbucket_ssh_exec"));
+        QCOMPARE(exec.value("annotations").toObject(), (QJsonObject{
+            {"readOnlyHint", false}, {"openWorldHint", true}, {"idempotentHint", false}}));
         QVERIFY(tools.at(1).toObject().value("inputSchema").toObject().value("properties").toObject().contains("field"));
         sendMcp(child, "vault/unlock", {}, 3);
         QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32601);
@@ -545,7 +597,7 @@ private slots:
         QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32602);
         sendMcp(child, "tools/list", params, 3);
         const auto catalog = receiveMcp(child).value("result").toObject();
-        QCOMPARE(catalog.value("tools").toArray().size(), 3);
+        QCOMPARE(catalog.value("tools").toArray().size(), 4);
         QVERIFY(catalog.value("ttlMs").isDouble());
         QCOMPARE(catalog.value("cacheScope").toString(), QStringLiteral("public"));
         auto unsupported = meta;
