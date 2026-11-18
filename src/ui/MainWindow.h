@@ -11,6 +11,7 @@
 #include "../platform/ClipboardGuard.h"
 #include <memory>
 namespace tb::platform { class QuickPaste; }
+namespace tb::agent { class Access; }
 namespace tb { class IdleTimer; }
 namespace tb::io {struct TextImportPreview;}
 class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox; class QTabWidget;
@@ -42,6 +43,9 @@ public:
     void applyIdleTimeout(int minutes);
     void popupQuickPanel();
     void setIdleTimer(IdleTimer* timer);
+#ifdef Q_OS_WIN
+    void setAgentAccess(agent::Access* access);
+#endif
     QTreeWidget* tree() const { return tree_; }
     QListWidget* list() const { return list_; }
     QLineEdit* search() const { return search_; }
@@ -110,6 +114,7 @@ private:
 #ifdef Q_OS_WIN
     QSettings runSettings_{QStringLiteral(R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)"),QSettings::NativeFormat};
     QSettings* runPreferences_{};
+    agent::Access* agentAccess_{};
 #endif
     prefs::ApplyResult applyPreferences(const prefs::Values&);
     QSplitter* splitter_{};

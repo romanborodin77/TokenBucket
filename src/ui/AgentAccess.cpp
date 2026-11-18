@@ -194,9 +194,9 @@ SecureBytes sshExecReply(const SshResult& result) {
 
 class Access::Broker : public QObject {
 public:
-    Broker(Application& app, QString endpointSuffix, Decision consent, bool sshExec, QString testSshProgram)
+    Broker(Application& app, QString endpointSuffix, Decision consent, bool sshExec, QString testSshProgram, bool legacyAccess)
         : app_(app), suffix_(std::move(endpointSuffix)), consent_(std::move(consent)), sshExec_(sshExec),
-          testSshProgram_(std::move(testSshProgram)), endpoint_(Endpoint::current()) {
+          legacyAccess_(legacyAccess), testSshProgram_(std::move(testSshProgram)), endpoint_(Endpoint::current()) {
         connect(&notifier_, &QWinEventNotifier::activated, this, [this] { complete(); });
         connect(&timer_, &QTimer::timeout, this, [this] {
             if (phase_ == Phase::Approval) {
@@ -217,12 +217,29 @@ public:
     ~Broker() override { stopIo(); }
 
     bool start() {
+        if (pipe_ && pipe_.get() != INVALID_HANDLE_VALUE) return true;
         event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        if (!event_) return false;
         pipe_.reset(openServer(endpoint_, suffix_));
-        if (!event_ || pipe_.get() == INVALID_HANDLE_VALUE) return false;
+        if (pipe_.get() == INVALID_HANDLE_VALUE) return false;
         notifier_.setHandle(event_.get());
         arm(Phase::Connect);
         return true;
+    }
+
+    bool sshEnabled() const { return sshExec_; }
+
+    void setSshEnabled(bool enabled) {
+        if (sshExec_ == enabled) return;
+        sshExec_ = enabled;
+        if (enabled || !sshRequest_) return;
+        if (phase_ == Phase::Approval) {
+            revoked_ = true;
+            cancelApproval();
+        } else if (phase_ == Phase::Execution) {
+            executionError_ = "ssh_disabled";
+            checkExecution();
+        } else if (phase_ == Phase::Reply || phase_ == Phase::Drain) reset();
     }
 
 private:
@@ -287,10 +304,15 @@ private:
             deadline_ = QDeadlineTimer(ApprovalTimeoutMs, Qt::PreciseTimer);
             generation_ = app_.generation();
             cancelled_ = false;
+            sshRequest_ = false;
+            revoked_ = false;
             timer_.start(100);
             output_ = handleRequest(QByteArrayView(input_.data(), count_));
             if (phase_ == Phase::Execution) return;
-            if (requestAlive()) arm(Phase::Reply);
+            if (revoked_ && pipeAlive()) {
+                output_ = SecureBytes(errorReply("ssh_disabled"));
+                arm(Phase::Reply);
+            } else if (requestAlive()) arm(Phase::Reply);
             else reset();
         } else if (phase_ == Phase::Reply && status_ == ERROR_SUCCESS && count_ == output_.size()) {
             output_.clear();
@@ -310,7 +332,7 @@ private:
         const bool client = pipeAlive();
         const bool current = sessionCurrent();
         const auto* entry = current && executingEntry_ ? app_.model()->entry(executingEntry_->id) : nullptr;
-        if (!client || !current || app_.busy() || !entry || *entry != *executingEntry_) {
+        if (executionError_ || !client || !current || app_.busy() || !entry || *entry != *executingEntry_) {
             if (!executionError_) executionError_ = current ? "stale" : "locked";
             executingEntry_.reset();
             execution_->cancel();
@@ -340,7 +362,9 @@ private:
             !GetNamedPipeClientProcessId(pipe_.get(), &pid)) return fail("denied");
         const auto request = parseRequest(bytes);
         if (!request) return fail("invalid_request");
-        if (request->exec && !sshExec_) return fail("ssh_disabled");
+        sshRequest_ = request->exec.has_value() || (!legacyAccess_ && request->findSsh());
+        if (sshRequest_ && !sshExec_) return fail("ssh_disabled");
+        if (!legacyAccess_ && !sshRequest_) return fail("agent_access_disabled");
         if (!sessionCurrent()) return fail("locked");
         if (app_.busy() || QApplication::activeModalWidget() || !cooldown_.hasExpired()) return fail("busy");
         if (!requestAlive()) return fail("cancelled");
@@ -458,6 +482,7 @@ private:
     QString suffix_;
     Decision consent_;
     bool sshExec_;
+    const bool legacyAccess_;
     QString testSshProgram_;
     Endpoint endpoint_;
     Handle pipe_, event_;
@@ -471,14 +496,18 @@ private:
     QDeadlineTimer deadline_, cooldown_;
     quint64 generation_ = 0;
     bool cancelled_ = false;
+    bool sshRequest_ = false, revoked_ = false;
     QMessageBox* dialog_ = nullptr;
     std::optional<model::Entry> executingEntry_;
     std::unique_ptr<SshExecution> execution_;
     const char* executionError_ = nullptr;
 };
 
-Access::Access(Application& app, const QString& endpointSuffix, Decision consent, bool sshExec, const QString& testSshProgram)
-    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent), sshExec, testSshProgram)) {}
+Access::Access(Application& app, const QString& endpointSuffix, Decision consent, bool sshExec, const QString& testSshProgram,
+               bool legacyAccess)
+    : broker_(std::make_unique<Broker>(app, endpointSuffix, std::move(consent), sshExec, testSshProgram, legacyAccess)) {}
 Access::~Access() = default;
 bool Access::start() { return broker_->start(); }
+bool Access::sshEnabled() const { return broker_->sshEnabled(); }
+void Access::setSshEnabled(bool enabled) { broker_->setSshEnabled(enabled); }
 }

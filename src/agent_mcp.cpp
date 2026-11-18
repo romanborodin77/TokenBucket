@@ -27,7 +27,8 @@ constexpr auto FindTool = "tokenbucket_find";
 constexpr auto ReadTool = "tokenbucket_read";
 constexpr auto FindSshTool = "tokenbucket_find_ssh";
 constexpr auto SshExecTool = "tokenbucket_ssh_exec";
-constexpr auto Instructions = "Start TokenBucket with --agent-access in the same Windows session. "
+constexpr auto Instructions = "For SSH use TokenBucket Settings > Security in the same Windows session. "
+    "For general secret reads start TokenBucket with --agent-access. "
     "Wait for owner consent and verification. Do not retry automatically after a denial.";
 
 QJsonObject serverInfo() { return {{"name", "TokenBucket"}, {"version", TOKENBUCKET_VERSION}}; }
@@ -58,7 +59,7 @@ QJsonArray toolList() {
              {"user", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxUser}}},
              {"port", QJsonObject{{"type", "integer"}, {"minimum", 1}, {"maximum", model::ssh::MaxPort}}}}, {"machine"}),
         tool(SshExecTool, "Run one command on an exact stored SSH binding after owner consent and verification. "
-            "Requires the TokenBucket GUI to be started with --agent-access --ssh-exec. "
+            "Enable SSH commands in TokenBucket Settings > Security. "
             "Use the selected ID, machine alias or host, exact user and port. Returns command output and exit status.",
             {{"id", QJsonObject{{"type", "string"}, {"format", "uuid"}}},
              {"machine", QJsonObject{{"type", "string"}, {"minLength", 1}, {"maxLength", model::ssh::MaxHost}}},

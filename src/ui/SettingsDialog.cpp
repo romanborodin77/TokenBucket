@@ -76,6 +76,10 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
     security->addRow(text(QStringLiteral("Windows Hello подтверждает владельца на этом компьютере. DPAPI привязывает ключ к учётной записи Windows; для переноса нужен защищённый экспорт с паролем.")));
     password_=new QPushButton(QStringLiteral("Сменить мастер-пароль…"),this); password_->setObjectName("changePassword"); security->addRow(password_);
     unlock_=new QPushButton(QStringLiteral("Изменить способ разблокировки…"),this); unlock_->setObjectName("changeUnlockMode"); security->addRow(unlock_);
+#ifdef Q_OS_WIN
+    check(security,QStringLiteral("Разрешить команды SSH через MCP"),prefs::McpSshSetting,initial.mcpSshEnabled);
+    security->addRow(text(QStringLiteral("Каждая команда требует согласия и проверки владельца.")));
+#endif
     auto* quick=page(QStringLiteral("Быстрая вставка"));
     auto* hotkey=new QKeySequenceEdit(initial.hotkey,this); hotkey->setObjectName("hotkey");
     hotkey->setAccessibleName(QStringLiteral("Сочетание клавиш")); quick->addRow(QStringLiteral("Сочетание клавиш"),hotkey);
@@ -142,6 +146,7 @@ prefs::Values SettingsDialog::draft() const {
     v.hotkey=findChild<QKeySequenceEdit*>("hotkey")->keySequence();
     v.defaultField=paste::Field(value("quickPasteDefaultField").toInt());
     v.clearEnvironmentOnExit=findChild<QCheckBox*>("env-clear-on-exit")->isChecked();
+    v.mcpSshEnabled=findChild<QCheckBox*>(prefs::McpSshSetting)->isChecked();
 #endif
     return v;
 }

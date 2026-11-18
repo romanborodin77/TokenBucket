@@ -3,6 +3,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include "app/Application.h"
+#include "app/Preferences.h"
 #include "ui/SessionFlow.h"
 #ifdef Q_OS_WIN
 #include "platform/EnvOps.h"
@@ -24,25 +25,26 @@ int start() {
     std::jthread sshCleanup(tb::agent::cleanAbandonedSshStages);
 #endif
     tb::Application core(dir);
+    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
 #ifdef Q_OS_WIN
-    std::unique_ptr<tb::agent::Access> agentAccess;
-    if (QCoreApplication::arguments().contains(QStringLiteral("--agent-access"))) {
-        agentAccess = std::make_unique<tb::agent::Access>(core, QString{}, tb::agent::Access::Decision{},
-            QCoreApplication::arguments().contains(QStringLiteral("--ssh-exec")));
-        if (!agentAccess->start()) {
-            agentAccess.reset();
+    const auto args=QCoreApplication::arguments();
+    const bool legacyAccess=args.contains(QStringLiteral("--agent-access"));
+    const bool sshEnabled=tb::prefs::read(settings,legacyAccess && args.contains(QStringLiteral("--ssh-exec"))).mcpSshEnabled;
+    tb::agent::Access agentAccess(core,{}, {},false,{},legacyAccess);
+    if (legacyAccess || sshEnabled) {
+        if (agentAccess.start()) agentAccess.setSshEnabled(sshEnabled);
+        else {
             QMessageBox::warning(nullptr, QStringLiteral("TokenBucket"),
                 QStringLiteral("Локальный интерфейс агента не запущен. Хранилище доступно через обычный интерфейс."));
         }
     }
-#endif
-    QSettings settings(QStringLiteral("TokenBucket"), QStringLiteral("TokenBucket"));
-    const int code=tb::ui::runSession(core,settings,startHidden);
-#ifdef Q_OS_WIN
+    const int code=tb::ui::runSession(core,settings,startHidden,nullptr,{},&agentAccess);
     // Очистка выполняется только владельцем instance lock и до его освобождения.
     if(tb::platform::envops::clearOnExitEnabled(&settings)) tb::platform::envops::clearAllExported(&settings);
-#endif
     return code;
+#else
+    return tb::ui::runSession(core,settings,startHidden);
+#endif
 }
 }
 int main(int argc, char** argv) {

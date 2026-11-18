@@ -1,5 +1,8 @@
 #include "MainWindow.h"
 #include "SettingsDialog.h"
+#ifdef Q_OS_WIN
+#include "AgentAccess.h"
+#endif
 #include "SessionFlow.h"
 #include "UnlockDialog.h"
 #include "../app/Preferences.h"
@@ -379,6 +382,12 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     refreshAll(); restoreUiState();
 }
 MainWindow::~MainWindow() { saveUiState(); }
+#ifdef Q_OS_WIN
+void MainWindow::setAgentAccess(agent::Access* access) {
+    agentAccess_=access;
+    if(access && access->sshEnabled()) appliedPreferences_.mcpSshEnabled=true;
+}
+#endif
 void MainWindow::showSettings() {
     if(!ready() || restoring_) return;
     card_->hideNowForTest();
@@ -520,6 +529,26 @@ prefs::ApplyResult MainWindow::applyPreferences(const prefs::Values& requested) 
     if(!persist("closeBehavior",requested.closeBehavior,appliedPreferences_.closeBehavior,closing,[] {})) return result;
 #ifdef Q_OS_WIN
     if(!persist("env-clear-on-exit",requested.clearEnvironmentOnExit,appliedPreferences_.clearEnvironmentOnExit,requested.clearEnvironmentOnExit,[] {})) return result;
+    if(requested.mcpSshEnabled!=appliedPreferences_.mcpSshEnabled) {
+        const auto key=QString::fromLatin1(prefs::McpSshSetting);
+        if(!allowed(key)) return result;
+        if(requested.mcpSshEnabled && (!agentAccess_ || !agentAccess_->start())) {
+            result.failedKey=key;
+            result.error=QStringLiteral("Не удалось запустить локальный интерфейс агента.");
+            return result;
+        }
+        const bool fallbacks=preferences_->fallbacksEnabled();
+        preferences_->setFallbacksEnabled(false);
+        const auto restoreFallbacks=qScopeGuard([&] {preferences_->setFallbacksEnabled(fallbacks);});
+        if(!requested.mcpSshEnabled && agentAccess_) agentAccess_->setSshEnabled(false);
+        if(!persist(key,requested.mcpSshEnabled,appliedPreferences_.mcpSshEnabled,requested.mcpSshEnabled,[&] {
+            if(requested.mcpSshEnabled) agentAccess_->setSshEnabled(true);
+        })) {
+            if(!requested.mcpSshEnabled && agentAccess_)
+                result.error+=QStringLiteral(" SSH-команды выключены в текущем сеансе. Повторите сохранение, чтобы выключить их и после перезапуска.");
+            return result;
+        }
+    }
 #endif
     refreshStatus(); return result;
 }

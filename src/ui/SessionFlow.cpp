@@ -23,7 +23,11 @@ bool runVaultOperation(tb::Application& core, const std::function<bool(void*, QS
     progress.show();
     return operation(reinterpret_cast<void*>(progress.winId()), err);
 }
-int runSession(Application& core,QSettings& settings,bool startHidden,QSettings* runPreferences,std::function<bool()> trayAvailable) {
+int runSession(Application& core,QSettings& settings,bool startHidden,QSettings* runPreferences,
+               std::function<bool()> trayAvailable,agent::Access* agentAccess) {
+#ifndef Q_OS_WIN
+    Q_UNUSED(agentAccess);
+#endif
     QString error;
     // Интервал автоблокировки настраивается в окне; кламп 1–60 минут — тот же, что в диалоге,
     // испорченное значение настроек не должно отключать защиту или блокировать намертво.
@@ -121,6 +125,9 @@ int runSession(Application& core,QSettings& settings,bool startHidden,QSettings*
         } else {
             QEventLoop loop; tb::ui::MainWindow window(core,nullptr,&settings,runPreferences,trayAvailable); bool closed = false;
             window.setIdleTimer(&idle);
+#ifdef Q_OS_WIN
+            window.setAgentAccess(agentAccess);
+#endif
             QObject::connect(&window, &tb::ui::MainWindow::notifyRequested, &tray, &tb::ui::TrayController::notify);
             mainWindow = &window;
             QObject::connect(&window,&MainWindow::lockedHiddenRequested,&loop,[&] {waitForTrayOpen=true;});
