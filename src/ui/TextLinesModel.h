@@ -12,7 +12,14 @@ public:
         if(const auto* e=current_()) ranges_=model::textfile::lineRanges(e->textFile.bytes);
         endResetModel();
     }
-    void reveal(int row) {revealed_=row; if(rowCount()) emit dataChanged(index(0,0),index(rowCount()-1,2));}
+    void reveal(int row) {
+        if (row < 0 || row >= rowCount()) row = -1;
+        if (revealed_ == row) return;
+        const int previous = revealed_;
+        revealed_ = row;
+        if (previous >= 0) emit dataChanged(index(previous, 1), index(previous, 1));
+        if (row >= 0) emit dataChanged(index(row, 1), index(row, 1));
+    }
     QString text(int row) const {
         const auto* e=current_(); if(!e || row<0 || row>=ranges_.size()) return {};
         const auto r=ranges_[row];

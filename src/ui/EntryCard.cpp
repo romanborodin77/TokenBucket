@@ -4,7 +4,6 @@
 #include "../model/TextFile.h"
 #include <QApplication>
 #include <QEvent>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
@@ -105,6 +104,11 @@ void EntryCard::updateEnabled() {
 }
 void EntryCard::hideNowForTest() {
     hideTimer_.stop(); const auto* entry=app_.gate()==Application::Gate::Ready?app_.model()->entry(id_):nullptr;
+    if (entry && entry->type == model::EntryType::TextFile) {
+        value_->setPlainText(QStringLiteral("%1\nСтрок: %2 · видимых: %3").arg(entry->textFile.fileName)
+            .arg(model::textfile::lineCount(entry->textFile.bytes)).arg(entry->textFile.visibleLines.size()));
+        return;
+    }
     value_->setPlainText(entry && entry->type==model::EntryType::PlainValue && !entry->reverify
         ?entry->plainValue.isEmpty()?QStringLiteral("Пусто"):entry->plainValue:QStringLiteral("••••••••"));
 }
@@ -120,10 +124,11 @@ void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();
     const auto* entry = app_.gate() == Application::Gate::Ready ? app_.model()->entry(id) : nullptr;
     if (!entry) { clear(); return; }
-    const QString expiryNote = entry->expiresAt.isValid()
+    const auto expiryDate = entry->expiresAt.date();
+    const QString expiryNote = expiryDate.isValid()
         ? QStringLiteral(" · действителен до %1%2").arg(
-              entry->expiresAt.toLocalTime().toString(QStringLiteral("dd.MM.yyyy")),
-              QDateTime::currentDateTimeUtc() > entry->expiresAt ? QStringLiteral(" (просрочен)") : QString())
+              expiryDate.toString(QStringLiteral("dd.MM.yyyy")),
+              expiryDate < QDate::currentDate() ? QStringLiteral(" (просрочен)") : QString())
         : QString();
     title_->setText(entry->title); metadata_->setText(QStringLiteral("Заметки: %1\n\nАдрес: %2\n\nИзменено: %3%4\n%5").arg(
         entry->note, entry->url, entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")), expiryNote, entry->sshComment));
@@ -162,9 +167,6 @@ void EntryCard::showEntry(model::Id id) {
     if(plain && !entry->parameterName.isEmpty()) metadata_->setText(QStringLiteral("Параметр: %1\n\n").arg(entry->parameterName)+metadata_->text());
     reveal_->setVisible(!ssh && !file && (!plain || entry->reverify)); copySecret_->setVisible(!file);
     copySecret_->setText(plain?QStringLiteral("Копировать значение"):ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
-    if(plain) hideNowForTest();
-    if(file) value_->setPlainText(QStringLiteral("%1\n%2 строк · видимых: %3").arg(entry->textFile.fileName)
-        .arg(model::textfile::lineRanges(entry->textFile.bytes).size()).arg(entry->textFile.visibleLines.size()));
     if(!entry->sourceEntryId.isNull()) metadata_->setText(metadata_->text()+QStringLiteral("\n\n%1\nИсточник — снимок импорта; рабочее значение могло быть изменено.")
         .arg(app_.model()->entry(entry->sourceEntryId)?QStringLiteral("Источник, строка %1").arg(entry->sourceLine+1):QStringLiteral("Источник недоступен")));
     copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty());
@@ -196,7 +198,7 @@ void EntryCard::copyField(int field) {
     if (field==1) {if(entry->type!=model::EntryType::Credentials) return; text=entry->login;}
     else if(field==2) {if(entry->type!=model::EntryType::SshKey) return; text=entry->sshPassphrase;}
     else if (field==0 && entry->type == model::EntryType::SshKey) {
-        if (!entry->sshPrivate.isValidUtf8()) { error_->setText(QStringLiteral("Ключ не является UTF-8. Для точной выдачи нужен файл.")); return; }
+        if (!entry->sshPrivate.isValidUtf8()) { error_->setText(QStringLiteral("Ключ нельзя скопировать как текст. Сохраните его в файл.")); return; }
         text = QString::fromUtf8(entry->sshPrivate);
     } else if(field==0) switch(entry->type) {
         case model::EntryType::ApiToken: text=entry->token; break;
@@ -206,14 +208,6 @@ void EntryCard::copyField(int field) {
     }
     if (text.isEmpty()) { error_->setText(QStringLiteral("Пустое значение не копируется.")); return; }
     emit copyRequested(text);
-}
-bool EntryCard::isSafeTarget(const QString& path, QString* err) {
-    const QFileInfo info(path);
-    if (info.isSymbolicLink() || info.isShortcut()) {
-        if (err) *err = QStringLiteral("Запись по символической ссылке запрещена.");
-        return false;
-    }
-    return true;
 }
 void EntryCard::saveSshToFile() {
     if (!authorize()) return;
@@ -233,27 +227,18 @@ void EntryCard::saveSshToFile() {
             QStringLiteral("Приватный ключ будет сохранён за пределами хранилища в незашифрованном виде. Продолжить?"),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
     if (!stillValid()) return;
-    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранение приватного ключа"));
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("Сохранение приватного ключа"), {}, {}, nullptr,
+        QFileDialog::DontConfirmOverwrite | QFileDialog::DontResolveSymlinks);
     if (path.isEmpty() || !stillValid()) return;
-    QString error;
-    const QString temporary = path + QStringLiteral(".tb-new");
-    if (!isSafeTarget(path, &error) || !isSafeTarget(temporary, &error)) {
-        QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
-    }
-    bool written = false;
-    if (QFile::exists(path)) {
+    const bool replace = QFileInfo::exists(path);
+    if (replace) {
         if (QMessageBox::question(this, QStringLiteral("TokenBucket"), QStringLiteral("Файл существует. Перезаписать?"),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
         if (!stillValid()) return;
-        if (QFile::exists(temporary) && !store::realFileOps().removeFile(temporary)) {
-            QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось подготовить замену файла.")); return;
-        }
-        if ((written = store::realFileOps().writeAll(temporary, key))
-            && !(written = store::realFileOps().renameReplace(temporary, path)))
-            store::realFileOps().removeFile(temporary);
-    } else written = store::realFileOps().writeAll(path, key);
-    if (!written) {
-        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось записать файл ключа.")); return;
+    }
+    const QString error = store::exportFile(path, key, replace);
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return;
     }
     error_->clear();
 }
@@ -273,6 +258,7 @@ bool EntryCard::eventFilter(QObject* object, QEvent* event) {
             return true;
         }
     }
+    if (!hideTimer_.isActive()) return QFrame::eventFilter(object, event);
     if ((event->type() == QEvent::WindowDeactivate && object == window()) || event->type() == QEvent::ApplicationDeactivate || (event->type() == QEvent::Hide && object == this)) hideNowForTest();
     if (event->type() == QEvent::FocusIn) if (auto* widget = qobject_cast<QWidget*>(object); widget && widget != this && !isAncestorOf(widget)) hideNowForTest();
     return QFrame::eventFilter(object, event);

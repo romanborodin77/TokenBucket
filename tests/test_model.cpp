@@ -359,8 +359,12 @@ private slots:
     void tagsRenameAndRemove() {
         model::Entry first; first.id = QUuid::createUuid(); first.groupId = g1; first.title = "1";
         first.tags = {QStringLiteral("прод"), QStringLiteral("web")};
-        model::Entry second = first; second.id = QUuid::createUuid(); second.title = "2"; second.tags = {QStringLiteral("прод")};
+        model::Entry second = first; second.id = QUuid::createUuid(); second.title = "2"; second.tags = {QStringLiteral("ПРОД")};
         QVERIFY(m.setEntry(first).isEmpty()); QVERIFY(m.setEntry(second).isEmpty());
+        QHash<QString, int> counts;
+        QCOMPARE(m.allTags(&counts).size(), 2);
+        QCOMPARE(counts.value(QStringLiteral("прод")), 2);
+        QCOMPARE(counts.value(QStringLiteral("web")), 1);
         QCOMPARE(m.search(QStringLiteral("ПРОД")).size(), 2);          // только теги; имена узлов «ПРОД» не содержат
         const auto partial = m.search(QStringLiteral("eb"));           // часть тега «web»
         QVERIFY(partial.contains(first.id)); QVERIFY(!partial.contains(second.id));

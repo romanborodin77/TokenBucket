@@ -95,6 +95,61 @@ class TestStorageUi : public QObject {
         return e;
     }
 private slots:
+    void bulkMoveDistinguishesIdenticallyNamedGroups() {
+        QTemporaryDir dir;
+        Application app(dir.path());
+        QString error;
+        QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto first = QUuid::createUuid(), second = QUuid::createUuid();
+        for (const auto id : {first, second}) QVERIFY(app.model()->addNode(id, {}, "Demo").isEmpty());
+        model::Entry entry;
+        entry.id = QUuid::createUuid(); entry.groupId = first; entry.title = "Example"; entry.token = "synthetic";
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        QVERIFY(app.save(&error));
+        QSettings prefs(dir.filePath("ui.ini"), QSettings::IniFormat);
+        ui::MainWindow window(app, nullptr, &prefs);
+        window.show();
+        window.findChild<QPushButton*>("libraryAll")->click();
+        QAction* move = nullptr;
+        for (auto* action : window.findChildren<QAction*>())
+            if (action->text() == QStringLiteral("Переместить выбранные в группу…")) move = action;
+        QVERIFY(move);
+        for (const auto destination : {second, first}) {
+            window.list()->setCurrentRow(0);
+            bool distinct = false;
+            QTimer::singleShot(0, &window, [&] {
+                auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                if (!dialog) return;
+                auto* choices = dialog->findChild<QComboBox*>();
+                if (!choices) { dialog->reject(); return; }
+                const int a = choices->findData(first), b = choices->findData(second);
+                distinct = choices->count() == 2 && a >= 0 && b >= 0 && a != b && choices->itemText(a) != choices->itemText(b);
+                if (!distinct) { dialog->reject(); return; }
+                choices->setCurrentIndex(choices->findData(destination));
+                dialog->accept();
+            });
+            move->trigger();
+            QVERIFY(distinct);
+            QCOMPARE(app.model()->entry(entry.id)->groupId, destination);
+        }
+        auto other = entry;
+        other.id = QUuid::createUuid(); other.title = "Other";
+        QVERIFY(app.model()->setEntry(other).isEmpty());
+        window.refreshAll();
+        window.list()->selectAll();
+        QCOMPARE(window.list()->selectedItems().size(), 2);
+        QTimer::singleShot(0, &window, [&] {
+            auto* dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            if (!dialog) return;
+            auto* choices = dialog->findChild<QComboBox*>();
+            choices->setCurrentIndex(choices->findData(second));
+            window.search()->setText("Example");
+            dialog->accept();
+        });
+        move->trigger();
+        QCOMPARE(app.model()->entry(entry.id)->groupId, first);
+        QCOMPARE(app.model()->entry(other.id)->groupId, first);
+    }
     void sensitiveUrlNeedsAnExplicitWarning() {
         model::VaultModel model; const auto group=QUuid::createUuid(); QVERIFY(model.addNode(group,{},"Demo").isEmpty()); EntryEditDialog dialog(model,std::nullopt); dialog.setGroup(group);
         dialog.findChild<QComboBox*>("entryType")->setCurrentIndex(3); dialog.findChild<QLineEdit*>("entryTitle")->setText("Endpoint"); dialog.findChild<QLineEdit*>("entryPlainValue")->setText("https://demo:synthetic@example.test/?token=synthetic"); dialog.findChild<QComboBox*>("entryValueFormat")->setCurrentIndex(2);
@@ -314,6 +369,7 @@ private slots:
         window.search()->setText("192.0.2.10"); QCOMPARE(embedded->model()->rowCount(),1); QCOMPARE(embedded->model()->index(0,0).data(Qt::UserRole).value<model::Id>(),value.id);
         window.search()->setText(protectedValue.plainValue); QCOMPARE(embedded->model()->rowCount(),0);
         app.lock(); QCOMPARE(view->model()->rowCount(),0); QCOMPARE(embedded->model()->rowCount(),0);
+        window.search()->undo(); QVERIFY(window.search()->text().isEmpty());
     }
     void compareSourceRequiresBothOwnersAndReportsOnlyResult_data() {
         QTest::addColumn<int>("action"); for(int i=0;i<6;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
@@ -453,7 +509,8 @@ private slots:
         auto p=io::parseTextFile("PUBLIC_IP=192.0.2.10","demo.txt"); p.source.groupId=group; int applied=0;
         ui::TextImportDialog dialog(app,p,[&](const auto&,const auto&,QString*) {++applied; return true;});
         bool seen=false; QTimer::singleShot(0,[&] {QVERIFY(qobject_cast<QMessageBox*>(QApplication::activeModalWidget())); seen=true; app.lock();});
-        dialog.accept(); QVERIFY(seen); QCOMPARE(applied,0); QCOMPARE(dialog.findChild<QTableView*>("textImportParameters")->model()->rowCount(),0); QVERIFY(dialog.findChild<QLineEdit*>("textImportTitle")->text().isEmpty());
+        dialog.accept(); QVERIFY(seen); QCOMPARE(applied,0); QCOMPARE(dialog.findChild<QTableView*>("textImportParameters")->model()->rowCount(),0); auto* title = dialog.findChild<QLineEdit*>("textImportTitle");
+        title->undo(); QVERIFY(title->text().isEmpty());
     }
     void textPreviewUsesTimedOwnerCheckAndBlocksNativeCopy() {
         QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error)); const auto group=QUuid::createUuid(); QVERIFY(app.model()->addNode(group,{},"Demo").isEmpty());
@@ -558,6 +615,27 @@ private slots:
         QCOMPARE(app.model()->entry(e.id)->textFile.bytes,e.textFile.bytes);
         ops.failWrite=false; app.lock(); QVERIFY(app.unlock("valid-password",&error));
         QCOMPARE(app.model()->entry(e.id)->textFile.visibleLines,fail?QList<int>{0}:(QList<int>{0,1}));
+    }
+    void documentCardKeepsSummaryWhenFocusLeaves() {
+        QTemporaryDir dir;
+        Application app(dir.path());
+        QString error;
+        QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group, {}, "Demo").isEmpty());
+        const auto entry = document(group);
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        ui::EntryCard card(app);
+        card.showEntry(entry.id);
+        const auto summary = card.secretText();
+        QVERIFY(summary.contains(entry.textFile.fileName));
+        QEvent deactivate(QEvent::ApplicationDeactivate);
+        QApplication::sendEvent(qApp, &deactivate);
+        QCOMPARE(card.secretText(), summary);
+        card.setRevealSeconds(5);
+        QCOMPARE(card.secretText(), summary);
+        app.lock();
+        QVERIFY(!card.secretText().contains(entry.textFile.fileName));
     }
     void pendingDocumentCopyCannotOutliveLock() {
 #ifdef Q_OS_WIN

@@ -33,7 +33,7 @@ struct Entry {
     QByteArray sshPrivate, sshPublic; // SSH-ключи — байты (файл как есть), не строки
     QList<SshTarget> sshTargets;
     QDateTime created, modified;
-    QDateTime expiresAt; // срок действия секрета; null — бессрочно (UTC, полночь даты)
+    QDateTime expiresAt; // Календарная дата включительно в локальном времени. Хранится как полночь UTC, null — бессрочно.
     bool favorite = false, reverify = false; // reverify: повторная проверка владельца перед доступом к секрету
     QStringList tags; // теги записи; канонизируются в VaultModel::setEntry: trim, без пустых и дублей (без учёта регистра)
     QString parameterName,plainValue;

@@ -274,9 +274,12 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
             && (payloadCount(original_)>1 || original_.type==EntryType::TextFile || type==EntryType::TextFile)) {
             showError(QStringLiteral("Эта смена типа потеряет полезные поля. Создайте отдельную запись; исходная останется без изменений.")); revert(); return;
         }
-        if (shownType_==EntryType::SshKey && type!=EntryType::SshKey && !original_.sshTargets.isEmpty()
+        if (shownType_==EntryType::SshKey && type!=EntryType::SshKey
+            && (!original_.sshPrivate.isEmpty() || !original_.sshTargets.isEmpty())
             && !confirmChange(this,QStringLiteral("Смена типа записи"),
-                QStringLiteral("При сохранении нового типа сохранённый SSH-ключ и его подключения будут удалены из этой записи. Продолжить?"))) {
+                original_.sshTargets.isEmpty()
+                    ? QStringLiteral("При сохранении нового типа SSH-ключ будет удалён из этой записи. Продолжить?")
+                    : QStringLiteral("При сохранении нового типа SSH-ключ и его подключения будут удалены из этой записи. Продолжить?"))) {
             revert(); return;
         }
         QString source;
@@ -312,7 +315,7 @@ EntryEditDialog::EntryEditDialog(const VaultModel& model, std::optional<Entry> e
     });
     connect(browse, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Приватный ключ SSH"));
-        if (!path.isEmpty()) sshPath_->setText(path);
+        if (!canceled_ && !path.isEmpty()) sshPath_->setText(path);
     });
     connect(generate, &QPushButton::clicked, this, [this] {
         tb::crypto::init();
@@ -427,15 +430,26 @@ bool EntryEditDialog::eventFilter(QObject* object,QEvent* event) {
 }
 void EntryEditDialog::setGroup(Id id) { group_->setCurrentIndex(id.isNull() ? -1 : group_->findData(id)); }
 void EntryEditDialog::clearSecrets() {
-    token_->clear(); password_->clear(); sshPass_->clear(); plainValue_->clear(); fileBody_->clear(); bodyBaseline_.clear();
-    login_->clear(); note_->clear(); sshPublic_->clear(); original_ = Entry{}; result_.reset();
+    canceled_ = true;
+    original_ = Entry{}; result_.reset(); bodyBaseline_.clear();
+    // QLineEdit::clear() leaves an undo command. Setting the text resets its history.
+    for (auto* field : {title_, url_, tags_, token_, login_, password_, sshPass_, sshPath_, sshComment_, parameter_, plainValue_, fileName_})
+        field->setText({});
+    for (auto* field : {note_, sshPublic_, fileBody_}) field->setPlainText({});
+    for (auto* field : sshTargets_->findChildren<QLineEdit*>()) field->setText({});
     sshTargets_->setRowCount(0);
+    auto* suggestions = tags_->completer()->model();
+    suggestions->removeRows(0, suggestions->rowCount());
+    group_->clear();
+    error_->clear();
 }
-void EntryEditDialog::reject() { canceled_ = true; clearSecrets(); QDialog::reject(); }
+void EntryEditDialog::reject() { clearSecrets(); QDialog::reject(); }
 void EntryEditDialog::accept() {
-    if (reading_ || canceled_) return;
+    if (accepting_ || canceled_) return;
     if(!type_->currentData().isValid()) {showError(QStringLiteral("Выберите тип записи.")); return;}
     const auto type=EntryType(type_->currentData().toInt());
+    if (type != shownType_) return;
+    QScopedValueRollback accepting(accepting_, true);
     Entry e=type==original_.type?original_:Entry{};
     e.id = original_.id.isNull() || editingCopy_ ? QUuid::createUuid() : original_.id; e.created = editingCopy_?QDateTime():original_.created;
     e.sourceEntryId=original_.sourceEntryId; e.sourceLine=original_.sourceLine;
@@ -467,15 +481,18 @@ void EntryEditDialog::accept() {
             e.sshTargets.append({text(0),text(1),text(2),port});
         }
         if (!sshPath_->text().isEmpty()) {
-            QScopedValueRollback guard(reading_, true);
             fields_->setEnabled(false); buttons_->button(QDialogButtonBox::Save)->setEnabled(false);
             QEventLoop loop; QFutureWatcher<ReadKey> watcher;
             connect(&watcher, &QFutureWatcher<ReadKey>::finished, &loop, &QEventLoop::quit);
+            connect(this, &QDialog::rejected, &loop, &QEventLoop::quit);
             watcher.setFuture(QtConcurrent::run(readKey, sshPath_->text()));
             if (!watcher.isFinished()) loop.exec();
+            if (canceled_) {
+                watcher.cancel();
+                return;
+            }
             const auto read = watcher.result();
             fields_->setEnabled(true); buttons_->button(QDialogButtonBox::Save)->setEnabled(true);
-            if (canceled_) return;
             if (!read.error.isEmpty()) { showError(read.error); return; }
             e.sshPrivate = read.bytes;
         }
@@ -496,7 +513,11 @@ void EntryEditDialog::accept() {
         if(editingCopy_) e.textFile.sourceSnapshot=false;
     } else {showError(QStringLiteral("Неизвестный тип записи.")); return;
     }
-    auto validation = model_; const auto error = validation.setEntry(e);
+    QString error;
+    {
+        auto validation = model_;
+        error = validation.setEntry(e);
+    }
     if (!error.isEmpty()) { showError(error); return; }
     if(e.type==EntryType::PlainValue && e.valueFormat==ValueFormat::Url) {
         const QUrl url(e.plainValue,QUrl::StrictMode);

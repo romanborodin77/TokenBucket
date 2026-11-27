@@ -16,5 +16,7 @@ struct FileOps {
     virtual bool removeFile(const QString& path) = 0;
 };
 FileOps& realFileOps();
+// Пустая строка при успехе. Замена разрешена только после подтверждения владельцем.
+QString exportFile(const QString& path, const QByteArray& bytes, bool replace, FileOps& ops = realFileOps());
 bool ensurePrivateDir(const QString& dir);
 }

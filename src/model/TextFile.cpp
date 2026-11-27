@@ -3,18 +3,28 @@
 #include <algorithm>
 #include <QStringDecoder>
 namespace tb::model::textfile {
+namespace {
+int scanLines(const QByteArray& bytes, QList<LineRange>* ranges) {
+    qsizetype start = bytes.startsWith("\xef\xbb\xbf") ? 3 : 0;
+    if (start == bytes.size()) return 0;
+    int count = 0;
+    for (qsizetype i = start; i < bytes.size(); ++i) {
+        if (bytes[i] != '\r' && bytes[i] != '\n') continue;
+        const int terminator = bytes[i] == '\r' && i + 1 < bytes.size() && bytes[i + 1] == '\n' ? 2 : 1;
+        if (ranges) ranges->append({start, i - start, terminator});
+        if (++count > MaxLines) return count;
+        i += terminator - 1;
+        start = i + 1;
+    }
+    if (ranges) ranges->append({start, bytes.size() - start, 0});
+    return count + 1;
+}
+}
+int lineCount(const QByteArray& bytes) { return scanLines(bytes, nullptr); }
 QList<LineRange> lineRanges(const QByteArray& bytes) {
     QList<LineRange> result;
-    qsizetype start=bytes.startsWith("\xef\xbb\xbf")?3:0;
-    if(start==bytes.size()) return result;
-    for(qsizetype i=start;i<bytes.size();++i) {
-        if(bytes[i]!='\r' && bytes[i]!='\n') continue;
-        const qsizetype terminator=bytes[i]=='\r' && i+1<bytes.size() && bytes[i+1]=='\n'?2:1;
-        result.append({start,i-start,terminator});
-        if(result.size()>MaxLines) return result;
-        i+=terminator-1; start=i+1;
-    }
-    result.append({start,bytes.size()-start,0}); return result;
+    scanLines(bytes, &result);
+    return result;
 }
 QString validate(const TextFileData& file) {
     if(file.fileName.isEmpty() || file.fileName.size()>255 || file.fileName=="." || file.fileName==".."
@@ -23,11 +33,11 @@ QString validate(const TextFileData& file) {
     for(auto ch:file.fileName.toUcs4()) if(!QChar::isPrint(ch)) return QStringLiteral("Имя файла содержит управляющий символ.");
     if(file.bytes.size()>VaultModel::MaxSecretBytes) return QStringLiteral("Файл превышает 1 МиБ.");
     if(file.bytes.contains('\0') || !file.bytes.isValidUtf8()) return QStringLiteral("Нужен корректный UTF-8 без NUL.");
-    const auto lines=lineRanges(file.bytes);
-    if(lines.size()>MaxLines) return QStringLiteral("В файле больше 50 000 строк.");
+    const int lines=lineCount(file.bytes);
+    if(lines>MaxLines) return QStringLiteral("В файле больше 50 000 строк.");
     int previous=-1;
     for(int line:file.visibleLines) {
-        if(line<=previous || line>=lines.size()) return QStringLiteral("Недопустимый список видимых строк.");
+        if(line<=previous || line>=lines) return QStringLiteral("Недопустимый список видимых строк.");
         previous=line;
     }
     return {};

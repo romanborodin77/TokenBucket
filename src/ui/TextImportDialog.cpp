@@ -115,7 +115,9 @@ void TextImportDialog::hideValue() {timer_.stop(); if(rows_) rows_->hide(); if(l
 void TextImportDialog::done(int result) {
     closed_=true; for(auto* dialog:findChildren<QDialog*>()) dialog->reject(); hideValue();
     baseline_.clear(); preview_={}; rows_->choices.clear(); rows_->enabled.clear(); rows_->reset(); lines_->reset();
-    for(auto* field:{title_,name_,path_}) field->clear(); QDialog::done(result);
+    for (auto* field : {title_, name_, path_}) field->setText({});
+    summary_->clear(); error_->clear();
+    QDialog::done(result);
 }
 bool TextImportDialog::confirm(const QString& text) {
     QMessageBox box(QMessageBox::Warning,QStringLiteral("TXT — классификация"),text,QMessageBox::Yes|QMessageBox::No,this);

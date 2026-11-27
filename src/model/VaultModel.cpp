@@ -176,7 +176,7 @@ QString VaultModel::setEntry(const Entry& e) {
         if(e.type==EntryType::TextFile && previous->textFile.bytes!=e.textFile.bytes && !e.textFile.visibleLines.isEmpty())
             return QStringLiteral("При изменении тела сначала сбросьте видимость строк.");
     }
-    const auto sourceLines=e.type==EntryType::TextFile?textfile::lineRanges(e.textFile.bytes).size():0;
+    const auto sourceLines=e.type==EntryType::TextFile?textfile::lineCount(e.textFile.bytes):0;
     for(const auto& related:entries_) if(related.id!=e.id && related.sourceEntryId==e.id) {
         if(e.type!=EntryType::TextFile || !e.textFile.sourceSnapshot || related.sourceLine>=sourceLines)
             return QStringLiteral("Запись используется как снимок источника.");
@@ -199,7 +199,7 @@ QString VaultModel::sourceError(const Entry& e) const {
         return QStringLiteral("Недопустимая ссылка на источник.");
     const auto* source=entry(e.sourceEntryId);
     if(source && (source->type!=EntryType::TextFile || !source->textFile.sourceSnapshot
-        || e.sourceLine>=textfile::lineRanges(source->textFile.bytes).size())) return QStringLiteral("Источник должен быть текстовым снимком с указанной строкой.");
+        || e.sourceLine>=textfile::lineCount(source->textFile.bytes))) return QStringLiteral("Источник должен быть текстовым снимком с указанной строкой.");
     return {};
 }
 QString VaultModel::removeEntry(Id id) { return entries_.remove(id) ? QString() : "Запись не найдена."; }
@@ -586,13 +586,16 @@ VaultModel::ParseStatus VaultModel::fromCbor(const QByteArray& cbor, QString* er
     *this = std::move(fresh);
     return ParseStatus::Ok;
 }
-QStringList VaultModel::allTags() const {
+QStringList VaultModel::allTags(QHash<QString, int>* usesByFoldedTag) const {
+    QHash<QString, int> counts;
     QStringList tags;
-    for (const auto& entry : entries_)
-        for (const QString& tag : entry.tags)
-            if (std::none_of(tags.cbegin(), tags.cend(), [&](const QString& existing) {
-                    return existing.compare(tag, Qt::CaseInsensitive) == 0; }))
-                tags << tag;
+    for (const auto& entry : entries_) {
+        for (const QString& tag : entry.tags) {
+            int& uses = counts[tag.toCaseFolded()];
+            if (uses++ == 0) tags << tag;
+        }
+    }
+    if (usesByFoldedTag) *usesByFoldedTag = std::move(counts);
     std::sort(tags.begin(), tags.end(), [](const QString& a, const QString& b) { return a.compare(b, Qt::CaseInsensitive) < 0; });
     return tags;
 }

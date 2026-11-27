@@ -124,7 +124,7 @@ private:
     bool geometryErrorReported_ = false;
     QPointer<IdleTimer> idleTimer_;
     QLabel *idleStatus_{}, *clipboardStatus_{}, *hotkeyStatus_{};
-    QDate statusDate_ = QDateTime::currentDateTimeUtc().date();
+    QDate statusDate_ = QDate::currentDate();
     bool ready() const;
     bool ensureSchemaUpgradeApproved();
     void previewTextImport(io::TextImportPreview);
@@ -167,7 +167,7 @@ private:
     bool bulkApply(const QList<model::Id>& ids, quint64 generation, const std::function<QString(model::VaultModel&, model::Id)>& change);
     // Диалоговые обёртки массовых действий: UUID и поколение снимаются до диалога.
     void bulkMoveDialog(); void bulkAddTagDialog(); void bulkRemoveTagDialog();
-    void selectEntriesForAction(const QList<model::Id>& ids);
+    bool restoreSelectionForAction(const QList<model::Id>& ids, quint64 generation);
     bool selectionStill(const QList<model::Id>& ids, quint64 generation);
     void viewAction(int action); // 0 — сохранить текущее, 1 — переименовать, 2 — обновить, 3 — удалить
     QStackedWidget* right_{};

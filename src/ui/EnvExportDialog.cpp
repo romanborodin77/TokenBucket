@@ -13,6 +13,9 @@
 #include <QVBoxLayout>
 #include <QSignalBlocker>
 namespace tb::ui {
+namespace {
+const QString nameRule = QStringLiteral("Введите до 64 символов. Используйте латинские буквы, цифры и подчёркивание. Первый символ — буква или подчёркивание.");
+}
 EnvExportDialog::EnvExportDialog(QWidget* parent,QSettings* preferences) : QDialog(parent) {
     setWindowTitle(QStringLiteral("TokenBucket — переменная окружения"));
     auto* layout = new QVBoxLayout(this);
@@ -85,14 +88,15 @@ QString EnvExportDialog::name() const { return name_->text().trimmed(); }
 EnvExportDialog::Mode EnvExportDialog::mode() const { return temporary_->isChecked() ? Mode::Temporary : Mode::Permanent; }
 void EnvExportDialog::setSuggestedName(const QString& name) {
     if(name.isEmpty()) return;
-    if(!platform::envops::validName(name)) {name_->clear(); error_->setText(QStringLiteral("Имя параметра не подходит для окружения. Укажите имя по правилам ниже.")); return;}
+    if(!platform::envops::validName(name)) {name_->clear(); error_->setText(nameRule); return;}
     name_->setText(name);
+    error_->clear();
 }
 QString EnvExportDialog::program() const { return program_->text().trimmed(); }
 QString EnvExportDialog::arguments() const { return arguments_->text(); }
 void EnvExportDialog::accept() {
     if (!platform::envops::validName(name())) {
-        error_->setText(QStringLiteral("Имя переменной: латинские буквы, цифры и «_», не начинается с цифры, до 64 символов."));
+        error_->setText(nameRule);
         name_->setFocus(); return;
     }
     if (mode() == Mode::Temporary && program().isEmpty()) {

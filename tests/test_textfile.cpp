@@ -3,11 +3,30 @@
 #include <QCborArray>
 #include "../src/model/VaultModel.h"
 #include "../src/model/TextFile.h"
+#include "../src/ui/TextLinesModel.h"
 using namespace Qt::StringLiterals;
 using namespace tb::model;
 class TestTextFile : public QObject {
     Q_OBJECT
 private slots:
+    void revealRefreshesOnlyChangedValues() {
+        Entry entry;
+        entry.textFile.bytes = "one\ntwo\nthree";
+        tb::ui::TextLinesModel rows([&] { return &entry; }, nullptr);
+        QSignalSpy changes(&rows, &QAbstractItemModel::dataChanged);
+        rows.reveal(-1);
+        QVERIFY(changes.isEmpty());
+        rows.reveal(1);
+        rows.reveal(1);
+        rows.reveal(2);
+        rows.reveal(-1);
+        QCOMPARE(changes.size(), 4);
+        for (int row : {1, 1, 2, 2}) {
+            const auto signal = changes.takeFirst();
+            QCOMPARE(signal[0].value<QModelIndex>(), rows.index(row, 1));
+            QCOMPARE(signal[1].value<QModelIndex>(), rows.index(row, 1));
+        }
+    }
     void plainValuesAreSearchableUnlessProtected() {
         VaultModel model; const auto group=QUuid::createUuid();
         QVERIFY(model.addNode(group,{},"Demo").isEmpty());
@@ -30,6 +49,7 @@ private slots:
         TextFileData file; file.fileName="demo.txt"; file.bytes=bytes;
         QVERIFY(textfile::validate(file).isEmpty()); const auto ranges=textfile::lineRanges(bytes);
         QCOMPARE(ranges.size(),count);
+        QCOMPARE(textfile::lineCount(bytes),count);
         QByteArray rebuilt=bytes.startsWith(QByteArray::fromHex("efbbbf"))?bytes.first(3):QByteArray();
         for(int i=0;i<ranges.size();++i) {
             const auto r=ranges[i]; rebuilt+=bytes.mid(r.offset,r.length+r.terminatorLength);
@@ -47,6 +67,7 @@ private slots:
         for(const QByteArray& body:QList<QByteArray>{QByteArray("a\0b",3),QByteArray::fromHex("c0af"),QByteArray(1024*1024+1,'x'),QByteArray(50000,'\n')}) {
             auto bad=file; bad.bytes=body; QVERIFY(!textfile::validate(bad).isEmpty());
         }
+        QCOMPARE(textfile::lineCount(QByteArray(50001,'\n')), textfile::MaxLines + 1);
         file.bytes=QByteArray(49999,'\n'); file.visibleLines={49999}; QVERIFY(textfile::validate(file).isEmpty());
     }
     void plainFormats_data() {

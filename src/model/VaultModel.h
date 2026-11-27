@@ -57,7 +57,7 @@ public:
     // Нормализация тегов: trim, пустые отбрасываются, дедупликация без учёта регистра —
     // каноничным считается первое написание. Инвариант всех тегов, хранящихся в модели.
     static QStringList normalizeTags(const QStringList& raw);
-    QStringList allTags() const;                                 // уникальные теги хранилища, отсортированы без учёта регистра
+    QStringList allTags(QHash<QString, int>* usesByFoldedTag = nullptr) const;                                 // уникальные теги хранилища, отсортированы без учёта регистра
     QString renameTag(const QString& from, const QString& to);   // "" — успех, иначе текст ошибки
     QString removeTag(const QString& tag);                       // "" — успех, иначе текст ошибки
     // Представления: setViews транзакционен — при любой ошибке список прежний.

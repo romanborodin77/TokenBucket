@@ -1,6 +1,7 @@
 #include "FileOps.h"
 #include <QDir>
 #include <QFileInfo>
+#include <QScopeGuard>
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
@@ -15,15 +16,15 @@ struct PrivateSecurity {
     PrivateSecurity() {
         HANDLE token = nullptr;
         if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return;
+        const auto closeToken = qScopeGuard([&] { CloseHandle(token); });
         DWORD size = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &size);
         std::vector<BYTE> data(size);
         const bool ok = GetTokenInformation(token, TokenUser, data.data(), size, &size);
-        CloseHandle(token);
         if (!ok) return;
         LPWSTR sid = nullptr;
         if (!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(data.data())->User.Sid, &sid)) return;
+        const auto freeSid = qScopeGuard([&] { LocalFree(sid); });
         const QString sddl = QStringLiteral("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;%1)").arg(QString::fromWCharArray(sid));
-        LocalFree(sid);
         ConvertStringSecurityDescriptorToSecurityDescriptorW(reinterpret_cast<LPCWSTR>(sddl.utf16()),
             SDDL_REVISION_1, &descriptor, nullptr);
     }
@@ -42,12 +43,19 @@ struct RealOps : FileOps {
         PrivateSecurity security;
         if (!security.descriptor || bytes.size() > MAXDWORD) return false;
         SECURITY_ATTRIBUTES sa{sizeof(sa), security.descriptor, FALSE};
-        HANDLE file = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()), GENERIC_WRITE, 0, &sa,
+        HANDLE file = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()), GENERIC_WRITE | DELETE, 0, &sa,
                                   CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) return false;
+        // Mark the new file for removal before writing any data. Commit only after flush.
+        FILE_DISPOSITION_INFO disposition{TRUE};
+        bool ok = SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
         DWORD written = 0;
-        bool ok = WriteFile(file, bytes.constData(), DWORD(bytes.size()), &written, nullptr)
-                  && written == DWORD(bytes.size()) && FlushFileBuffers(file);
+        if (ok) ok = WriteFile(file, bytes.constData(), DWORD(bytes.size()), &written, nullptr)
+                     && written == DWORD(bytes.size()) && FlushFileBuffers(file);
+        if (ok) {
+            disposition.DeleteFile = FALSE;
+            ok = SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
+        }
         if (!CloseHandle(file)) ok = false;
         return ok;
     }

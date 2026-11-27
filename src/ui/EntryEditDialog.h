@@ -51,5 +51,5 @@ private:
     QLabel* error_{};
     QWidget* fields_{};
     QDialogButtonBox* buttons_{};
-    bool canceled_ = false, reading_ = false;
+    bool canceled_ = false, accepting_ = false;
 };

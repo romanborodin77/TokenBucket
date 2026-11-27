@@ -54,32 +54,44 @@ RegistryView::RegistryView(Application& app,QWidget* parent):QWidget(parent),app
     tree_->header()->setSectionResizeMode(0,QHeaderView::Stretch); tree_->setColumnWidth(1,180); tree_->setColumnWidth(2,120); layout->addWidget(tree_,1);
     auto* actions=new QHBoxLayout; copy_=new QPushButton(QStringLiteral("Копировать значение"),this); copy_->setObjectName("registryCopy"); source_=new QPushButton(QStringLiteral("Источник…"),this); source_->setObjectName("registrySource");
     actions->addWidget(copy_); actions->addWidget(source_); layout->addLayout(actions);
-    connect(tree_,&QTreeView::clicked,this,[this] {if(!current().isNull()) emit entryActivated(current());});
-    connect(tree_,&QTreeView::activated,this,[this] {if(!current().isNull()) emit entryActivated(current());});
-    connect(copy_,&QPushButton::clicked,this,[this] {if(copy_->isEnabled()) emit copyRequested(current());});
-    connect(source_,&QPushButton::clicked,this,[this] {const auto* e=app_.model()->entry(current()); if(source_->isEnabled() && e) emit sourceRequested(e->sourceEntryId);});
-    connect(tree_->selectionModel(),&QItemSelectionModel::currentChanged,this,[this] {updateActions();});
+    connect(tree_,&QTreeView::clicked,this,[this] {if(!currentEntry().isNull()) emit entryActivated(currentEntry());});
+    connect(tree_,&QTreeView::activated,this,[this] {if(!currentEntry().isNull()) emit entryActivated(currentEntry());});
+    connect(copy_,&QPushButton::clicked,this,[this] {if(copy_->isEnabled()) emit copyRequested(currentEntry());});
+    connect(source_,&QPushButton::clicked,this,[this] {const auto* e=app_.model()->entry(currentEntry()); if(source_->isEnabled() && e) emit sourceRequested(e->sourceEntryId);});
+    connect(tree_->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] {
+        updateActions();
+        emit currentEntryChanged();
+    });
     connect(&app_,&Application::stateChanged,this,&RegistryView::refresh); connect(&app_,&Application::busyChanged,this,&RegistryView::updateActions);
     tree_->installEventFilter(this); tree_->viewport()->installEventFilter(this); refresh();
 }
-model::Id RegistryView::current() const {return tree_->currentIndex().data(Qt::UserRole).value<model::Id>();}
+model::Id RegistryView::currentEntry() const {
+    const auto rows = tree_->selectionModel()->selectedRows();
+    return rows.isEmpty() ? model::Id{} : rows.first().data(Qt::UserRole).value<model::Id>();
+}
+void RegistryView::selectEntry(model::Id id) {
+    const auto row = rows_->ids.indexOf(id);
+    tree_->setCurrentIndex(row >= 0 ? rows_->index(int(row), 0) : QModelIndex{});
+}
 void RegistryView::updateActions() {
-    const auto* e=app_.gate()==Application::Gate::Ready && !app_.busy()?app_.model()->entry(current()):nullptr;
+    const auto* e=app_.gate()==Application::Gate::Ready && !app_.busy()?app_.model()->entry(currentEntry()):nullptr;
     copy_->setEnabled(e && e->type!=model::EntryType::TextFile); source_->setEnabled(e && !e->sourceEntryId.isNull() && app_.model()->entry(e->sourceEntryId));
 }
 void RegistryView::setGroup(model::Id group) {group_=group; limited_=false; refresh();}
 void RegistryView::setEntries(const QList<model::Id>& ids) {limited_=true; rows_->reset(app_.gate()==Application::Gate::Ready?ids:QList<model::Id>{}); updateActions();}
 void RegistryView::refresh() {
+    const auto selected = currentEntry();
     if(app_.gate()!=Application::Gate::Ready) rows_->reset({});
     else if(limited_) rows_->reset(rows_->ids);
     else rows_->reset(group_.isNull()?app_.model()->entries().keys():app_.model()->entriesInSubtree(group_));
+    selectEntry(selected);
     updateActions();
 }
 bool RegistryView::eventFilter(QObject* object,QEvent* event) {
     if((object==tree_ || object==tree_->viewport()) && (event->type()==QEvent::ShortcutOverride || event->type()==QEvent::KeyPress)) {
         auto* key=static_cast<QKeyEvent*>(event);
         if(key->matches(QKeySequence::Copy) || key->matches(QKeySequence::Cut)) {
-            if(event->type()==QEvent::KeyPress && key->matches(QKeySequence::Copy) && copy_->isEnabled()) emit copyRequested(current());
+            if(event->type()==QEvent::KeyPress && key->matches(QKeySequence::Copy) && copy_->isEnabled()) emit copyRequested(currentEntry());
             event->accept(); return true;
         }
     }

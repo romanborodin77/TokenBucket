@@ -11,15 +11,17 @@ public:
     RegistryView(Application&,QWidget* parent=nullptr);
     void setGroup(model::Id);
     void setEntries(const QList<model::Id>&);
+    model::Id currentEntry() const;
+    void selectEntry(model::Id);
     void refresh();
 signals:
+    void currentEntryChanged();
     void entryActivated(model::Id);
     void copyRequested(model::Id);
     void sourceRequested(model::Id);
 protected:
     bool eventFilter(QObject*,QEvent*) override;
 private:
-    model::Id current() const;
     void updateActions();
     Application& app_; model::Id group_; bool limited_=false;
     RegistryRowsModel* rows_{}; QTreeView* tree_{}; QPushButton *copy_{},*source_{};

@@ -2,6 +2,8 @@
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QTreeWidget>
+#include <QTreeView>
+#include <QTabWidget>
 #include <QListWidget>
 #include <QLineEdit>
 #include <QComboBox>
@@ -30,6 +32,8 @@
 #include <QTableWidget>
 #include <QScrollBar>
 #include <QScopeGuard>
+#include <QSemaphore>
+#include <QThreadPool>
 #include "../src/app/Application.h"
 #include "../src/app/IdleTimer.h"
 #include "../src/ui/MainWindow.h"
@@ -321,12 +325,13 @@ private slots:
         const auto first = QUuid::createUuid(), second = QUuid::createUuid();
         QVERIFY(app.model()->addNode(first, {}, "Production").isEmpty());
         QVERIFY(app.model()->addNode(second, {}, "Staging").isEmpty());
+        const auto today = QDate::currentDate();
         for (int i = 0; i < 5; ++i) {
             model::Entry e; e.id = QUuid::createUuid(); e.groupId = i % 2 ? first : second;
             e.title = "Same title"; e.token = "synthetic-secret-marker";
             e.favorite = i % 2; e.reverify = i == 1;
             e.tags = i % 2 ? QStringList{"one", "two"} : QStringList{"one"};
-            if (i > 0) e.expiresAt = QDateTime::currentDateTimeUtc().addDays(i == 1 ? -1 : i == 2 ? 0 : i == 3 ? 30 : 31);
+            if (i > 0) e.expiresAt = QDateTime(today.addDays(i == 1 ? -1 : i == 2 ? 0 : i == 3 ? 30 : 31), QTime(0, 0), Qt::UTC);
             QVERIFY(app.model()->setEntry(e).isEmpty());
         }
         ui::MainWindow w(app, nullptr, &uiPreferences_);
@@ -339,7 +344,9 @@ private slots:
         favorites->click(); QCOMPARE(w.list()->count(), 2);
         w.search()->setText("nothing"); QCOMPARE(w.list()->count(), 0);
         QVERIFY(favorites->text().contains("2"));
-        w.search()->clear(); expiring->click(); QCOMPARE(w.list()->count(), 2);
+        w.search()->clear(); expiring->click();
+        if (QDate::currentDate() != today) QSKIP("The local date changed during setup");
+        QCOMPARE(w.list()->count(), 2);
         auto* expiry = w.findChild<QComboBox*>("expiryFilter");
         QCOMPARE(expiry->currentIndex(), 1);
         expiry->setCurrentIndex(2); QVERIFY(all->isChecked()); QCOMPARE(w.list()->count(), 1);
@@ -581,6 +588,90 @@ private slots:
         QVERIFY(dialog.entry()); QVERIFY(dialog.entry()->sshTargets.isEmpty()); QVERIFY(dialog.entry()->sshPrivate.isEmpty());
         QVERIFY(*model.entry(key.id)==key);
     }
+    void keyWithoutConnectionsRequiresTypeChangeConfirmation() {
+        model::VaultModel model;
+        model::Entry key;
+        key.id = QUuid::createUuid(); key.groupId = QUuid::createUuid();
+        key.title = "Synthetic key"; key.type = model::EntryType::SshKey; key.sshPrivate = "key";
+        QVERIFY(model.addNode(key.groupId, {}, "Test").isEmpty());
+        QVERIFY(model.setEntry(key).isEmpty());
+        EntryEditDialog dialog(model, key);
+        auto* type = dialog.findChild<QComboBox*>("entryType");
+        QVERIFY(type);
+        QTimer::singleShot(0, &dialog, [] {
+            if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) box->reject();
+        });
+        const int token = type->findData(int(model::EntryType::ApiToken));
+        type->setCurrentIndex(token);
+        QCOMPARE(type->currentData().toInt(), int(model::EntryType::SshKey));
+        confirm(dialog);
+        type->setCurrentIndex(token);
+        QCOMPARE(type->currentIndex(), token);
+        field(dialog, "entryToken")->setText("replacement");
+        dialog.accept();
+        QVERIFY(dialog.entry());
+        QVERIFY(dialog.entry()->sshPrivate.isEmpty());
+        QCOMPARE(model.entry(key.id)->sshPrivate, key.sshPrivate);
+    }
+    void rejectingEditorClearsMetadataAndUndo() {
+        model::VaultModel model;
+        model::Entry entry;
+        entry.id = QUuid::createUuid(); entry.groupId = QUuid::createUuid();
+        entry.type = model::EntryType::Credentials;
+        entry.title = "Synthetic credential"; entry.login = "synthetic-login"; entry.password = "synthetic-password";
+        entry.url = "https://example.test/?token=synthetic"; entry.tags = {"synthetic-tag"};
+        QVERIFY(model.addNode(entry.groupId, {}, "Test").isEmpty());
+        QVERIFY(model.setEntry(entry).isEmpty());
+        EntryEditDialog dialog(model, entry);
+        auto* login = field(dialog, "entryLogin");
+        auto* url = field(dialog, "entryUrl");
+        auto* tags = field(dialog, "entryTags");
+        auto* title = field(dialog, "entryTitle");
+        QVERIFY(login && url && tags && title);
+        login->end(false);
+        login->insert("-draft");
+        QVERIFY(login->isUndoAvailable());
+        dialog.reject();
+        QVERIFY(login->text().isEmpty());
+        QVERIFY(!login->isUndoAvailable());
+        login->undo();
+        QVERIFY(login->text().isEmpty());
+        QVERIFY(url->text().isEmpty());
+        QVERIFY(tags->text().isEmpty());
+        QVERIFY(title->text().isEmpty());
+        QVERIFY(!dialog.entry());
+    }
+    void rejectingEditorStopsWaitingForSshImport() {
+        model::VaultModel model;
+        const auto group = QUuid::createUuid();
+        QVERIFY(model.addNode(group, {}, "Test").isEmpty());
+        EntryEditDialog dialog(model, std::nullopt);
+        dialog.setGroup(group);
+        dialog.findChild<QComboBox*>("entryType")->setCurrentIndex(int(model::EntryType::SshKey));
+        field(dialog, "entryTitle")->setText("Synthetic key");
+        field(dialog, "sshPrivatePath")->setText(dir_.filePath("pending-test-key"));
+
+        auto* pool = QThreadPool::globalInstance();
+        const int previousLimit = pool->maxThreadCount();
+        pool->setMaxThreadCount(1);
+        QSemaphore releaseWorker;
+        QSemaphore workerFinished;
+        pool->start([&] { releaseWorker.acquire(); workerFinished.release(); });
+        bool fallbackFired = false;
+        const auto cleanup = qScopeGuard([&] {
+            if (!fallbackFired) releaseWorker.release();
+            workerFinished.acquire();
+            pool->setMaxThreadCount(previousLimit);
+        });
+        QTimer fallback;
+        fallback.setSingleShot(true);
+        connect(&fallback, &QTimer::timeout, &dialog, [&] { fallbackFired = true; releaseWorker.release(); });
+        fallback.start(1000);
+        QTimer::singleShot(0, &dialog, &EntryEditDialog::reject);
+        dialog.accept();
+        QVERIFY(!fallbackFired);
+        QVERIFY(!dialog.entry());
+    }
     void sshCardBindingsRemainMetadataWhileKeyRequiresVerification() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("valid-password",&error));
@@ -801,6 +892,103 @@ private slots:
         QVERIFY(w.list()->item(0)->text().contains(QStringLiteral("Истекающая")));
         expiryFilter->setCurrentIndex(0);
         QCOMPARE(w.list()->count(), 3);
+    }
+    void expiryOnTheCurrentLocalDate() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        const auto today = QDate::currentDate();
+        model::Entry entry; entry.id = QUuid::createUuid(); entry.groupId = group;
+        entry.title = QStringLiteral("Истекает сегодня"); entry.token = "test-token";
+        entry.expiresAt = QDateTime(today, QTime(0, 0), Qt::UTC);
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        auto yesterday = entry; yesterday.id = QUuid::createUuid();
+        yesterday.title = QStringLiteral("Истекла вчера");
+        yesterday.expiresAt = entry.expiresAt.addDays(-1);
+        QVERIFY(app.model()->setEntry(yesterday).isEmpty());
+        ui::MainWindow w(app, nullptr, &uiPreferences_);
+        const auto* expiring = w.findChild<QAbstractButton*>("libraryExpiring");
+        auto* filter = w.findChild<QComboBox*>("expiryFilter");
+        const auto* metadata = w.findChild<QLabel*>("cardMetadata");
+        QVERIFY(expiring && filter && metadata);
+        const auto libraryCount = expiring->text();
+        filter->setCurrentIndex(2);
+        const auto expiredCount = w.list()->count();
+        const auto expiredTitle = expiredCount ? w.list()->item(0)->text() : QString();
+        filter->setCurrentIndex(1);
+        if (QDate::currentDate() != today) QSKIP("The local date changed during setup");
+        QCOMPARE(expiredCount, 1);
+        QVERIFY(expiredTitle.contains(QStringLiteral("⏰ просрочен ") + today.addDays(-1).toString(QStringLiteral("dd.MM.yyyy"))));
+        QCOMPARE(w.list()->count(), 1);
+        const auto* item = w.list()->item(0);
+        const auto dateText = today.toString(QStringLiteral("dd.MM.yyyy"));
+        QVERIFY(item->text().contains(QStringLiteral("⏳ до ") + dateText));
+        QCOMPARE(item->foreground().style(), Qt::NoBrush);
+        QVERIFY(metadata->text().contains(QStringLiteral("действителен до ") + dateText));
+        QVERIFY(!metadata->text().contains(QStringLiteral("просрочен")));
+        QCOMPARE(libraryCount, QStringLiteral("Истекают · 1"));
+        const EntryEditDialog dialog(*app.model(), entry);
+        auto* date = dialog.findChild<QDateEdit*>("entryExpiryDate");
+        QVERIFY(date);
+        QCOMPARE(date->date(), today);
+    }
+    void registryKeyboardActionsUseHighlightedEntry() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password", &error));
+        const auto group = QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group, {}, "P").isEmpty());
+        model::Entry first; first.id = QUuid::createUuid(); first.groupId = group;
+        first.title = "First"; first.token = "test-token";
+        auto second = first; second.id = QUuid::createUuid(); second.title = "Second";
+        QVERIFY(app.model()->setEntry(first).isEmpty());
+        QVERIFY(app.model()->setEntry(second).isEmpty());
+        QVERIFY(app.save(&error));
+        ui::MainWindow w(app, nullptr, &uiPreferences_); w.show();
+        auto* tabs = w.findChild<QTabWidget*>("resultsTabs");
+        auto* registry = w.findChild<QTreeView*>("registryEntries");
+        QVERIFY(tabs && registry);
+        QApplication::setActiveWindow(&w);
+        w.list()->setCurrentRow(0);
+        w.list()->selectAll();
+        QCOMPARE(w.selectedEntries().size(), 2);
+        tabs->setCurrentIndex(1);
+        QCOMPARE(w.selectedEntries(), QList<model::Id>{first.id});
+        registry->setFocus();
+        QTest::keyClick(registry, Qt::Key_Down);
+        QCOMPARE(registry->currentIndex().data(Qt::UserRole).value<model::Id>(), second.id);
+        QCOMPARE(w.selectedEntries(), QList<model::Id>{second.id});
+        QString editedTitle;
+        QTimer::singleShot(0, &w, [&] {
+            if (auto* dialog = qobject_cast<EntryEditDialog*>(QApplication::activeModalWidget())) {
+                editedTitle = field(*dialog, "entryTitle")->text();
+                dialog->reject();
+            }
+        });
+        QTest::keyClick(registry, Qt::Key_F2);
+        QCOMPARE(editedTitle, second.title);
+        tabs->setCurrentIndex(0);
+        QCOMPARE(w.list()->currentItem()->data(Qt::UserRole).value<model::Id>(), second.id);
+        QCOMPARE(w.selectedEntries(), QList<model::Id>{second.id});
+        tabs->setCurrentIndex(1);
+        QCOMPARE(w.selectedEntries(), QList<model::Id>{second.id});
+
+        bool confirmed = false;
+        QTimer::singleShot(0, &w, [&] {
+            if (auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                confirmed = true;
+                dialog->button(QMessageBox::Yes)->click();
+            }
+        });
+        QApplication::setActiveWindow(&w);
+        registry->setFocus();
+        QCOMPARE(QApplication::focusWidget(), registry);
+        QTest::keyClick(registry, Qt::Key_Up);
+        QCOMPARE(w.selectedEntries(), QList<model::Id>{first.id});
+        QTest::keyClick(registry, Qt::Key_Delete);
+        QVERIFY(confirmed);
+        QVERIFY(!app.model()->entry(first.id));
+        QVERIFY(app.model()->entry(second.id));
     }
     void aboutDialogShowsBrandAndStack() {
         ui::AboutDialog dialog;

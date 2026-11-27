@@ -26,6 +26,8 @@ struct RealOps : FileOps {
             offset += n;
         }
         if (ok) ok = ::fsync(fd) == 0;
+        // Clear the file we own even if another process has renamed its directory entry.
+        if (!ok) ::ftruncate(fd, 0);
         if (::close(fd) != 0) ok = false;
         return ok;
     }

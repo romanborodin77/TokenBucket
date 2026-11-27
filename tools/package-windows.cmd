@@ -1,17 +1,14 @@
 @echo off
 setlocal
-for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
-call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
+pushd "%~dp0.." || exit /b 1
+call :package
+set "result=%errorlevel%"
+popd
+exit /b %result%
+
+:package
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
+call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 cmake --build --preset default || exit /b 1
-if exist dist\TokenBucket rmdir /s /q dist\TokenBucket
-mkdir dist\TokenBucket 2>nul
-copy build\Release\TokenBucket.exe dist\TokenBucket\ || exit /b 1
-copy build\Release\TokenBucket-agent.exe dist\TokenBucket\ || exit /b 1
-copy docs\agent-access.md dist\TokenBucket\ || exit /b 1
-build\vcpkg_installed\x64-windows\tools\Qt6\bin\windeployqt.exe --release --no-translations dist\TokenBucket\TokenBucket.exe || exit /b 1
-copy build\vcpkg_installed\x64-windows\bin\libsodium.dll dist\TokenBucket\ || exit /b 1
-rem windeployqt не переносит не-Qt зависимости vcpkg (pcre2-16, double-conversion, zstd, z, harfbuzz, freetype, libpng, brotli и др.) — копируем весь bin
-for %%f in (build\vcpkg_installed\x64-windows\bin\*.dll) do copy /y "%%f" dist\TokenBucket\ >nul || exit /b 1
-mkdir dist\TokenBucket\licenses 2>nul
-copy docs\licenses\* dist\TokenBucket\licenses\ || exit /b 1
-powershell -NoProfile -Command "Compress-Archive -Force -Path dist\TokenBucket -DestinationPath dist\TokenBucket-windows-x64.zip"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0package-windows.ps1"
+exit /b %errorlevel%

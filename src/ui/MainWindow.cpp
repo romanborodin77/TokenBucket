@@ -296,11 +296,27 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     resultsTabs_=new QTabWidget(results); resultsTabs_->setObjectName("resultsTabs");
     registry_=new RegistryView(app_,resultsTabs_); resultsTabs_->addTab(list_,QStringLiteral("Список")); resultsTabs_->addTab(registry_,QStringLiteral("Реестр"));
     resultsLayout->addWidget(tagsScroll); resultsLayout->addWidget(resultsTabs_, 1);
-    const auto selectEntry=[this](model::Id id) {
-        for(int i=0;i<list_->count();++i) if(list_->item(i)->data(Qt::UserRole).value<model::Id>()==id) {list_->setCurrentRow(i); return true;} return false;
-    };
-    connect(registry_,&RegistryView::entryActivated,this,[this,selectEntry](model::Id id) {if(selectEntry(id)) {showMetadata(); openCardDialog();}});
-    connect(registry_,&RegistryView::copyRequested,this,[this,selectEntry](model::Id id) {if(ready() && selectEntry(id)) {card_->showEntry(id); card_->copySecret();}});
+    connect(resultsTabs_, &QTabWidget::currentChanged, this, [this] {
+        if (resultsTabs_->currentWidget() == registry_) {
+            if (const auto* item = list_->currentItem())
+                registry_->selectEntry(item->data(Qt::UserRole).value<model::Id>());
+        } else if (const auto id = registry_->currentEntry(); !id.isNull()) {
+            const QSignalBlocker block(list_);
+            for (int row = 0; row < list_->count(); ++row)
+                if (list_->item(row)->data(Qt::UserRole).value<model::Id>() == id) {
+                    list_->setCurrentRow(row, QItemSelectionModel::ClearAndSelect);
+                    break;
+                }
+        }
+        showMetadata();
+    });
+    connect(registry_, &RegistryView::currentEntryChanged, this, [this] {
+        if (resultsTabs_->currentWidget() == registry_) showMetadata();
+    });
+    connect(registry_, &RegistryView::entryActivated, this, &MainWindow::openCardDialog);
+    connect(registry_, &RegistryView::copyRequested, this, [this](model::Id id) {
+        if (ready() && selectedEntry() == id) { showMetadata(); card_->copySecret(); }
+    });
     connect(registry_,&RegistryView::sourceRequested,this,&MainWindow::openDocument);
     layout->addWidget(splitter, 1);
     for (auto* combo : {typeFilter_, sortMode_, expiryFilter_}) { combo->setMinimumContentsLength(7); combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); }
@@ -312,7 +328,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(new QShortcut(QKeySequence(QStringLiteral("Ctrl+K")), this), &QShortcut::activated, this, [this] { search_->setFocus(Qt::ShortcutFocusReason); search_->selectAll(); });
     auto* clearSearch = new QShortcut(QKeySequence(Qt::Key_Escape), search_); clearSearch->setContext(Qt::WidgetShortcut);
     connect(clearSearch, &QShortcut::activated, search_, &QLineEdit::clear);
-    auto* deleteEntry = new QShortcut(QKeySequence::Delete, list_); deleteEntry->setContext(Qt::WidgetWithChildrenShortcut);
+    auto* deleteEntry = new QShortcut(QKeySequence::Delete, resultsTabs_); deleteEntry->setContext(Qt::WidgetWithChildrenShortcut);
     connect(deleteEntry, &QShortcut::activated, this, &MainWindow::deleteSelected);
     auto* deleteNode = new QShortcut(QKeySequence::Delete, tree_); deleteNode->setContext(Qt::WidgetWithChildrenShortcut);
     connect(deleteNode, &QShortcut::activated, this, &MainWindow::deleteSelectedNode);
@@ -365,7 +381,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
                 if (auto* editDialog = qobject_cast<EntryEditDialog*>(dialog)) editDialog->clearSecrets();
                 dialog->reject();
             }
-            search_->clear(); error_->clear(); saveUiState(); hide();
+            search_->setText({}); error_->clear(); saveUiState(); hide();
         }
         refreshAll();
     });
@@ -597,8 +613,13 @@ void MainWindow::refreshStatus() {
 #else
     hotkeyStatus_->setText(QStringLiteral("Глобальная вставка недоступна на этой платформе"));
 #endif
-    const auto date = QDateTime::currentDateTimeUtc().date();
-    if (date != statusDate_) { statusDate_ = date; updateLibraryCounts(); refillList(); }
+    const auto date = QDate::currentDate();
+    if (date != statusDate_) {
+        statusDate_ = date;
+        displayedEntry_ = {};
+        updateLibraryCounts();
+        refillList();
+    }
 }
 void MainWindow::restoreUiState() {
     resize(QSize(1240, 800).boundedTo(screen()->availableGeometry().size()));
@@ -628,7 +649,11 @@ void MainWindow::updateEnabled() {
 #endif
 }
 model::Id MainWindow::selectedNode() const { const auto* item = tree_->currentItem(); return item ? item->data(0, Qt::UserRole).value<model::Id>() : model::Id{}; }
-model::Id MainWindow::selectedEntry() const { const auto* item = list_->currentItem(); return item ? item->data(Qt::UserRole).value<model::Id>() : model::Id{}; }
+model::Id MainWindow::selectedEntry() const {
+    if (resultsTabs_->currentWidget() == registry_) return registry_->currentEntry();
+    const auto* item = list_->currentItem();
+    return item ? item->data(Qt::UserRole).value<model::Id>() : model::Id{};
+}
 void MainWindow::selectNode(model::Id id) {
     for (QTreeWidgetItemIterator item(tree_); *item; ++item) if ((*item)->data(0, Qt::UserRole).value<model::Id>() == id) {
         tree_->setCurrentItem(*item); tree_->scrollToItem(*item); return;
@@ -655,10 +680,12 @@ void MainWindow::setLibraryView(LibraryView view) {
 void MainWindow::updateLibraryCounts() {
     int all = 0, favorites = 0, expiring = 0;
     if (app_.gate() == Application::Gate::Ready) {
+        const auto today = QDate::currentDate();
         for (const auto& entry : app_.model()->entries()) {
             ++all; favorites += entry.favorite;
-            const auto days = QDateTime::currentDateTimeUtc().daysTo(entry.expiresAt);
-            expiring += entry.expiresAt.isValid() && days >= 0 && days <= model::VaultModel::ExpiryWarningDays;
+            const auto expiryDate = entry.expiresAt.date();
+            const auto days = today.daysTo(expiryDate);
+            expiring += expiryDate.isValid() && days >= 0 && days <= model::VaultModel::ExpiryWarningDays;
         }
     }
     libraryAll_->setText(QStringLiteral("Все записи · %1").arg(all));
@@ -669,6 +696,10 @@ void MainWindow::updateLibraryCounts() {
     libraryExpiring_->setChecked(libraryView_ == LibraryView::Expiring);
 }
 QList<model::Id> MainWindow::selectedEntries() const {
+    if (resultsTabs_->currentWidget() == registry_) {
+        const auto id = registry_->currentEntry();
+        return id.isNull() ? QList<model::Id>{} : QList<model::Id>{id};
+    }
     QList<model::Id> ids;
     for (const auto* item : list_->selectedItems()) ids << item->data(Qt::UserRole).value<model::Id>();
     return ids;
@@ -723,28 +754,59 @@ bool MainWindow::selectionStill(const QList<model::Id>& ids, quint64 generation)
     for (auto id : ids) if (!app_.model()->entry(id)) { report(QStringLiteral("Выбранные записи изменились. Повторите действие.")); return false; }
     return true;
 }
-void MainWindow::selectEntriesForAction(const QList<model::Id>& ids) {
-    const QSignalBlocker block(list_); list_->clearSelection();
-    for (int i = 0; i < list_->count(); ++i) if (ids.contains(list_->item(i)->data(Qt::UserRole).value<model::Id>())) list_->item(i)->setSelected(true);
+bool MainWindow::restoreSelectionForAction(const QList<model::Id>& ids, quint64 generation) {
+    if (!selectionStill(ids, generation)) return false;
+    if (resultsTabs_->currentWidget() == registry_) {
+        registry_->selectEntry(ids.value(0));
+    } else {
+        const QSet<model::Id> wanted(ids.cbegin(), ids.cend());
+        const QSignalBlocker block(list_);
+        list_->clearSelection();
+        for (int i = 0; i < list_->count(); ++i) {
+            auto* item = list_->item(i);
+            item->setSelected(wanted.contains(item->data(Qt::UserRole).value<model::Id>()));
+        }
+    }
+    if (selectedEntries().size() == ids.size()) return true;
+    showMetadata();
+    report(QStringLiteral("Список изменился. Выберите записи ещё раз."));
+    return false;
 }
 void MainWindow::bulkMoveDialog() {
     const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) { report(QStringLiteral("Выберите записи.")); return; }
-    const auto generation = app_.generation(); bool ok = false;
-    QMap<QString, model::Id> groups;
-    for (auto id : app_.model()->nodes().keys()) groups.insert(groupPath(id), id);
-    QString chosen;
-    { QScopedValueRollback guard(editing_, true);
-      chosen = QInputDialog::getItem(this, QStringLiteral("Переместить записи"), QStringLiteral("Группа для выбранных записей (%1):").arg(ids.size()), groups.keys(), 0, false, &ok); }
-    if (!ok || !selectionStill(ids, generation)) return;
-    selectEntriesForAction(ids); bulkMove(groups.value(chosen));
+    const auto generation = app_.generation();
+    QMap<QString, QList<model::Id>> groups;
+    for (const auto& node : app_.model()->nodes()) groups[groupPath(node.id)].append(node.id);
+    QStringList labels;
+    QList<model::Id> destinations;
+    for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
+        auto groupIds = it.value();
+        std::sort(groupIds.begin(), groupIds.end());
+        for (const auto id : groupIds) {
+            labels.append(groupIds.size() == 1 ? it.key() : QStringLiteral("%1 [%2]").arg(it.key(), id.toString(QUuid::WithoutBraces)));
+            destinations.append(id);
+        }
+    }
+    QInputDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Переместить записи"));
+    dialog.setLabelText(QStringLiteral("Группа для выбранных записей (%1):").arg(ids.size()));
+    dialog.setComboBoxItems(labels);
+    auto* choices = dialog.findChild<QComboBox*>();
+    if (!choices) return;
+    for (int i = 0; i < destinations.size(); ++i) choices->setItemData(i, destinations[i]);
+    {
+        QScopedValueRollback guard(editing_, true);
+        if (dialog.exec() != QDialog::Accepted) return;
+    }
+    if (!restoreSelectionForAction(ids, generation)) return;
+    bulkMove(choices->currentData().value<model::Id>());
 }
 void MainWindow::bulkAddTagDialog() {
     const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) { report(QStringLiteral("Выберите записи.")); return; }
     const auto generation = app_.generation(); bool ok = false; QString tag;
     { QScopedValueRollback guard(editing_, true);
       tag = QInputDialog::getText(this, QStringLiteral("Добавить тег"), QStringLiteral("Тег для выбранных записей (%1):").arg(ids.size()), QLineEdit::Normal, {}, &ok); }
-    if (!ok || !selectionStill(ids, generation)) return;
-    selectEntriesForAction(ids); bulkAddTag(tag);
+    if (ok && restoreSelectionForAction(ids, generation)) bulkAddTag(tag);
 }
 void MainWindow::bulkRemoveTagDialog() {
     const auto ids = selectedEntries(); if (!ready() || editing_ || ids.isEmpty()) { report(QStringLiteral("Выберите записи.")); return; }
@@ -755,8 +817,7 @@ void MainWindow::bulkRemoveTagDialog() {
     bool ok = false; QString tag;
     { QScopedValueRollback guard(editing_, true);
       tag = QInputDialog::getItem(this, QStringLiteral("Снять тег"), QStringLiteral("Тег у выбранных записей (%1):").arg(ids.size()), tags, 0, false, &ok); }
-    if (!ok || !selectionStill(ids, generation)) return;
-    selectEntriesForAction(ids); bulkRemoveTag(tag);
+    if (ok && restoreSelectionForAction(ids, generation)) bulkRemoveTag(tag);
 }
 model::SavedView MainWindow::captureView(const QString& name) const {
     model::SavedView v; v.name = name;
@@ -867,6 +928,7 @@ void MainWindow::refillList(model::Id selected) {
     QSignalBlocker block(list_); list_->clear();
     int baseCount = 0;
     if (app_.gate() == Application::Gate::Ready) {
+        const auto today = QDate::currentDate();
         auto ids = !search_->text().isEmpty() ? app_.model()->search(search_->text())
             : libraryView_ == LibraryView::Group ? app_.model()->entriesInGroup(selectedNode()) : app_.model()->entries().keys();
         if (libraryView_ == LibraryView::Favorites)
@@ -880,13 +942,13 @@ void MainWindow::refillList(model::Id selected) {
             }), ids.end());
         // Семантика И: запись проходит, только если содержит каждый выбранный тег (без учёта регистра);
         // фильтр типа и теги действуют одновременно.
-        // Срок действия: 1 — истекают в горизонте 30 дней, 2 — просрочены (дата UTC-полночь).
+        // Срок истекает после окончания указанной локальной даты.
         const int expiryMode = expiryFilter_->currentIndex();
         if (expiryMode > 0)
-            ids.erase(std::remove_if(ids.begin(), ids.end(), [this, expiryMode](model::Id id) {
+            ids.erase(std::remove_if(ids.begin(), ids.end(), [this, expiryMode, today](model::Id id) {
                 const auto* entry = app_.model()->entry(id);
                 if (!entry || !entry->expiresAt.isValid()) return true; // без срока не попадают ни в одну ветку
-                const qint64 days = QDateTime::currentDateTimeUtc().daysTo(entry->expiresAt);
+                const qint64 days = today.daysTo(entry->expiresAt.date());
                 return expiryMode == 1 ? !(days >= 0 && days <= model::VaultModel::ExpiryWarningDays) : days >= 0;
             }), ids.end());
         if (!selectedTags_.isEmpty())
@@ -913,18 +975,21 @@ void MainWindow::refillList(model::Id selected) {
             const auto type=entryTypeLabel(entry->type);
             title += QStringLiteral("\n%1 · %2%3").arg(type, groupPath(entry->groupId), entry->reverify ? QStringLiteral(" · Повторная проверка") : QString());
             // Пометка срока: ⏳ истекает в горизонте 30 дней, ⏰ просрочен (с датой).
-            if (entry->expiresAt.isValid()) {
-                const qint64 days = QDateTime::currentDateTimeUtc().daysTo(entry->expiresAt);
-                const QString dateText = entry->expiresAt.toLocalTime().toString(QStringLiteral("dd.MM.yyyy"));
-                if (days < 0) title += QStringLiteral("  ⏰ просрочен %1").arg(dateText);
-                else if (days <= model::VaultModel::ExpiryWarningDays) title += QStringLiteral("  ⏳ до %1").arg(dateText);
+            const auto expiryDate = entry->expiresAt.date();
+            const bool expired = expiryDate.isValid() && expiryDate < today;
+            if (expiryDate.isValid()) {
+                const QString dateText = expiryDate.toString(QStringLiteral("dd.MM.yyyy"));
+                if (expired) title += QStringLiteral("  ⏰ просрочен %1").arg(dateText);
+                else if (today.daysTo(expiryDate) <= model::VaultModel::ExpiryWarningDays)
+                    title += QStringLiteral("  ⏳ до %1").arg(dateText);
             }
             auto* item = new QListWidgetItem(title, list_); item->setData(Qt::UserRole, id);
             if (id == selected) list_->setCurrentItem(item);
-            if (entry->expiresAt.isValid() && QDateTime::currentDateTimeUtc() > entry->expiresAt)
+            if (expired)
                 item->setForeground(palette().brush(QPalette::Disabled, QPalette::Text)); // просроченные приглушены
         }
         if (!list_->currentItem() && list_->count()) list_->setCurrentRow(0);
+        if (list_->currentItem()) registry_->selectEntry(list_->currentItem()->data(Qt::UserRole).value<model::Id>());
     }
     searchScope_->setText(!search_->text().isEmpty() ? QStringLiteral("Поиск по всему хранилищу")
         : libraryView_ == LibraryView::Group ? groupPath(selectedNode()) : QStringLiteral("Библиотека"));
@@ -941,12 +1006,13 @@ void MainWindow::refillList(model::Id selected) {
     showMetadata();
 }
 void MainWindow::refillTagBar() {
-    const auto tags = app_.gate() == Application::Gate::Ready ? app_.model()->allTags() : QStringList();
+    QHash<QString, int> uses;
+    const auto tags = app_.gate() == Application::Gate::Ready ? app_.model()->allTags(&uses) : QStringList();
     // Обрезка «мёртвых» выбранных тегов: после переименования/удаления или блокировки
     // тега может уже не быть — выбор не должен фильтровать список несуществующим тегом.
     QStringList alive;
     for (const QString& selected : selectedTags_)
-        if (std::any_of(tags.cbegin(), tags.cend(), [&](const QString& tag) { return tag.compare(selected, Qt::CaseInsensitive) == 0; }))
+        if (uses.contains(selected.toCaseFolded()))
             alive << selected;
     selectedTags_ = alive;
     // Пересборка: чипы заменяются целиком; stretch вынимается отдельно и возвращается в конец —
@@ -960,11 +1026,9 @@ void MainWindow::refillTagBar() {
     }
     auto* layout = static_cast<QHBoxLayout*>(tagBar_->layout());
     for (const QString& tag : tags) {
-        int uses = 0;
-        for (const auto& entry : app_.model()->entries()) uses += entry.tags.contains(tag, Qt::CaseInsensitive) ? 1 : 0;
         auto* chip = new QToolButton(tagBar_);
         chip->setText(tag); chip->setCheckable(true); chip->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        chip->setToolTip(QStringLiteral("Записей: %1").arg(uses));
+        chip->setToolTip(QStringLiteral("Записей: %1").arg(uses.value(tag.toCaseFolded())));
         chip->setChecked(std::any_of(selectedTags_.cbegin(), selectedTags_.cend(),
             [&](const QString& selected) { return selected.compare(tag, Qt::CaseInsensitive) == 0; }));
         connect(chip, &QToolButton::clicked, this, [this, tag] {
@@ -998,7 +1062,7 @@ void MainWindow::removeTag(const QString& tag) {
     commit([&](auto& model) { return model.removeTag(tag); });
 }
 void MainWindow::showMetadata() {
-    if (const int selected = int(list_->selectedItems().size()); selected > 1 && app_.gate() == Application::Gate::Ready) {
+    if (const int selected = int(selectedEntries().size()); selected > 1 && app_.gate() == Application::Gate::Ready) {
         right_->setCurrentIndex(1); displayedEntry_ = {}; card_->showSelection(selected);
 #ifdef Q_OS_WIN
         if (envExportAction_) envExportAction_->setEnabled(false);
@@ -1627,7 +1691,7 @@ void MainWindow::importTextFile() {
 }
 #ifdef Q_OS_WIN
 bool MainWindow::canExportEnv() const {
-    if (!ready() || list_->selectedItems().size() > 1) return false;
+    if (!ready() || selectedEntries().size() > 1) return false;
     const auto* entry = app_.model()->entry(selectedEntry());
     // однострочный токен/пароль: eligibleForAutoPaste заодно отсекает SSH-ключи (многострочные)
     return entry && paste::eligibleForAutoPaste(*entry);
@@ -1704,6 +1768,7 @@ void MainWindow::removeExportedVariables() {
 #endif
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event); narrow_ = width() < 720;
+    if (auto* central = centralWidget()) central->layout()->setSpacing(narrow_ ? 7 : 14);
     if (right_) right_->setVisible(!narrow_);
     if (headerLayout_) headerLayout_->setDirection(width() < 960 ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
     if (filterLayout_) filterLayout_->setDirection(width() < 1240 ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);

@@ -8,8 +8,7 @@ namespace tb::ui {
 // по кнопке «Показать» (и не дольше 15 с — hideTimer_ прячет значение, если
 // пользователь отвлёкся). Записи с reverify требуют VerifyDialog до показа/копирования
 // секрета и до редактора (authorize()). Все операции идут через Application::commitEntry
-// — точечный откат при отказе сохранения. isSafeTarget защищает сохранение SSH-ключа
-// в файл: отказ для каталогов вне профиля пользователя и путей с подстановкой.
+// — точечный откат при отказе сохранения.
 class EntryCard : public QFrame {
     Q_OBJECT
 public:
@@ -23,7 +22,6 @@ public:
     void hideNowForTest();
     void setRevealSeconds(int seconds);
     void copySecret() { copyField(0); }
-    static bool isSafeTarget(const QString& path, QString* err);
 signals:
     void copyRequested(const QString& text);          // буфером владеет MainWindow (единый ClipboardGuard)
     void editRequested();

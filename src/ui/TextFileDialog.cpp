@@ -103,7 +103,7 @@ void TextFileDialog::copyLine() {
     if(!valid()) clipboard_.clearIfOurs();
 }
 bool TextFileDialog::confirmWholeFile() {
-    return valid() && !app_.busy() && confirm(QStringLiteral("Весь файл, включая скрытые строки, будет выдан за пределы хранилища без шифрования. Продолжить?"))
+    return valid() && !app_.busy() && confirm(QStringLiteral("В файл или буфер обмена попадут и скрытые строки. За пределами хранилища они будут доступны без пароля. Продолжить?"))
         && authorizeEntry(app_,id_,this,true) && valid();
 }
 void TextFileDialog::copyFile() {
@@ -115,20 +115,13 @@ void TextFileDialog::copyFile() {
 }
 void TextFileDialog::exportFile() {
     if(!confirmWholeFile()) return;
-    const QString path=QFileDialog::getSaveFileName(this,QStringLiteral("Сохранить исходные байты"),snapshot_->textFile.fileName,QString(),nullptr,QFileDialog::DontConfirmOverwrite);
+    const QString path=QFileDialog::getSaveFileName(this,QStringLiteral("Сохранить файл"),snapshot_->textFile.fileName,QString(),nullptr,
+        QFileDialog::DontConfirmOverwrite | QFileDialog::DontResolveSymlinks);
     if(path.isEmpty() || !valid() || app_.busy()) return;
-    for(QFileInfo info(path);;) {
-        if(info.isSymbolicLink() || info.isShortcut() || info.isJunction()) {error_->setText(QStringLiteral("Запись через ссылку запрещена.")); return;}
-        const auto parent=info.absolutePath(); if(parent==info.absoluteFilePath()) break; info.setFile(parent);
-    }
-    auto& ops=store::realFileOps();
-    if(QFileInfo::exists(path)) {
-        if(!confirm(QStringLiteral("Файл существует. Заменить его точными байтами документа?"))) return;
-        const QString temporary=path+QStringLiteral(".tb-new-")+QUuid::createUuid().toString(QUuid::WithoutBraces);
-        if(!ops.writeAll(temporary,snapshot_->textFile.bytes)) {error_->setText(QStringLiteral("Не удалось создать закрытый временный файл.")); return;}
-        if(!valid() || !ops.renameReplace(temporary,path)) {ops.removeFile(temporary); error_->setText(QStringLiteral("Файл не заменён.")); return;}
-    } else if(!ops.writeAll(path,snapshot_->textFile.bytes)) {error_->setText(QStringLiteral("Не удалось создать файл. Проверьте путь и доступ.")); return;}
-    error_->setText(QStringLiteral("Файл сохранён."));
+    const bool replace = QFileInfo::exists(path);
+    if (replace && !confirm(QStringLiteral("Файл существует. Заменить его?"))) return;
+    const QString error = store::exportFile(path, snapshot_->textFile.bytes, replace);
+    error_->setText(error.isEmpty() ? QStringLiteral("Файл сохранён.") : error);
 }
 void TextFileDialog::changeVisibility() {
     const int row=table_->currentIndex().row(); if(!authorize(row,true)) return;
