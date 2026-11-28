@@ -56,6 +56,9 @@ public:
     bool createPasswordVault(const QByteArray& pw, QString* err);
     bool unlock(const QByteArray& pw, QString* err);
     bool save(QString* err);
+    QString issueCollectionToken(SecureBytes& token);
+    QString revokeCollectionToken();
+    QString copyToCollection(const QString& name,QByteArrayView value);
     bool schemaUpgradeRequired() const;
     bool schemaUpgradeApproved() const {return gate_==Gate::Ready && upgradeApproval_ && *upgradeApproval_==generation();}
     bool approveSchemaUpgrade(QString* error);
@@ -86,6 +89,7 @@ private:
         QByteArray main,backup;
         Mode mode=Mode::None;
         quint64 generation=0,request=0;
+        std::shared_ptr<SecureKey> dataKey;
     };
     std::optional<PreparedBackup> backupHint_,preparedBackup_;
     std::atomic<quint64> backupRequest_{0};
@@ -96,6 +100,7 @@ private:
     // Поколение сверяется до применения: результат отменённой операции выбрасывается.
     bool execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err);
     bool storeCandidate(Outcome& result,quint64 expected);
+    QString collectionDirectory() const;
     bool canStart(Gate expected, QString* err) const;
     store::VaultStore store_;
     model::VaultModel model_;

@@ -20,6 +20,7 @@
 #include "../src/ui/UnlockDialog.h"
 #include "../src/vault/Container.h"
 #include "../src/vault/Crypto.h"
+#include "../src/vault/AgentCollection.h"
 #include "FaultFileOps.h"
 using namespace tb;
 class TestApp : public QObject {
@@ -39,6 +40,47 @@ class TestApp : public QObject {
         return container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr);
     }
 private slots:
+    void collectionSurvivesLockRestartAndPasswordChange() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        SecureBytes token, second, result;
+        QString error;
+        {
+            Application app(dir.path());
+            QVERIFY(app.createPasswordVault("first-test-password",&error));
+            QVERIFY(app.issueCollectionToken(token).isEmpty());
+            QVERIFY(app.copyToCollection("shared","synthetic").isEmpty());
+            app.lock();
+            QVERIFY(!app.copyToCollection("other","denied").isEmpty());
+            QVERIFY(!app.revokeCollectionToken().isEmpty());
+            QVERIFY(collection::execute(dir.path(),token.bytes(),"replace","shared","updated",result).isEmpty());
+            QVERIFY(app.unlock("first-test-password",&error));
+            QVERIFY(app.switchToPassword("second-test-password",&error));
+        }
+        Application restarted(dir.path());
+        QCOMPARE(restarted.gate(),Application::Gate::NeedUnlock);
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read","shared",{},result),QString("unauthorized"));
+        const auto priorVault=readFile(restarted.storePathForTest()+".bak");
+        auto prior=container::openPassword(priorVault,"first-test-password");
+        QCOMPARE(prior.status,container::Status::Ok);
+        SecureBytes priorPlain(std::move(prior.cbor));
+        SecureKey oldOwner;
+        QCOMPARE(crypto_kdf_derive_from_key(oldOwner.data(), SecureKey::Size, 1,"TBColOwn",prior.dataKey.data()),0);
+        QCOMPARE(collection::issue(dir.path(),oldOwner,second),QString("unauthorized"));
+        QVERIFY(restarted.unlock("second-test-password",&error));
+        QVERIFY(restarted.issueCollectionToken(second).isEmpty());
+        QVERIFY(collection::execute(dir.path(),second.bytes(),"read","shared",{},result).isEmpty());
+        QVERIFY(result.bytes()=="updated");
+        QVERIFY(restarted.prepareBackupRestore("first-test-password",&error));
+        QVERIFY(restarted.restorePreparedBackup().committed);
+        QCOMPARE(readFile(restarted.storePathForTest()),priorVault);
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read","shared",{},result),QString("unauthorized"));
+        QCOMPARE(collection::execute(dir.path(),second.bytes(),"read","shared",{},result),QString("unauthorized"));
+        QVERIFY(restarted.unlock("first-test-password",&error));
+        QVERIFY(restarted.issueCollectionToken(token).isEmpty());
+        QVERIFY(collection::execute(dir.path(),token.bytes(),"read","shared",{},result).isEmpty());
+        QVERIFY(result.bytes()=="updated");
+    }
     void registrySafetyCopyPreservesVerifiedCiphertext_data() {
         QTest::addColumn<int>("fault"); for(int i=0;i<5;++i) QTest::newRow(qPrintable(QString::number(i)))<<i;
     }

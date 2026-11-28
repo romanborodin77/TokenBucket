@@ -22,6 +22,7 @@ endif()
 add_library(tokenbucket_core STATIC
   src/app/Preferences.cpp
   src/vault/Crypto.cpp
+  src/vault/AgentCollection.cpp
   src/vault/CborWriter.cpp
   src/vault/PasswordGenerator.cpp
   src/vault/Container.cpp
@@ -71,7 +72,7 @@ if(WIN32)
   target_link_libraries(tokenbucket_agent_pipe PUBLIC Qt6::Core advapi32)
   add_executable(TokenBucket-agent src/agent_main.cpp src/agent_mcp.cpp src/platform/crashpolicy_win.cpp)
   target_include_directories(TokenBucket-agent PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-  target_link_libraries(TokenBucket-agent PRIVATE tokenbucket_agent_pipe)
+  target_link_libraries(TokenBucket-agent PRIVATE tokenbucket_agent_pipe tokenbucket_core)
   add_executable(brandtool tools/brandtool.cpp)
   target_link_libraries(brandtool PRIVATE tokenbucket_core)
 endif()

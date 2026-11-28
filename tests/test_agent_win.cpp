@@ -5,6 +5,8 @@
 #include "ui/AgentAccess.h"
 #include "ui/MainWindow.h"
 #include "ui/SettingsDialog.h"
+#include "vault/AgentCollection.h"
+#include "vault/Crypto.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -16,6 +18,7 @@
 #include <QJsonObject>
 #include <QMessageBox>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QTemporaryDir>
@@ -904,7 +907,9 @@ private slots:
         });
         verifier.start(10);
 
+        const auto pipeName = agent::Endpoint::current().path(EndpointSuffix).toStdWString();
         const auto start = [&](int id) {
+            QTRY_VERIFY_WITH_TIMEOUT(WaitNamedPipeW(pipeName.c_str(), NMPWAIT_NOWAIT), 2500);
             sendMcp(child, "tools/call", {{"_meta", modernMcpMetadata()}, {"name", "tokenbucket_ssh_exec"},
                 {"arguments", sshArguments(key.id, "hold")}}, id);
         };
@@ -1003,6 +1008,85 @@ private slots:
                 QCOMPARE(execution.result()->out.trimmed(), QByteArray("TOKENBUCKET-LOOPBACK"));
             } else QVERIFY(execution.result()->out.isEmpty() && execution.result()->err.isEmpty());
             QCOMPARE(scratchStages(), stageBaseline);
+        }
+    }
+
+    void mcpCollectionWhileMainVaultLocked() {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        Application app(directory.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault(Password, &error), qPrintable(error));
+        app.lock();
+        QCOMPARE(app.gate(), Application::Gate::NeedUnlock);
+        QFile vault(app.storePathForTest());
+        QVERIFY(vault.open(QIODevice::ReadOnly));
+        const auto originalVault = vault.readAll();
+        vault.close();
+        QVERIFY(!originalVault.isEmpty());
+
+        SecureKey owner;
+        randombytes_buf(owner.data(), SecureKey::Size);
+        SecureBytes token;
+        QCOMPARE(collection::issue(directory.path(), owner, token), QString());
+        auto env = QProcessEnvironment::systemEnvironment();
+        env.insert("TOKENBUCKET_TEST_DATA_DIR", directory.path());
+        env.insert("TB_AGENT_TOKEN", QString::fromLatin1(token.bytes()));
+        QProcess child;
+        child.setProcessEnvironment(env);
+        child.start(helperPath(), {"--mcp"});
+        QVERIFY(child.waitForStarted(5000));
+
+        sendMcp(child, "tools/list", {{"_meta", modernMcpMetadata()}}, 1);
+        const auto catalog = receiveMcp(child);
+        const auto tools = catalog.value("result").toObject().value("tools").toArray();
+        QCOMPARE(tools.size(), 3);
+        QCOMPARE(tools.at(0).toObject().value("name"), QJsonValue("tokenbucket_collection_read"));
+        QCOMPARE(tools.at(1).toObject().value("name"), QJsonValue("tokenbucket_collection_create"));
+        QCOMPARE(tools.at(2).toObject().value("name"), QJsonValue("tokenbucket_collection_replace"));
+        QVERIFY(!QJsonDocument(catalog).toJson().contains(token.bytes()));
+
+        int id = 1;
+        const auto call = [&](const QString& tool, const QJsonObject& args) {
+            sendMcp(child, "tools/call", {{"name", tool}, {"arguments", args}, {"_meta", modernMcpMetadata()}}, ++id);
+            return receiveMcp(child);
+        };
+        const QByteArray binary("\0\xffx", 3);
+        const QJsonObject args{{"name", "sample"}, {"value", QString::fromLatin1(binary.toBase64())}};
+        const QJsonObject name{{"name", "sample"}};
+        QCOMPARE(call("tokenbucket_find", {{"title", "sample"}}).value("error").toObject().value("code").toInt(), -32602);
+        QCOMPARE(call("tokenbucket_ssh_exec", {}).value("error").toObject().value("code").toInt(), -32602);
+        QCOMPARE(call("tokenbucket_collection_create", {{"name", "sample"}, {"value", "YR=="}})
+            .value("error").toObject().value("code").toInt(), -32602);
+        QCOMPARE(toolOutput(call("tokenbucket_collection_replace", args)).value("error"), QJsonValue("not-found"));
+        QVERIFY(toolOutput(call("tokenbucket_collection_create", args)).value("ok").toBool());
+        QCOMPARE(toolOutput(call("tokenbucket_collection_create", args)).value("error"), QJsonValue("already-exists"));
+        const auto read = toolOutput(call("tokenbucket_collection_read", name));
+        QCOMPARE(read.value("encoding"), QJsonValue("base64"));
+        QCOMPARE(QByteArray::fromBase64(read.value("value").toString().toLatin1()), binary);
+        QVERIFY(toolOutput(call("tokenbucket_collection_replace", {{"name", "sample"}, {"value", ""}})).value("ok").toBool());
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", name)).value("value"), QJsonValue(""));
+        QCOMPARE(collection::revoke(directory.path(), owner), QString());
+        const auto revoked = call("tokenbucket_collection_read", name);
+        QVERIFY(revoked.value("result").toObject().value("isError").toBool());
+        QCOMPARE(toolOutput(revoked).value("error"), QJsonValue("unauthorized"));
+        child.closeWriteChannel();
+        QVERIFY(child.waitForFinished(5000));
+        QCOMPARE(child.exitCode(), 0);
+        QVERIFY(child.readAllStandardError().isEmpty());
+        QCOMPARE(app.gate(), Application::Gate::NeedUnlock);
+        QVERIFY(vault.open(QIODevice::ReadOnly));
+        QCOMPARE(vault.readAll(), originalVault);
+
+        for (const auto& malformed : {QStringLiteral(""), QStringLiteral("invalid-synthetic-token")}) {
+            env.insert("TB_AGENT_TOKEN", malformed);
+            child.setProcessEnvironment(env);
+            child.start(helperPath(), {"--mcp"});
+            QVERIFY(child.waitForStarted(5000));
+            QVERIFY(child.waitForFinished(5000));
+            QCOMPARE(child.exitCode(), 1);
+            QVERIFY(child.readAllStandardOutput().isEmpty());
+            QVERIFY(child.readAllStandardError().isEmpty());
         }
     }
 

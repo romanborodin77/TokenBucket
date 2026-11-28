@@ -21,6 +21,7 @@ class QSplitter; class QBoxLayout;
 namespace tb::ui {
 class EntryCard;
 class RegistryView;
+class SettingsDialog;
 // Главное окно: дерево проектов/групп — список записей с фильтрами/сортировкой —
 // карточка записи. Все изменения модели идут через commit()/commitEntry()
 // (сохранение + откат при отказе). Крестик следует сохранённой политике закрытия;
@@ -142,6 +143,8 @@ private:
     void treeMenu(const QPoint& pos);
     void listMenu(const QPoint& pos);
     void showEntryMenu(const QPoint& globalPos);
+    void changeCollectionToken(SettingsDialog& settings,bool revoke);
+    void copyEntryToCollection(model::Id id,quint64 generation);
     void toggleFavorite();
     void updateSwitchActionText();
     int applyImport(const QByteArray& bytes, bool keepassXml, QString* err); // возвращает число добавленных

@@ -1,8 +1,12 @@
 #pragma once
 #include <QByteArray>
+#include <QByteArrayView>
 #include "SecureBytes.h"
 namespace tb::crypto {
 bool init();
+// 32 случайных байта в виде 64 строчных шестнадцатеричных символов.
+SecureBytes generateAgentToken();
+SecureBytes parseAgentToken(QByteArrayView token);
 bool deriveKey(const QByteArray& passwordUtf8, const unsigned char* salt16, SecureKey& out);
 struct Blob { unsigned char nonce[24]; QByteArray ct; };
 // Базовая перегрузка: открытый текст лежит по указателю (обычно в защищённом

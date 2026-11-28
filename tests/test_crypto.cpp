@@ -7,6 +7,27 @@ class TestCrypto : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase() { QVERIFY(crypto::init()); }
+    void agentTokenFormat() {
+        const auto token = crypto::generateAgentToken();
+        const auto secondToken = crypto::generateAgentToken();
+        QCOMPARE(token.size(), 64);
+        QVERIFY(token.bytes() != secondToken.bytes());
+        const auto decoded = crypto::parseAgentToken(token.bytes());
+        QCOMPARE(decoded.size(), 32);
+        QVERIFY(decoded.bytes().toHex() == token.bytes());
+
+        const QByteArray canonical = QByteArray("ab").repeated(32);
+        const auto known = crypto::parseAgentToken(canonical);
+        QCOMPARE(known.bytes(), QByteArray(32, char(0xab)));
+        QVERIFY(crypto::parseAgentToken(canonical.first(63)).isEmpty());
+        QVERIFY(crypto::parseAgentToken(canonical + ' ').isEmpty());
+        QVERIFY(crypto::parseAgentToken(canonical.toUpper()).isEmpty());
+        for (char invalid : {'g', ' ', '\0', char(0xff)}) {
+            auto malformed = canonical;
+            malformed[19] = invalid;
+            QVERIFY(crypto::parseAgentToken(malformed).isEmpty());
+        }
+    }
     void generatorHonoursOptions() {
         const QString symbols = QStringLiteral("#!%+=-_@$*?.");
         for (int i = 0; i < 1000; ++i) {

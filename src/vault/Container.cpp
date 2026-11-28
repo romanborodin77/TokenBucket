@@ -1,5 +1,6 @@
 #include "Container.h"
 #include "Crypto.h"
+#include <QCryptographicHash>
 #include <QDataStream>
 #include <QIODevice>
 #include <sodium.h>
@@ -23,7 +24,7 @@ namespace {
 constexpr char kMagic[4] = {'T','B','V','K'};
 constexpr uint16_t kVersion = 1, kKdfArgon2id = 1;
 constexpr uint32_t kOpslimit = 3, kMemlimit = 64u * 1024 * 1024;
-constexpr int kHead = 61; // всё до wrap
+constexpr int kHead = KeyHeaderBytes; // всё до wrap
 
 struct Parsed {
     uint8_t mode = 0;        // 255 = распознан, но параметры/версия не поддержаны
@@ -75,6 +76,11 @@ QByteArray sealBody(QByteArray prefix, const SecureKey& key, const unsigned char
     return prefix + ct.ct;
 }
 } // namespace
+
+QByteArray keyHeaderFingerprint(QByteArrayView bytes) {
+    if (bytes.size() < KeyHeaderBytes || !bytes.startsWith("TBVK")) return {};
+    return QCryptographicHash::hash(bytes.first(KeyHeaderBytes), QCryptographicHash::Sha256);
+}
 
 uint8_t readMode(const QByteArray& f) {
     Parsed p;

@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QDir>
 #include <QFile>
+#include <QInputDialog>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
@@ -471,6 +472,58 @@ private slots:
             reopened=true; dialog->reject();
         });
         window.showSettings(); QVERIFY(reopened);
+    }
+    void collectionTokenDisplayRequiresOwnerAndClearsOnLock_data() {
+        QTest::addColumn<int>("action");
+        QTest::newRow("cancel-owner-check")<<0;
+        QTest::newRow("lock-during-owner-check")<<1;
+        QTest::newRow("lock-during-display")<<2;
+    }
+    void collectionTokenDisplayRequiresOwnerAndClearsOnLock() {
+        QFETCH(int,action);
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        QSettings preferences(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&preferences,&run);
+        bool ownerPrompt=false,displayed=false,cleared=false;
+        QTimer driver; driver.setInterval(10);
+        connect(&driver,&QTimer::timeout,&window,[&] {
+            auto* modal=QApplication::activeModalWidget();
+            if(auto* box=qobject_cast<QMessageBox*>(modal)) {
+                auto* yes=box->button(QMessageBox::Yes);
+                if(yes) yes->click();
+                else box->reject();
+            } else if(auto* auth=qobject_cast<QInputDialog*>(modal)) {
+                ownerPrompt=true;
+                if(action==0) auth->reject();
+                else if(action==1) app.lock();
+                else {auth->setTextValue("test-password-123"); auth->accept();}
+            } else if(auto* token=qobject_cast<QDialog*>(modal); token && token->objectName()=="issuedCollectionToken") {
+                auto* value=token->findChild<QLabel*>("collectionTokenValue");
+                displayed=value && !value->text().isEmpty();
+                app.lock();
+                cleared=value && value->text().isEmpty() && !token->isVisible();
+            }
+        });
+        QTimer::singleShot(0,&window,[&] {
+            auto* dialog=qobject_cast<ui::SettingsDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            auto* issue=dialog->findChild<QPushButton*>("issueCollectionToken");
+            QVERIFY(issue && issue->isEnabled());
+            driver.start();
+            issue->click();
+            dialog->reject();
+        });
+        QTimer deadline; deadline.setSingleShot(true);
+        connect(&deadline,&QTimer::timeout,&window,[] {
+            if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();
+        });
+        deadline.start(5000);
+        window.showSettings();
+        QVERIFY(ownerPrompt);
+        QCOMPARE(displayed,action==2);
+        QCOMPARE(cleared,action==2);
+        QCOMPARE(app.gate(),action==0?Application::Gate::Ready:Application::Gate::NeedUnlock);
     }
     void draftNavigationAndCancel_data() {
         QTest::addColumn<int>("dismiss");

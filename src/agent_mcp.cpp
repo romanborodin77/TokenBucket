@@ -3,18 +3,25 @@
 #include "model/TextFile.h"
 #include "platform/AgentClient.h"
 #include "platform/SshExecRequest.h"
+#include "vault/AgentCollection.h"
+#include "vault/Crypto.h"
 #include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QScopeGuard>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QUuid>
 #include <algorithm>
+#include <cstring>
 #include <list>
+#include <type_traits>
 
 namespace tb::agent {
 namespace {
 constexpr qsizetype MaxFrame = 64 * 1024;
+constexpr DWORD InputChunkBytes = 4096;
 constexpr qsizetype MaxQueuedBytes = 3 * 1024 * 1024;
 constexpr size_t MaxQueuedFrames = 32;
 constexpr int OutputTimeoutMs = 15000;
@@ -27,6 +34,13 @@ constexpr auto FindTool = "tokenbucket_find";
 constexpr auto ReadTool = "tokenbucket_read";
 constexpr auto FindSshTool = "tokenbucket_find_ssh";
 constexpr auto SshExecTool = "tokenbucket_ssh_exec";
+constexpr auto CollectionReadTool = "tokenbucket_collection_read";
+constexpr auto CollectionCreateTool = "tokenbucket_collection_create";
+constexpr auto CollectionReplaceTool = "tokenbucket_collection_replace";
+constexpr qsizetype CollectionNameBytes = 256;
+constexpr qsizetype CollectionValueBytes = 32 * 1024;
+constexpr qsizetype CollectionBase64Chars = 4 * ((CollectionValueBytes + 2) / 3);
+constexpr auto CollectionInstructions = "Read, create or replace one entry by exact name in the owner's separate agent collection.";
 constexpr auto Instructions = "For SSH use TokenBucket Settings > Security in the same Windows session. "
     "For general secret reads start TokenBucket with --agent-access. "
     "Wait for owner consent and verification. Do not retry automatically after a denial.";
@@ -35,17 +49,29 @@ QJsonObject serverInfo() { return {{"name", "TokenBucket"}, {"version", TOKENBUC
 QJsonObject capabilities() { return {{"tools", QJsonObject{}}}; }
 QJsonArray supportedVersions() { return {ModernVersion, LegacyVersion}; }
 
-QJsonArray toolList() {
-    const QJsonObject text{{"type", "string"}, {"minLength", 1}};
-    QJsonArray fields;
-    for (const auto* field : ReadFields) fields.append(field);
+QJsonArray toolList(bool collectionMode) {
     const auto tool = [](const char* name, const char* description, QJsonObject properties, QJsonArray required,
-                         bool remote = false) {
+                         bool remote = false, bool readOnly = true) {
         return QJsonObject{{"name", name}, {"description", description},
-            {"annotations", QJsonObject{{"readOnlyHint", !remote}, {"openWorldHint", remote}, {"idempotentHint", false}}},
+            {"annotations", QJsonObject{{"readOnlyHint", readOnly && !remote}, {"openWorldHint", remote}, {"idempotentHint", false}}},
             {"inputSchema", QJsonObject{{"type", "object"}, {"additionalProperties", false},
                 {"properties", properties}, {"required", required}}}};
     };
+    const QJsonObject text{{"type", "string"}, {"minLength", 1}};
+    if (collectionMode) {
+        const QJsonObject name{{"type", "string"}, {"minLength", 1}, {"maxLength", CollectionNameBytes},
+            {"description", "Exact case-sensitive name, at most 256 UTF-8 bytes."}};
+        const QJsonObject value{{"type", "string"}, {"maxLength", CollectionBase64Chars},
+            {"description", "Canonical standard base64 for a value of at most 32 KiB."}};
+        const QJsonObject write{{"name", name}, {"value", value}};
+        return {
+            tool(CollectionReadTool, "Read one value as standard base64 from the agent collection.", {{"name", name}}, {"name"}),
+            tool(CollectionCreateTool, "Create one new entry in the agent collection.", write, {"name", "value"}, false, false),
+            tool(CollectionReplaceTool, "Replace the value of one existing entry in the agent collection.", write, {"name", "value"}, false, false)
+        };
+    }
+    QJsonArray fields;
+    for (const auto* field : ReadFields) fields.append(field);
     return {
         tool(FindTool, "Find one TokenBucket entry by exact case-sensitive title after owner consent. Returns ID, title and type.",
             {{"title", text}}, {"title"}),
@@ -157,11 +183,91 @@ QByteArray brokerRequest(const QJsonObject& params) {
     return encoded.size() <= MaxRequest ? encoded : QByteArray{};
 }
 
+SecureBytes collectionReply(const QString& dir, QByteArrayView token, const QJsonObject& params) {
+    const auto tool = params.value("name");
+    QString op;
+    if (tool == CollectionReadTool) op = QStringLiteral("read");
+    else if (tool == CollectionCreateTool) op = QStringLiteral("create");
+    else if (tool == CollectionReplaceTool) op = QStringLiteral("replace");
+    else return {};
+
+    const auto args = params.value("arguments").toObject();
+    const auto name = args.value("name").toString();
+    const bool read = tool == CollectionReadTool;
+    if (args.size() != (read ? 1 : 2) || name.isEmpty() || !name.isValidUtf16() ||
+        name.toUtf8().size() > CollectionNameBytes) return {};
+    SecureBytes value;
+    if (!read) {
+        const auto field = args.value("value");
+        if (!field.isString()) return {};
+        const auto text = field.toStringView();
+        if (text.size() > CollectionBase64Chars || text.size() % 4 != 0) return {};
+        const auto decode = [&value](QByteArrayView input) {
+            if (input.isEmpty()) return true;
+
+            QByteArray decoded(std::min(CollectionValueBytes, input.size() / 4 * 3), Qt::Uninitialized);
+            const auto wipe = qScopeGuard([&] {
+                if (!decoded.isEmpty()) SecureZeroMemory(decoded.data(), size_t(decoded.size()));
+            });
+            size_t size = 0;
+            if (sodium_base642bin(reinterpret_cast<unsigned char*>(decoded.data()), size_t(decoded.size()),
+                    input.data(), size_t(input.size()), nullptr, &size, nullptr, sodium_base64_VARIANT_ORIGINAL) != 0)
+                return false;
+            decoded.truncate(qsizetype(size));
+            value = SecureBytes(std::move(decoded));
+            const SecureBytes canonical(value.bytes().toBase64());
+            return input == QByteArrayView(canonical.bytes());
+        };
+        // Borrow the JSON parser's string when it already has one-byte code units.
+        const bool valid = text.visit([&](auto view) {
+            if constexpr (std::is_same_v<decltype(view), QStringView>) {
+                const SecureBytes latin1(view.toLatin1());
+                return decode(latin1.bytes());
+            } else {
+                return decode(QByteArrayView(view.data(), view.size()));
+            }
+        });
+        if (!valid) return {};
+    }
+    SecureBytes result;
+    const auto error = tb::collection::execute(dir, token, op, name, value.bytes(), result);
+    if (!error.isEmpty()) return SecureBytes(errorReply(error.toLatin1().constData()));
+    if (!read) return SecureBytes(QByteArrayLiteral("{\"ok\":true}\n"));
+
+    const SecureBytes encoded(result.bytes().toBase64());
+    QByteArray reply;
+    reply.reserve(encoded.size() + 48);
+    reply += "{\"ok\":true,\"encoding\":\"base64\",\"value\":\"";
+    reply += encoded.bytes();
+    reply += "\"}\n";
+    return SecureBytes(std::move(reply));
+}
+
+bool readCollectionToken(SecureBytes& token) {
+    constexpr DWORD TokenChars = 64;
+    wchar_t inherited[TokenChars + 1]{};
+    const auto wipe = qScopeGuard([&] { SecureZeroMemory(inherited, sizeof(inherited)); });
+    SetLastError(ERROR_SUCCESS);
+    const auto count = GetEnvironmentVariableW(L"TB_AGENT_TOKEN", inherited, TokenChars + 1);
+    if (!count && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return true;
+    // Suppress environment inheritance even when a configured token is invalid.
+    if (!SetEnvironmentVariableW(L"TB_AGENT_TOKEN", nullptr) || count != TokenChars) return false;
+    QByteArray text(count, Qt::Uninitialized);
+    for (DWORD index = 0; index < count; ++index) {
+        const auto ch = inherited[index];
+        text[index] = ch <= 127 ? static_cast<char>(ch) : '\0';
+    }
+    token = SecureBytes(std::move(text));
+    return !tb::crypto::parseAgentToken(token.bytes()).isEmpty();
+}
+
 class McpServer {
 public:
-    explicit McpServer(QString suffix) : suffix_(std::move(suffix)) {
+    McpServer(QString suffix, QString dir, SecureBytes token)
+        : suffix_(std::move(suffix)), collectionDir_(std::move(dir)), collectionToken_(std::move(token)) {
         QObject::connect(&timer_, &QTimer::timeout, &timer_, [this] { tick(); });
     }
+    ~McpServer() { discardInput(input_.size()); }
 
     bool start() {
         // Inherited stdio handles need not support overlapped I/O. The local
@@ -172,6 +278,7 @@ public:
             !SetNamedPipeHandleState(outputHandle_, &mode, nullptr, nullptr)) return false;
         const auto capacity = outbound && inbound ? std::min(outbound, inbound) : std::max(outbound, inbound);
         outputChunk_ = std::clamp<DWORD>(capacity, 1, 4096);
+        input_.reserve(MaxFrame + InputChunkBytes);
         timer_.start(10);
         return true;
     }
@@ -192,8 +299,19 @@ private:
     void stop(int exitCode) {
         timer_.stop();
         call_.reset();
+        collectionToken_.clear();
+        discardInput(input_.size());
         output_.clear();
         QCoreApplication::exit(exitCode);
+    }
+
+    void discardInput(qsizetype consumed) {
+        if (!consumed) return;
+        auto* bytes = input_.data();
+        const auto remaining = input_.size() - consumed;
+        if (remaining) std::memmove(bytes, bytes + consumed, size_t(remaining));
+        SecureZeroMemory(bytes + remaining, size_t(consumed));
+        input_.truncate(remaining);
     }
 
     void queue(QByteArray bytes, const QJsonValue& id, bool toolResult = false) {
@@ -259,7 +377,7 @@ private:
     }
 
     void toolResult(const QJsonValue& id, QByteArrayView response, bool modern) {
-        // Wrap the single broker reply without creating additional JSON DOM copies of the secret.
+        // Wrap the reply without creating additional JSON DOM copies of the secret.
         constexpr char Hex[] = "0123456789abcdef";
         const auto identifier = id.toJson(QJsonValue::JsonFormat::Compact);
         QByteArray encoded;
@@ -293,7 +411,9 @@ private:
         const auto parsed = QJsonValue::fromJson(frame, &parseError);
         if (parseError.error != QJsonParseError::NoError) { error({}, -32700, "Parse error"); return; }
         const auto request = parsed.toObject();
-        const auto id = request.value("id");
+        // Keep only the scalar ID when a queued response outlives the request's JSON storage.
+        const auto requestId = request.value("id");
+        const auto id = requestId.isString() ? QJsonValue(requestId.toString()) : requestId;
         const auto method = request.value("method").toString();
         if (!parsed.isObject() || jsonMembers(parsed) != jsonSeparators(frame)) {
             error({}, -32600, "Invalid request");
@@ -321,6 +441,8 @@ private:
 
         const auto metadata = params.value("_meta").toObject();
         const auto version = metadata.value(ProtocolVersion);
+        const bool collectionMode = !collectionToken_.isEmpty();
+        const auto instructions = collectionMode ? CollectionInstructions : Instructions;
         if (method == "initialize" && version.isUndefined()) {
             const auto info = params.value("clientInfo").toObject();
             if (legacy_ != Legacy::BeforeInitialize || !params.value("protocolVersion").isString() ||
@@ -330,7 +452,7 @@ private:
             }
             legacy_ = Legacy::BeforeInitialized;
             result(id, {{"protocolVersion", LegacyVersion}, {"capabilities", capabilities()}, {"serverInfo", serverInfo()},
-                {"instructions", Instructions}}, false);
+                {"instructions", instructions}}, false);
             return;
         }
 
@@ -347,17 +469,28 @@ private:
             }
         }
         if (method == "server/discover") {
-            result(id, {{"supportedVersions", supportedVersions()}, {"capabilities", capabilities()},
-                {"instructions", Instructions}, {"ttlMs", 300000}, {"cacheScope", "public"}}, true);
+            QJsonObject body{{"supportedVersions", supportedVersions()}, {"capabilities", capabilities()},
+                {"instructions", instructions}};
+            if (!collectionMode) {
+                body.insert("ttlMs", 300000);
+                body.insert("cacheScope", "public");
+            }
+            result(id, body, true);
         } else if (method == "tools/list") {
             if (params.contains("cursor")) { error(id, -32602, "Invalid cursor"); return; }
-            QJsonObject body{{"tools", toolList()}};
-            if (modern) {
+            QJsonObject body{{"tools", toolList(collectionMode)}};
+            if (modern && !collectionMode) {
                 body.insert("ttlMs", 300000);
                 body.insert("cacheScope", "public");
             }
             result(id, body, modern);
         } else if (method == "tools/call") {
+            if (collectionMode) {
+                const auto reply = collectionReply(collectionDir_, collectionToken_.bytes(), params);
+                if (reply.isEmpty()) error(id, -32602, "Unknown tool or invalid arguments");
+                else toolResult(id, reply.bytes(), modern);
+                return;
+            }
             auto encoded = brokerRequest(params);
             if (encoded.isEmpty()) { error(id, -32602, "Unknown tool or invalid arguments"); return; }
             if (call_) { toolResult(id, errorReply("busy"), modern); return; }
@@ -374,20 +507,23 @@ private:
         if (!PeekNamedPipe(inputHandle_, nullptr, 0, nullptr, &available, nullptr)) { stop(0); return; }
 
         if (available) {
-            char chunk[4096];
+            // Read directly into the reserved buffer so secrets never pass through a second stack buffer.
+            const auto pending = input_.size();
+            const auto requested = std::min(available, InputChunkBytes);
+            input_.resize(pending + requested);
             DWORD received = 0;
-            if (!ReadFile(inputHandle_, chunk, std::min<DWORD>(available, sizeof(chunk)), &received, nullptr) || !received) {
+            if (!ReadFile(inputHandle_, input_.data() + pending, requested, &received, nullptr) || !received) {
                 stop(0);
                 return;
             }
-            if (input_.isEmpty()) inputDeadline_ = QDeadlineTimer(RequestTimeoutMs);
-            input_.append(chunk, received);
+            input_.truncate(pending + received);
+            if (!pending) inputDeadline_ = QDeadlineTimer(RequestTimeoutMs);
             // Take complete input messages, in order, before publishing a pending response.
             // In particular, an observed cancellation closes the local pipe first.
             for (auto newline = input_.indexOf('\n'); newline >= 0 && newline <= MaxFrame; newline = input_.indexOf('\n')) {
                 dispatch(QByteArrayView(input_.constData(), newline));
                 if (!timer_.isActive()) return;
-                input_.remove(0, newline + 1);
+                discardInput(newline + 1);
                 inputDeadline_ = QDeadlineTimer(RequestTimeoutMs);
             }
             if (input_.size() > MaxFrame) { stop(1); return; }
@@ -405,6 +541,8 @@ private:
     }
 
     QString suffix_;
+    QString collectionDir_;
+    SecureBytes collectionToken_;
     HANDLE inputHandle_ = GetStdHandle(STD_INPUT_HANDLE);
     HANDLE outputHandle_ = GetStdHandle(STD_OUTPUT_HANDLE);
     QTimer timer_;
@@ -421,7 +559,21 @@ private:
 }
 
 int runMcp(const QString& endpointSuffix) {
-    McpServer server(endpointSuffix);
+    QString dir;
+    SecureBytes token;
+#ifdef TOKENBUCKET_TEST_AGENT
+    dir = qEnvironmentVariable("TOKENBUCKET_TEST_DATA_DIR");
+    if (!dir.isEmpty() && !readCollectionToken(token)) return 1;
+#else
+    if (!readCollectionToken(token)) return 1;
+    if (!token.isEmpty()) {
+        QCoreApplication::setApplicationName(QStringLiteral("TokenBucket"));
+        QCoreApplication::setOrganizationName(QStringLiteral("TokenBucket"));
+        dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (dir.isEmpty()) return 1;
+    }
+#endif
+    McpServer server(endpointSuffix, std::move(dir), std::move(token));
     return server.start() ? QCoreApplication::exec() : 1;
 }
 }

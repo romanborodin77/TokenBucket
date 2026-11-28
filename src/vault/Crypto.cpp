@@ -1,7 +1,38 @@
 #include "Crypto.h"
+#include <algorithm>
 #include <sodium.h>
 namespace tb::crypto {
+namespace {
+constexpr qsizetype AgentTokenBytes = 32;
+constexpr qsizetype AgentTokenChars = 2 * AgentTokenBytes;
+}
+
 bool init() { return sodium_init() >= 0; }
+
+SecureBytes generateAgentToken() {
+    SecureKey secret;
+    static_assert(SecureKey::Size == AgentTokenBytes);
+    randombytes_buf(secret.data(), AgentTokenBytes);
+    QByteArray token(AgentTokenChars + 1, Qt::Uninitialized);
+    sodium_bin2hex(token.data(), size_t(token.size()), secret.data(), AgentTokenBytes);
+    token.chop(1);
+    return SecureBytes(std::move(token));
+}
+
+SecureBytes parseAgentToken(QByteArrayView token) {
+    if (token.size() != AgentTokenChars || !std::all_of(token.begin(), token.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    })) return {};
+
+    QByteArray secret(AgentTokenBytes, Qt::Uninitialized);
+    size_t size = 0;
+    const int result = sodium_hex2bin(reinterpret_cast<unsigned char*>(secret.data()), AgentTokenBytes,
+                                      token.data(), size_t(token.size()), nullptr, &size, nullptr);
+    SecureBytes decoded(std::move(secret));
+    if (result != 0 || size != AgentTokenBytes) return {};
+    return decoded;
+}
+
 // Ключ из пароля: Argon2id с фиксированными параметрами спеки. Параметры записаны
 // в заголовке контейнера и проверяются при чтении — подменённый файл с ослабленными
 // настройками KDF будет отклонён (downgrade невозможен).

@@ -281,10 +281,9 @@ private slots:
             if (e.reverify) e.password = "synthetic-verified-password";
             QVERIFY(vault.model()->setEntry(e).isEmpty());
             QVERIFY(vault.save(&error));
-            QTRY_VERIFY_WITH_TIMEOUT(GetForegroundWindow() == receiver || SetForegroundWindow(receiver), 5000);
-            QTRY_VERIFY(GetForegroundWindow() == receiver);
             QTRY_VERIFY(paste::modifiersReleased());
             QTest::qWait(100);
+            QTRY_VERIFY_WITH_TIMEOUT(activateTestReceiver(receiver,actualPid) && GetForegroundWindow() == receiver, 5000);
             // Select only the dedicated receiver's old synthetic value.
             INPUT select[4] = {};
             for (int i = 0; i < 4; ++i) { select[i].type = INPUT_KEYBOARD; select[i].ki.wVk = i == 0 || i == 3 ? VK_CONTROL : 'A'; select[i].ki.dwFlags = i >= 2 ? KEYEVENTF_KEYUP : 0; }
@@ -328,7 +327,6 @@ private slots:
                 output += child.readAllStandardOutput(); QCOMPARE(output, before);
                 if (route == 8) { QVERIFY(!panel->isVisible()); QVERIFY(vault.unlock("test-password-123", &error)); }
                 panel->close(); other.close();
-                if (route != 9) { QVERIFY(SetForegroundWindow(receiver)); QTRY_COMPARE(GetForegroundWindow(), receiver); }
                 continue;
             }
             QTimer answer; answer.setInterval(10);
@@ -570,10 +568,8 @@ private slots:
         QVERIFY(guard.copySecret(QStringLiteral("live-paste-777"), nullptr));
         QLineEdit target; target.resize(240, 32); target.show(); target.raise(); target.activateWindow();
         QVERIFY(QTest::qWaitForWindowExposed(&target));
-        QVERIFY(activateTestReceiver(reinterpret_cast<HWND>(target.winId()),GetCurrentProcessId()));
-        QTest::qWait(150);
-        const bool focused = GetForegroundWindow() == reinterpret_cast<HWND>(target.winId());
-        if (!focused) QSKIP("окно не получило фокус в этой среде (посторонний topmost)");
+        const auto receiver = reinterpret_cast<HWND>(target.winId());
+        QTRY_VERIFY_WITH_TIMEOUT(activateTestReceiver(receiver,GetCurrentProcessId()) && GetForegroundWindow() == receiver, 5000);
         paste::sendCtrlV();
         QTRY_COMPARE(target.text(), QStringLiteral("live-paste-777")); // SendInput дошёл до поля
         guard.triggerClearNowForTest();

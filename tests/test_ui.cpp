@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QAction>
 #include <QApplication>
 #include <QTemporaryDir>
 #include <QTreeWidget>
@@ -34,11 +35,13 @@
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QThreadPool>
+#include <algorithm>
 #include "../src/app/Application.h"
 #include "../src/app/IdleTimer.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/MiniPanel.h"
 #include "../src/platform/ClipboardGuard.h"
+#include "../src/vault/AgentCollection.h"
 #include "../src/ui/EntryEditDialog.h"
 #include "../src/ui/EntryCard.h"
 #include "../src/ui/AboutDialog.h"
@@ -286,6 +289,74 @@ private slots:
             if (menu) { opened = true; const auto position = menu->pos(); menu->close(); QCOMPARE(position, anchor); }
         });
         more->click(); QVERIFY(opened);
+    }
+    void collectionCopiesOnlyAuthorizedSelectedSecret() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        const auto group=QUuid::createUuid();
+        QVERIFY(app.model()->addNode(group,{},"Synthetic").isEmpty());
+        model::Entry entry; entry.id=QUuid::createUuid(); entry.groupId=group;
+        entry.type=model::EntryType::Credentials; entry.title="Synthetic entry"; entry.reverify=true;
+        entry.login="synthetic-login"; entry.password="synthetic-entry-secret";
+        QVERIFY(app.model()->setEntry(entry).isEmpty());
+        QVERIFY(app.save(&error));
+        SecureBytes token,result;
+        QCOMPARE(app.issueCollectionToken(token),QString());
+        const QString name=QStringLiteral("named entry copy");
+
+        QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
+        ui::MainWindow window(app,nullptr,&uiPreferences_,&run);
+        window.resize(900,640); window.show(); window.list()->setCurrentRow(0);
+        auto* more=window.card()->findChild<QPushButton*>("cardMore");
+        QVERIFY(more && more->isEnabled());
+        for(bool acceptOwner:{false,true}) {
+            bool choseEntry=false,namedCopy=false,ownerPrompt=false;
+            QTimer driver;
+            connect(&driver,&QTimer::timeout,&window,[&] {
+                if(auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                    if(dialog->objectName()=="collectionItemName") {
+                        namedCopy=true; dialog->setTextValue(name); dialog->accept();
+                    } else if(dialog->textEchoMode()==QLineEdit::Password) {
+                        ownerPrompt=true;
+                        if(acceptOwner) {dialog->setTextValue("test-password-123"); dialog->accept();}
+                        else dialog->reject();
+                    }
+                } else if(!choseEntry) {
+                    if(auto* menu=qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                        const auto actions=menu->actions();
+                        const auto action=std::find_if(actions.cbegin(),actions.cend(),[](const QAction* item) {
+                            return item->objectName()=="copyEntryToCollection";
+                        });
+                        choseEntry=action!=actions.cend();
+                        if(choseEntry) {
+                            menu->setActiveAction(*action);
+                            QTimer::singleShot(0,menu,[menu] {QTest::keyClick(menu,Qt::Key_Return);});
+                        }
+                        else menu->close();
+                    }
+                }
+            });
+            QTimer deadline; deadline.setSingleShot(true);
+            connect(&deadline,&QTimer::timeout,&window,[] {
+                if(auto* popup=QApplication::activePopupWidget()) popup->close();
+                if(auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget())) dialog->reject();
+            });
+            driver.start(10); deadline.start(5000);
+            more->click();
+            QVERIFY(choseEntry);
+            QVERIFY(namedCopy);
+            QVERIFY(ownerPrompt);
+            QCOMPARE(collection::execute(dir.path(),token.bytes(),"read",name,{},result),
+                     acceptOwner?QString():QStringLiteral("not-found"));
+        }
+        QCOMPARE(result.bytes(),entry.password.toUtf8());
+        app.lock();
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"replace",name,"synthetic-replacement",result),QString());
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read",name,{},result),QString());
+        QCOMPARE(result.bytes(),QByteArray("synthetic-replacement"));
+        QVERIFY(app.unlock("test-password-123",&error));
+        const auto* original=app.model()->entry(entry.id); QVERIFY(original);
+        QCOMPARE(original->password,entry.password);
     }
     void libraryRequiresDestination() {
         QTemporaryDir dir; Application app(dir.path()); QString error;

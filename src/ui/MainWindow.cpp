@@ -66,13 +66,13 @@
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 #include "../platform/FileOps.h"
+#include "../platform/QuickPaste.h"
 #include "../vault/Container.h"
 #include "../vault/SecureBytes.h"
 #include <sodium.h>
 #ifdef Q_OS_WIN
 #include "../platform/hello_win.h"
 #include "../platform/QuickPasteWin.h"
-#include "../platform/QuickPaste.h"
 #include "../platform/EnvOps.h"
 #include "EnvExportDialog.h"
 #include <QTimer>
@@ -444,12 +444,62 @@ void MainWindow::showSettings() {
         switchUnlockMode(); if(ready()) dialog.setUnlockMode(app_.mode(),helloAvailable_);
     });
     connect(&dialog,&SettingsDialog::restoreBackupRequested,this,&MainWindow::restoreBackup);
+    connect(&dialog,&SettingsDialog::issueCollectionTokenRequested,this,[&] {changeCollectionToken(dialog,false);});
+    connect(&dialog,&SettingsDialog::revokeCollectionTokenRequested,this,[&] {changeCollectionToken(dialog,true);});
 #ifdef Q_OS_WIN
     const bool suspended=hotkey_->suspended(); hotkey_->setSuspended(true);
     const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
     connect(&dialog,&SettingsDialog::clearEnvironmentRequested,this,&MainWindow::removeExportedVariables);
 #endif
     dialog.exec();
+}
+void MainWindow::changeCollectionToken(SettingsDialog& settings,bool revoke) {
+    const QPointer<MainWindow> self(this);
+    auto* core=&app_;
+    const auto generation=core->generation();
+    const auto allowed=[&] {
+        return self && settings.isVisible() && self->ready() && !self->restoring_
+            && core->generation()==generation && settings.draft()==self->appliedPreferences_;
+    };
+    if(!allowed()) return;
+    settings.setOperationError({});
+    const auto title=revoke?QStringLiteral("Отзыв токена агента"):QStringLiteral("Выпуск токена агента");
+    const auto prompt=revoke
+        ? QStringLiteral("Отозвать токен? Агент потеряет доступ к коллекции. Копии секретов останутся в коллекции.")
+        : QStringLiteral("Выпустить новый токен? Предыдущий токен перестанет работать. Новый токен позволяет читать и изменять всю коллекцию агента.");
+    if(QMessageBox::question(&settings,title,prompt,QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes
+        || !allowed() || !VerifyDialog::verify(*core,&settings,title) || !allowed()) return;
+    SecureBytes token;
+    const auto error=revoke?core->revokeCollectionToken():core->issueCollectionToken(token);
+    if(!allowed()) return;
+    if(!error.isEmpty() || revoke) {
+        settings.setOperationError(error.isEmpty()?QStringLiteral("Токен агента отозван."):error);
+        return;
+    }
+    QDialog issued(&settings);
+    issued.setObjectName("issuedCollectionToken");
+    issued.setWindowTitle(title);
+    auto* layout=new QVBoxLayout(&issued);
+    auto* note=new QLabel(QStringLiteral("Токен показан один раз. Передайте его только доверенному агенту."),&issued);
+    note->setWordWrap(true); layout->addWidget(note);
+    auto* value=new QLabel(QString::fromLatin1(token.bytes()),&issued);
+    value->setObjectName("collectionTokenValue"); value->setTextFormat(Qt::PlainText);
+    layout->addWidget(value);
+    auto* status=new QLabel(&issued); status->setTextFormat(Qt::PlainText); status->setWordWrap(true);
+    layout->addWidget(status);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Close,&issued);
+    auto* copy=buttons->addButton(QStringLiteral("Копировать токен"),QDialogButtonBox::ActionRole);
+    layout->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::rejected,&issued,&QDialog::reject);
+    connect(&issued,&QDialog::finished,&issued,[&] {value->clear(); token.clear();});
+    connect(copy,&QPushButton::clicked,&issued,[&] {
+        if(!allowed() || token.isEmpty()) return;
+        QString copyError;
+        if(self->clipboard_.copySecret(QString::fromLatin1(token.bytes()),&copyError))
+            copyError=QStringLiteral("Токен скопирован. Буфер очистится автоматически.");
+        if(allowed() && issued.isVisible()) status->setText(copyError);
+    });
+    issued.exec();
 }
 void MainWindow::restoreBackup() {
     QPointer<SettingsDialog> dialog(qobject_cast<SettingsDialog*>(sender()));
@@ -1482,6 +1532,23 @@ void MainWindow::showEntryMenu(const QPoint& globalPos) {
     menu.addAction(QStringLiteral("Изменить…\tF2"), this, &MainWindow::editSelected);
     menu.addAction(QStringLiteral("Копировать секрет"), this, [this] { card_->copySecret(); });
     const auto* entry = app_.model()->entry(id);
+    if(entry && selectedEntries().size()==1) {
+        const auto* value=paste::fieldValue(*entry,paste::Field::Secret);
+        QString label;
+        if(value && !value->isEmpty()) {
+            if(entry->type==model::EntryType::Credentials) label=QStringLiteral("Добавить пароль в коллекцию агента…");
+            else if(entry->type==model::EntryType::ApiToken) label=QStringLiteral("Добавить токен в коллекцию агента…");
+            else label=QStringLiteral("Добавить значение в коллекцию агента…");
+        } else if(entry->type==model::EntryType::SshKey && !entry->sshPrivate.isEmpty()) {
+            label=QStringLiteral("Добавить приватный ключ в коллекцию агента…");
+        }
+        if(!label.isEmpty()) {
+            auto* add=menu.addAction(label,this,[this,id,generation=app_.generation()] {
+                copyEntryToCollection(id,generation);
+            });
+            add->setObjectName("copyEntryToCollection");
+        }
+    }
 #ifdef Q_OS_WIN
     // Тот же критерий, что и для пункта меню: ApiToken/Credentials с однострочным секретом
     // (eligibleForAutoPaste отсекает и SSH-ключи, и переводы строк).
@@ -1494,6 +1561,38 @@ void MainWindow::showEntryMenu(const QPoint& globalPos) {
     menu.addSeparator();
     menu.addAction(QStringLiteral("Удалить\tDel"), this, &MainWindow::deleteSelected);
     menu.exec(globalPos);
+}
+void MainWindow::copyEntryToCollection(model::Id id,quint64 generation) {
+    const QPointer<MainWindow> self(this);
+    auto* core=&app_;
+    const auto allowed=[&] {
+        return self && self->ready() && core->generation()==generation
+            && self->selectedEntry()==id && self->selectedEntries().size()==1;
+    };
+    if(!allowed() || editing_) return;
+    const auto* entry=core->model()->entry(id);
+    if(!entry) return;
+    const auto type=entry->type;
+    QInputDialog dialog(this);
+    dialog.setObjectName("collectionItemName");
+    dialog.setWindowTitle(QStringLiteral("Отдельная копия для агента"));
+    dialog.setLabelText(QStringLiteral("Агент сможет читать эту копию по токену даже после блокировки. "
+                                      "Изменение или удаление исходной записи не изменит копию.\n\nУникальное имя в коллекции:"));
+    dialog.setTextValue(type==model::EntryType::PlainValue && !entry->parameterName.isEmpty()?entry->parameterName:entry->title);
+    dialog.setOkButtonText(QStringLiteral("Добавить копию"));
+    dialog.setCancelButtonText(QStringLiteral("Отмена"));
+    if(dialog.exec()!=QDialog::Accepted || !allowed()
+        || !authorizeEntry(*core,id,this,true) || !allowed()) return;
+    entry=core->model()->entry(id);
+    if(!entry || entry->type!=type) return;
+    const auto* secret=paste::fieldValue(*entry,paste::Field::Secret);
+    SecureBytes value(secret?secret->toUtf8():type==model::EntryType::SshKey
+        ?QByteArray(entry->sshPrivate.constData(),entry->sshPrivate.size()):QByteArray());
+    const auto error=core->copyToCollection(dialog.textValue(),value.bytes());
+    value.clear();
+    if(!allowed()) return;
+    if(!error.isEmpty()) self->report(error);
+    else self->statusBar()->showMessage(QStringLiteral("Отдельная копия добавлена в коллекцию агента."),5000);
 }
 void MainWindow::toggleFavorite() {
     const auto id = selectedEntry();

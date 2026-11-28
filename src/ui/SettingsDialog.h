@@ -21,6 +21,8 @@ signals:
     void changeUnlockModeRequested();
     void clearEnvironmentRequested();
     void restoreBackupRequested();
+    void issueCollectionTokenRequested();
+    void revokeCollectionTokenRequested();
 protected:
     void resizeEvent(QResizeEvent*) override;
 private:
@@ -32,6 +34,7 @@ private:
     QLabel *error_{},*dirtyHint_{},*registered_{};
     QDialogButtonBox* buttons_{};
     QPushButton *password_{},*unlock_{},*clearEnvironment_{},*restore_{};
+    QPushButton *issueCollectionToken_{},*revokeCollectionToken_{};
     bool passwordAllowed_=false,unlockAllowed_=false;
     bool backupAvailable_=false;
     bool sshOffSavePending_=false;

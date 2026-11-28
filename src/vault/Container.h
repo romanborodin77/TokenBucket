@@ -19,6 +19,9 @@ struct Opened {
     SecureKey dataKey;
 };
 uint8_t readMode(const QByteArray& fileBytes);
+// Соль и параметры обёртки ключа сохраняются при reseal, но меняются при смене ключа.
+constexpr qsizetype KeyHeaderBytes = 61;
+QByteArray keyHeaderFingerprint(QByteArrayView bytes);
 // Защищённый путь записи: открытый CBOR лежит в sodium-буфере (указатель + длина) и
 // не копируется в обычную кучу. QByteArray-варианты ниже — обёртки для тестов.
 QByteArray packPassword(const QByteArray& passwordUtf8, const unsigned char* cbor, qsizetype cborLen,

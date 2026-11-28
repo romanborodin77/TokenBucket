@@ -82,6 +82,11 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
     auto* sshStatus=text({}); sshStatus->setObjectName("mcpSshStatus"); sshStatus->hide();
     security->addRow(sshStatus);
 #endif
+    security->addRow(text(QStringLiteral("Коллекция агента содержит отдельные копии секретов. Токен даёт доступ к коллекции даже при заблокированном хранилище. После смены ключа хранилища выпустите новый токен.")));
+    issueCollectionToken_=new QPushButton(QStringLiteral("Выпустить или обновить токен агента…"),this);
+    issueCollectionToken_->setObjectName("issueCollectionToken"); security->addRow(issueCollectionToken_);
+    revokeCollectionToken_=new QPushButton(QStringLiteral("Отозвать токен агента…"),this);
+    revokeCollectionToken_->setObjectName("revokeCollectionToken"); security->addRow(revokeCollectionToken_);
     auto* quick=page(QStringLiteral("Быстрая вставка"));
     auto* hotkey=new QKeySequenceEdit(initial.hotkey,this); hotkey->setObjectName("hotkey");
     hotkey->setAccessibleName(QStringLiteral("Сочетание клавиш")); quick->addRow(QStringLiteral("Сочетание клавиш"),hotkey);
@@ -118,6 +123,8 @@ SettingsDialog::SettingsDialog(const prefs::Values& initial,const Application::B
     connect(unlock_,&QPushButton::clicked,this,&SettingsDialog::changeUnlockModeRequested);
     connect(clearEnvironment_,&QPushButton::clicked,this,&SettingsDialog::clearEnvironmentRequested);
     connect(restore_,&QPushButton::clicked,this,&SettingsDialog::restoreBackupRequested);
+    connect(issueCollectionToken_,&QPushButton::clicked,this,&SettingsDialog::issueCollectionTokenRequested);
+    connect(revokeCollectionToken_,&QPushButton::clicked,this,&SettingsDialog::revokeCollectionTokenRequested);
     connect(sections_,&QListWidget::currentRowChanged,sectionCombo_,&QComboBox::setCurrentIndex);
     connect(sectionCombo_,&QComboBox::currentIndexChanged,sections_,qOverload<int>(&QListWidget::setCurrentRow));
     connect(sections_,&QListWidget::currentRowChanged,pages_,&QStackedWidget::setCurrentIndex);
@@ -157,6 +164,7 @@ void SettingsDialog::updateDraft() {
     dirtyHint_->setVisible(dirty); buttons_->button(QDialogButtonBox::Save)->setEnabled(dirty || sshOffSavePending_);
     password_->setEnabled(!dirty && passwordAllowed_); unlock_->setEnabled(!dirty && unlockAllowed_);
     restore_->setEnabled(!dirty && backupAvailable_);
+    issueCollectionToken_->setEnabled(!dirty); revokeCollectionToken_->setEnabled(!dirty);
     restore_->setToolTip(dirty?dirtyHint_->text():!backupAvailable_?QStringLiteral("Доступной резервной копии нет."):QString());
 #ifdef Q_OS_WIN
     clearEnvironment_->setEnabled(!dirty);
