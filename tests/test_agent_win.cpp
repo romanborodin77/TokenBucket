@@ -1040,10 +1040,12 @@ private slots:
         sendMcp(child, "tools/list", {{"_meta", modernMcpMetadata()}}, 1);
         const auto catalog = receiveMcp(child);
         const auto tools = catalog.value("result").toObject().value("tools").toArray();
-        QCOMPARE(tools.size(), 3);
+        QCOMPARE(tools.size(), 5);
         QCOMPARE(tools.at(0).toObject().value("name"), QJsonValue("tokenbucket_collection_read"));
         QCOMPARE(tools.at(1).toObject().value("name"), QJsonValue("tokenbucket_collection_create"));
         QCOMPARE(tools.at(2).toObject().value("name"), QJsonValue("tokenbucket_collection_replace"));
+        QCOMPARE(tools.at(3).toObject().value("name"), QJsonValue("tokenbucket_collection_list"));
+        QCOMPARE(tools.at(4).toObject().value("name"), QJsonValue("tokenbucket_collection_move"));
         QVERIFY(!QJsonDocument(catalog).toJson().contains(token.bytes()));
 
         int id = 1;
@@ -1054,6 +1056,10 @@ private slots:
         const QByteArray binary("\0\xffx", 3);
         const QJsonObject args{{"name", "sample"}, {"value", QString::fromLatin1(binary.toBase64())}};
         const QJsonObject name{{"name", "sample"}};
+        const QString listTool = "tokenbucket_collection_list";
+        const QString moveTool = "tokenbucket_collection_move";
+        sendMcp(child, "tools/call", {{"name", listTool}, {"_meta", modernMcpMetadata()}}, ++id);
+        QCOMPARE(toolOutput(receiveMcp(child)), (QJsonObject{{"ok", true}, {"projects", QJsonArray{}}}));
         QCOMPARE(call("tokenbucket_find", {{"title", "sample"}}).value("error").toObject().value("code").toInt(), -32602);
         QCOMPARE(call("tokenbucket_ssh_exec", {}).value("error").toObject().value("code").toInt(), -32602);
         QCOMPARE(call("tokenbucket_collection_create", {{"name", "sample"}, {"value", "YR=="}})
@@ -1066,10 +1072,68 @@ private slots:
         QCOMPARE(QByteArray::fromBase64(read.value("value").toString().toLatin1()), binary);
         QVERIFY(toolOutput(call("tokenbucket_collection_replace", {{"name", "sample"}, {"value", ""}})).value("ok").toBool());
         QCOMPARE(toolOutput(call("tokenbucket_collection_read", name)).value("value"), QJsonValue(""));
+
+        const QJsonObject grouped{{"name", "sample"}, {"project", "production"}};
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", grouped)).value("error"), QJsonValue("not-found"));
+        QVERIFY(toolOutput(call("tokenbucket_collection_create",
+            {{"name", "sample"}, {"project", "production"}, {"value", "Yg=="}})).value("ok").toBool());
+        QVERIFY(toolOutput(call("tokenbucket_collection_replace",
+            {{"name", "sample"}, {"project", "production"}, {"value", "YQ=="}})).value("ok").toBool());
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", grouped)).value("value"), QJsonValue("YQ=="));
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", name)).value("value"), QJsonValue(""));
+        QCOMPARE(toolOutput(call(listTool, {})),
+            (QJsonObject{{"ok", true}, {"projects", QJsonArray{"", "production"}}}));
+        QCOMPARE(toolOutput(call(listTool, {{"project", "production"}})),
+            (QJsonObject{{"ok", true}, {"names", QJsonArray{"sample"}}}));
+        QCOMPARE(toolOutput(call(listTool, {{"project", ""}})),
+            (QJsonObject{{"ok", true}, {"names", QJsonArray{"sample"}}}));
+        QCOMPARE(toolOutput(call(listTool, {{"project", "Production"}})),
+            (QJsonObject{{"ok", true}, {"names", QJsonArray{}}}));
+
+        QCOMPARE(toolOutput(call(moveTool, {{"name", "sample"}, {"targetProject", "production"}})).value("error"),
+            QJsonValue("already-exists"));
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", grouped)).value("value"), QJsonValue("YQ=="));
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", name)).value("value"), QJsonValue(""));
+        QCOMPARE(toolOutput(call(moveTool, {{"name", "absent"}, {"targetProject", ""}})).value("error"), QJsonValue("not-found"));
+        QVERIFY(toolOutput(call(moveTool, {{"name", "sample"}, {"project", "production"},
+            {"targetProject", "archive"}, {"targetName", "moved"}})).value("ok").toBool());
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", grouped)).value("error"), QJsonValue("not-found"));
+        QCOMPARE(toolOutput(call(listTool, {})), (QJsonObject{{"ok", true}, {"projects", QJsonArray{"", "archive"}}}));
+        QVERIFY(toolOutput(call(moveTool, {{"name", "moved"}, {"project", "archive"}, {"targetProject", ""}})).value("ok").toBool());
+        QCOMPARE(toolOutput(call("tokenbucket_collection_read", {{"name", "moved"}})).value("value"), QJsonValue("YQ=="));
+
+        const auto invalid = [&](const QString& tool, const QJsonObject& arguments) {
+            return call(tool, arguments).value("error").toObject().value("code").toInt();
+        };
+        QCOMPARE(invalid(moveTool, name), -32602);
+        QCOMPARE(invalid(moveTool, {{"name", "sample"}, {"targetProject", ""}, {"targetName", ""}}), -32602);
+        QCOMPARE(invalid(listTool, {{"project", QJsonValue::Null}}), -32602);
+        QCOMPARE(invalid(listTool, {{"project", QString(129, QChar(0x0410))}}), -32602);
+        QCOMPARE(invalid(listTool, {{"cursor", 0.5}}), -32602);
+        QCOMPARE(invalid(listTool, {{"value", "YQ=="}}), -32602);
+        sendMcp(child, "tools/call", {{"name", listTool}, {"arguments", QJsonArray{}}, {"_meta", modernMcpMetadata()}}, ++id);
+        QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32602);
+
+        // Fill one page with maximum-size names that need escaping at both JSON layers.
+        QJsonArray expected;
+        for (int index = 0; index < 33; ++index) {
+            const auto entry = QString(254, '"') + QString::number(index).rightJustified(2, '0');
+            QVERIFY(toolOutput(call("tokenbucket_collection_create",
+                {{"name", entry}, {"project", "paged"}, {"value", "YQ=="}})).value("ok").toBool());
+            if (index < 32) expected.append(entry);
+        }
+        const auto page = toolOutput(call(listTool, {{"project", "paged"}}));
+        QCOMPARE(page, (QJsonObject{{"ok", true}, {"names", expected}, {"nextCursor", 32}}));
+        QCOMPARE(toolOutput(call(listTool, {{"project", "paged"}, {"cursor", page.value("nextCursor")}})),
+            (QJsonObject{{"ok", true}, {"names", QJsonArray{QString(254, '"') + "32"}}}));
+
         QCOMPARE(collection::revoke(directory.path(), owner), QString());
         const auto revoked = call("tokenbucket_collection_read", name);
         QVERIFY(revoked.value("result").toObject().value("isError").toBool());
         QCOMPARE(toolOutput(revoked).value("error"), QJsonValue("unauthorized"));
+        QCOMPARE(toolOutput(call(listTool, {})).value("error"), QJsonValue("unauthorized"));
+        QCOMPARE(toolOutput(call(moveTool, {{"name", "sample"}, {"targetProject", "production"}})).value("error"),
+            QJsonValue("unauthorized"));
         child.closeWriteChannel();
         QVERIFY(child.waitForFinished(5000));
         QCOMPARE(child.exitCode(), 0);
@@ -1145,6 +1209,8 @@ private slots:
         QVERIFY(disabled.value("result").toObject().value("isError").toBool());
         QCOMPARE(toolOutput(disabled).value("error").toString(), QStringLiteral("ssh_disabled"));
         QVERIFY(tools.at(1).toObject().value("inputSchema").toObject().value("properties").toObject().contains("field"));
+        sendMcp(child, "tools/call", {{"name", "tokenbucket_collection_list"}}, 11);
+        QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32602);
         sendMcp(child, "vault/unlock", {}, 3);
         QCOMPARE(receiveMcp(child).value("error").toObject().value("code").toInt(), -32601);
         sendMcp(child, "tools/call", {{"name", "tokenbucket_find"},

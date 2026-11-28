@@ -7,19 +7,72 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
-#include <QHBoxLayout>
 #include <QDesktopServices>
 #include <QUrl>
 #include <QKeyEvent>
 #include <QMimeData>
+#include <QStyle>
 #include <QTextDocument>
 #include "../platform/FileOps.h"
 namespace tb::ui {
 namespace {
+class CardActions final : public QLayout {
+public:
+    explicit CardActions(QWidget* parent) : QLayout(parent) {
+        setContentsMargins(0, 0, 0, 0);
+        setSpacing(6);
+    }
+    ~CardActions() override { while (auto* item = takeAt(0)) delete item; }
+    void addItem(QLayoutItem* item) override { items_.append(item); }
+    int count() const override { return int(items_.size()); }
+    QLayoutItem* itemAt(int index) const override { return items_.value(index); }
+    QLayoutItem* takeAt(int index) override {
+        return index >= 0 && index < count() ? items_.takeAt(index) : nullptr;
+    }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int width) const override { return arrange(QRect(0, 0, width, 0), false); }
+    QSize minimumSize() const override {
+        QSize result(0, 0);
+        for (const auto* item : items_) {
+            if (!item->isEmpty()) result = result.expandedTo(item->sizeHint());
+        }
+        return result;
+    }
+    QSize sizeHint() const override { return minimumSize(); }
+    void setGeometry(const QRect& rect) override {
+        QLayout::setGeometry(rect);
+        arrange(rect, true);
+    }
+
+private:
+    int arrange(const QRect& rect, bool place) const {
+        int x = 0, y = 0, rowHeight = 0;
+        for (auto* item : items_) {
+            if (item->isEmpty()) continue;
+            const auto size = item->sizeHint();
+            if (rowHeight && x + size.width() > rect.width()) {
+                x = 0;
+                y += rowHeight + spacing();
+                rowHeight = 0;
+            }
+            if (place) {
+                const QRect geometry(rect.topLeft() + QPoint(x, y), size);
+                item->setGeometry(QStyle::visualRect(parentWidget()->layoutDirection(), rect, geometry));
+            }
+            x += size.width() + spacing();
+            rowHeight = qMax(rowHeight, size.height());
+        }
+        return y + rowHeight;
+    }
+
+    QList<QLayoutItem*> items_;
+};
+
 class CardValue final : public QPlainTextEdit {
 public:
     using QPlainTextEdit::QPlainTextEdit;
@@ -34,7 +87,7 @@ QUrl openableUrl(const model::Entry* e) {
 }
 EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(app) {
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(18, 16, 18, 16); layout->setSpacing(12);
+    layout->setContentsMargins(8, 6, 8, 6); layout->setSpacing(6);
     title_ = new QLabel(this); title_->setObjectName(QStringLiteral("cardTitle"));
     identity_ = new QLabel(this); identity_->setObjectName(QStringLiteral("cardIdentity"));
     flags_ = new QLabel(this); flags_->setObjectName(QStringLiteral("cardFlags"));
@@ -42,26 +95,35 @@ EntryCard::EntryCard(Application& app, QWidget* parent) : QFrame(parent), app_(a
     sshTargets_ = new QLabel(this); sshTargets_->setObjectName(QStringLiteral("cardSshTargets"));
     for (auto* label : {title_, identity_, flags_, metadata_, sshTargets_, error_}) { label->setTextFormat(Qt::PlainText); label->setWordWrap(true); }
     sshTargets_->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard);
-    auto titleFont = title_->font(); titleFont.setPointSize(titleFont.pointSize() + 5); titleFont.setBold(true); title_->setFont(titleFont);
-    auto* heading = new QHBoxLayout; heading->addWidget(title_, 1);
-    edit_ = new QPushButton(QStringLiteral("Изменить"), this); edit_->setObjectName(QStringLiteral("cardEdit")); heading->addWidget(edit_);
-    layout->addLayout(heading); layout->addWidget(identity_); layout->addWidget(flags_);
+    auto titleFont = title_->font(); titleFont.setPointSize(titleFont.pointSize() + 3); titleFont.setBold(true); title_->setFont(titleFont);
+    edit_ = new QPushButton(QStringLiteral("Изменить"), this); edit_->setObjectName(QStringLiteral("cardEdit"));
+    layout->addWidget(title_); layout->addWidget(identity_); layout->addWidget(flags_);
     valueLabel_=new QLabel(QStringLiteral("СЕКРЕТ"),this); valueLabel_->setObjectName("cardValueLabel"); layout->addWidget(valueLabel_);
     value_ = new CardValue(this); value_->setObjectName(QStringLiteral("entryDetails")); value_->setReadOnly(true);
     value_->setTextInteractionFlags(Qt::NoTextInteraction); value_->setFocusPolicy(Qt::NoFocus); value_->setContextMenuPolicy(Qt::NoContextMenu);
-    value_->setAccessibleName(QStringLiteral("Секретное значение")); value_->setMinimumHeight(80); value_->setMaximumHeight(140); layout->addWidget(value_);
-    reveal_ = new QPushButton(QStringLiteral("Показать на 15 секунд"), this);
+    value_->setAccessibleName(QStringLiteral("Секретное значение"));
+    updateValueHeight();
+    layout->addWidget(value_);
+    reveal_ = new QPushButton(QStringLiteral("Показать на 15 с"), this);
+    reveal_->setToolTip(QStringLiteral("Показать на 15 секунд"));
     copySecret_ = new QPushButton(QStringLiteral("Копировать секрет"), this); copySecret_->setObjectName(QStringLiteral("copySecretButton"));
     copyLogin_ = new QPushButton(QStringLiteral("Копировать логин"), this);
     copyPhrase_ = new QPushButton(QStringLiteral("Копировать фразу ключа"), this);
     sshToFile_ = new QPushButton(QStringLiteral("Сохранить ключ в файл…"), this); sshToFile_->setObjectName(QStringLiteral("sshToFileButton"));
     more_ = new QPushButton(QStringLiteral("Дополнительно…"), this); more_->setObjectName(QStringLiteral("cardMore"));
-    document_=new QPushButton(QStringLiteral("Открыть строки…"),this); document_->setObjectName("textFileOpen"); layout->addWidget(document_);
-    source_=new QPushButton(QStringLiteral("Открыть источник…"),this); source_->setObjectName("cardSource"); layout->addWidget(source_);
-    compare_=new QPushButton(QStringLiteral("Сравнить с источником…"),this); compare_->setObjectName("cardCompare"); layout->addWidget(compare_);
-    openUrl_=new QPushButton(QStringLiteral("Открыть HTTP(S)-адрес…"),this); openUrl_->setObjectName("cardOpenUrl"); layout->addWidget(openUrl_);
-    for (auto* button : {reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_}) layout->addWidget(button);
-    layout->addWidget(more_); layout->addSpacing(10); layout->addWidget(sshTargets_); layout->addWidget(metadata_); layout->addStretch(1);
+    document_=new QPushButton(QStringLiteral("Открыть строки…"),this); document_->setObjectName("textFileOpen");
+    source_=new QPushButton(QStringLiteral("Открыть источник…"),this); source_->setObjectName("cardSource");
+    compare_=new QPushButton(QStringLiteral("Сравнить с источником…"),this); compare_->setObjectName("cardCompare");
+    openUrl_=new QPushButton(QStringLiteral("Открыть HTTP(S)-адрес…"),this); openUrl_->setObjectName("cardOpenUrl");
+    actions_ = new QWidget(this);
+    QSizePolicy actionsPolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    actionsPolicy.setHeightForWidth(true);
+    actions_->setSizePolicy(actionsPolicy);
+    auto* actions = new CardActions(actions_);
+    for (auto* button : {edit_, reveal_, copySecret_, copyLogin_, copyPhrase_, sshToFile_, document_, source_, compare_, openUrl_, more_})
+        actions->addWidget(button);
+    layout->addWidget(actions_);
+    layout->addWidget(sshTargets_); layout->addWidget(metadata_); layout->addStretch(1);
     layout->addWidget(error_);
     hideTimer_.setParent(this); hideTimer_.setObjectName(QStringLiteral("secretHideTimer")); hideTimer_.setSingleShot(true); hideTimer_.setInterval(15000);
     connect(&hideTimer_, &QTimer::timeout, this, &EntryCard::hideNowForTest);
@@ -116,9 +178,23 @@ void EntryCard::setRevealSeconds(int seconds) {
     if(seconds!=5 && seconds!=10 && seconds!=15 && seconds!=30) seconds=15;
     if(hideTimer_.interval()!=seconds*1000) hideNowForTest();
     hideTimer_.setInterval(seconds*1000);
-    reveal_->setText(QStringLiteral("Показать на %1 секунд").arg(seconds));
+    reveal_->setText(QStringLiteral("Показать на %1 с").arg(seconds));
+    reveal_->setToolTip(QStringLiteral("Показать на %1 секунд").arg(seconds));
 }
-void EntryCard::clear() { ++selection_; id_ = {}; hideNowForTest(); title_->clear(); identity_->clear(); flags_->clear(); metadata_->clear(); sshTargets_->clear(); sshTargets_->hide(); error_->clear(); updateEnabled(); }
+void EntryCard::clear() {
+    ++selection_;
+    id_ = {};
+    hideNowForTest();
+    title_->clear();
+    for (auto* label : {identity_, flags_, metadata_, sshTargets_, error_}) {
+        label->clear();
+        label->hide();
+    }
+    valueLabel_->hide();
+    value_->hide();
+    actions_->hide();
+    updateEnabled();
+}
 void EntryCard::showSelection(int count) { clear(); title_->setText(QStringLiteral("Выбрано записей: %1").arg(count)); }
 void EntryCard::showEntry(model::Id id) {
     ++selection_; id_ = id; hideNowForTest(); error_->clear();
@@ -130,8 +206,13 @@ void EntryCard::showEntry(model::Id id) {
               expiryDate.toString(QStringLiteral("dd.MM.yyyy")),
               expiryDate < QDate::currentDate() ? QStringLiteral(" (просрочен)") : QString())
         : QString();
-    title_->setText(entry->title); metadata_->setText(QStringLiteral("Заметки: %1\n\nАдрес: %2\n\nИзменено: %3%4\n%5").arg(
-        entry->note, entry->url, entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")), expiryNote, entry->sshComment));
+    title_->setText(entry->title);
+    QStringList details;
+    if (!entry->note.isEmpty()) details << QStringLiteral("Заметки: %1").arg(entry->note);
+    if (!entry->url.isEmpty()) details << QStringLiteral("Адрес: %1").arg(entry->url);
+    details << QStringLiteral("Изменено: %1%2").arg(entry->modified.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")), expiryNote);
+    if (!entry->sshComment.isEmpty()) details << entry->sshComment;
+    metadata_->setText(details.join('\n'));
     const bool ssh = entry->type == model::EntryType::SshKey;
     QStringList targets;
     for (const auto& target : entry->sshTargets) {
@@ -150,7 +231,8 @@ void EntryCard::showEntry(model::Id id) {
         if (it == app_.model()->nodes().cend()) break;
         path.prepend(it->name); node = it->parent;
     }
-    identity_->setText(QStringLiteral("%1 · %2").arg(entryTypeLabel(entry->type),path.join(QStringLiteral(" / "))));
+    identity_->setText(path.isEmpty() ? entryTypeLabel(entry->type)
+        : QStringLiteral("%1 · %2").arg(entryTypeLabel(entry->type), path.join(QStringLiteral(" / "))));
     QStringList flags;
     if (entry->favorite) flags << QStringLiteral("★ Избранное");
     if (entry->reverify) flags << QStringLiteral("Повторная проверка");
@@ -164,18 +246,30 @@ void EntryCard::showEntry(model::Id id) {
     value_->setAccessibleName(plain?QStringLiteral("Значение"):file?QStringLiteral("Сведения о документе"):QStringLiteral("Секретное значение"));
     value_->setFocusPolicy(plain && !entry->reverify?Qt::StrongFocus:Qt::NoFocus);
     value_->setTextInteractionFlags(plain && !entry->reverify?Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard:Qt::NoTextInteraction);
-    if(plain && !entry->parameterName.isEmpty()) metadata_->setText(QStringLiteral("Параметр: %1\n\n").arg(entry->parameterName)+metadata_->text());
+    if(plain && !entry->parameterName.isEmpty()) metadata_->setText(QStringLiteral("Параметр: %1\n").arg(entry->parameterName)+metadata_->text());
     reveal_->setVisible(!ssh && !file && (!plain || entry->reverify)); copySecret_->setVisible(!file);
     copySecret_->setText(plain?QStringLiteral("Копировать значение"):ssh ? QStringLiteral("Копировать приватный ключ") : entry->type == model::EntryType::Credentials ? QStringLiteral("Копировать пароль") : QStringLiteral("Копировать токен"));
-    if(!entry->sourceEntryId.isNull()) metadata_->setText(metadata_->text()+QStringLiteral("\n\n%1\nИсточник — снимок импорта; рабочее значение могло быть изменено.")
+    if(!entry->sourceEntryId.isNull()) metadata_->setText(metadata_->text()+QStringLiteral("\n%1\nИсточник — снимок импорта; рабочее значение могло быть изменено.")
         .arg(app_.model()->entry(entry->sourceEntryId)?QStringLiteral("Источник, строка %1").arg(entry->sourceLine+1):QStringLiteral("Источник недоступен")));
     copyLogin_->setVisible(entry->type == model::EntryType::Credentials); copyPhrase_->setVisible(ssh && !entry->sshPassphrase.isEmpty());
-    sshToFile_->setVisible(ssh && !entry->sshPrivate.isEmpty()); updateEnabled();
+    sshToFile_->setVisible(ssh && !entry->sshPrivate.isEmpty());
+    identity_->show();
+    flags_->setVisible(!flags.isEmpty());
+    metadata_->show();
+    valueLabel_->show();
+    value_->show();
+    actions_->show();
+    error_->show();
+    updateEnabled();
 }
 QString EntryCard::secretText() const { return value_->toPlainText(); }
 void EntryCard::changeEvent(QEvent* event) {
     QFrame::changeEvent(event);
     if (copySecret_ && (event->type() == QEvent::ApplicationPaletteChange || event->type() == QEvent::PaletteChange)) applyAccent();
+    if (value_ && (event->type() == QEvent::FontChange || event->type() == QEvent::ApplicationFontChange)) updateValueHeight();
+}
+void EntryCard::updateValueHeight() {
+    value_->setFixedHeight(2 * value_->fontMetrics().lineSpacing() + 12);
 }
 void EntryCard::applyAccent() {
     auto p = qApp->palette();

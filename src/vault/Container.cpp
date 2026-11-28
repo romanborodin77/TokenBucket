@@ -1,8 +1,11 @@
 #include "Container.h"
+#include "AgentCollection.h"
+#include "CborWriter.h"
 #include "Crypto.h"
 #include <QCryptographicHash>
 #include <QDataStream>
 #include <QIODevice>
+#include <QtEndian>
 #include <sodium.h>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -25,6 +28,11 @@ constexpr char kMagic[4] = {'T','B','V','K'};
 constexpr uint16_t kVersion = 1, kKdfArgon2id = 1;
 constexpr uint32_t kOpslimit = 3, kMemlimit = 64u * 1024 * 1024;
 constexpr int kHead = KeyHeaderBytes; // всё до wrap
+// Внутри тела парольного TBVK: магия, версия, две длины uint32 LE и два блока.
+constexpr char kTransferMagic[] = "TBPT";
+constexpr qsizetype kTransferHeader = 13;
+constexpr qsizetype kTransferMaxPlain = MaxPlainBytes + collection::MaxSnapshotBytes + kTransferHeader;
+constexpr qsizetype kPasswordOverhead = kHead + SecureKey::Size + 16 + 24 + 8 + 16;
 
 struct Parsed {
     uint8_t mode = 0;        // 255 = распознан, но параметры/версия не поддержаны
@@ -77,6 +85,8 @@ QByteArray sealBody(QByteArray prefix, const SecureKey& key, const unsigned char
 }
 } // namespace
 
+const qsizetype MaxTransferFileBytes = kTransferMaxPlain + kPasswordOverhead;
+
 QByteArray keyHeaderFingerprint(QByteArrayView bytes) {
     if (bytes.size() < KeyHeaderBytes || !bytes.startsWith("TBVK")) return {};
     return QCryptographicHash::hash(bytes.first(KeyHeaderBytes), QCryptographicHash::Sha256);
@@ -88,8 +98,9 @@ uint8_t readMode(const QByteArray& f) {
     return p.mode == 255 ? 0 : p.mode;
 }
 
-QByteArray packPassword(const QByteArray& pw, const unsigned char* cbor, qsizetype cborLen, SecureKey* outKey) {
-    if (pw.size() < 12 || pw.size() > 1024 || cborLen < 0 || cborLen > MaxPlainBytes) return {};
+namespace {
+QByteArray packPasswordBody(const QByteArray& pw, const unsigned char* cbor, qsizetype cborLen, SecureKey* outKey) {
+    if (pw.size() < 12 || pw.size() > 1024) return {};
     SecureKey dataKey, kek;
     randombytes_buf(dataKey.data(), SecureKey::Size);
     QByteArray salt(16, '\0'); randombytes_buf(salt.data(), 16);
@@ -108,16 +119,13 @@ QByteArray packPassword(const QByteArray& pw, const unsigned char* cbor, qsizety
     if (!file.isEmpty() && outKey) memcpy(outKey->data(), dataKey.data(), SecureKey::Size);
     return file;
 }
-QByteArray packPassword(const QByteArray& pw, const QByteArray& cbor, SecureKey* outKey) {
-    return packPassword(pw, reinterpret_cast<const unsigned char*>(cbor.constData()), cbor.size(), outKey);
-}
 
-Opened openPassword(const QByteArray& f, const QByteArray& pw) {
+Opened openPasswordBody(const QByteArray& f, const QByteArray& pw, qsizetype fileLimit, qsizetype plainLimit) {
     Opened r; Parsed p;
     // Открытие парольного контейнера: пароль → KEK (Argon2id по соли из заголовка) →
     // распаковка ключа данных → расшифровка тела. Любая ошибка на этом пути —
     // WrongKey: неверно указанный пароль и испорченный файл неотличимы (так задумано).
-    if (f.size() > int(MaxFileBytes)) { r.status = Status::TooLarge; return r; }
+    if (f.size() > fileLimit) { r.status = Status::TooLarge; return r; }
     if (!parse(f, p)) { r.status = Status::BadFormat; return r; }
     if (p.mode == 255 || p.mode != ModePassword) { r.status = Status::Unsupported; return r; }
     if (pw.size() < 12 || pw.size() > 1024) { r.status = Status::WrongKey; return r; }
@@ -131,10 +139,50 @@ Opened openPassword(const QByteArray& f, const QByteArray& pw) {
     SecureKey dataKey; memcpy(dataKey.data(), keyBytes.constData(), size_t(keyBytes.size()));
     sodium_memzero(keyBytes.data(), size_t(keyBytes.size()));
     if (!crypto::open(dataKey, p.aad2, p.ct, r.cbor)) { r.status = Status::WrongKey; return r; }
-    if (r.cbor.size() > int(MaxPlainBytes)) { r.status = Status::TooLarge; sodium_memzero(r.cbor.data(), r.cbor.size()); r.cbor.clear(); return r; }
+    if (r.cbor.size() > plainLimit) { r.status = Status::TooLarge; sodium_memzero(r.cbor.data(), r.cbor.size()); r.cbor.clear(); return r; }
     memcpy(r.dataKey.data(), dataKey.data(), SecureKey::Size);
     r.status = Status::Ok;
     return r;
+}
+} // namespace
+
+QByteArray packPassword(const QByteArray& pw, const unsigned char* cbor, qsizetype cborLen, SecureKey* outKey) {
+    if (cborLen < 0 || cborLen > MaxPlainBytes) return {};
+    return packPasswordBody(pw, cbor, cborLen, outKey);
+}
+QByteArray packPassword(const QByteArray& pw, const QByteArray& cbor, SecureKey* outKey) {
+    return packPassword(pw, reinterpret_cast<const unsigned char*>(cbor.constData()), cbor.size(), outKey);
+}
+Opened openPassword(const QByteArray& f, const QByteArray& pw) {
+    return openPasswordBody(f, pw, MaxFileBytes, MaxPlainBytes);
+}
+
+QByteArray packTransfer(const QByteArray& pw, QByteArrayView model, QByteArrayView entries) {
+    if (model.isEmpty() || model.size() > MaxPlainBytes || entries.size() > collection::MaxSnapshotBytes) return {};
+    cbor::SecureBuffer plain(kTransferHeader + model.size() + entries.size());
+    memcpy(plain.data(), kTransferMagic, 4);
+    plain.data()[4] = 1;
+    qToLittleEndian<quint32>(quint32(model.size()), plain.data() + 5);
+    qToLittleEndian<quint32>(quint32(entries.size()), plain.data() + 9);
+    memcpy(plain.data() + kTransferHeader, model.data(), size_t(model.size()));
+    if (!entries.isEmpty())
+        memcpy(plain.data() + kTransferHeader + model.size(), entries.data(), size_t(entries.size()));
+    return packPasswordBody(pw, plain.data(), qsizetype(plain.size()), nullptr);
+}
+Opened openTransfer(const QByteArray& f, const QByteArray& pw) {
+    return openPasswordBody(f, pw, MaxTransferFileBytes, kTransferMaxPlain);
+}
+std::optional<TransferPayload> transferPayload(QByteArrayView plain) {
+    if (!plain.startsWith(kTransferMagic)) {
+        if (plain.isEmpty() || plain.size() > MaxPlainBytes) return {};
+        return TransferPayload{plain, std::nullopt};
+    }
+    if (plain.size() < kTransferHeader || plain[4] != 1) return {};
+    const auto modelSize = qFromLittleEndian<quint32>(plain.data() + 5);
+    const auto collectionSize = qFromLittleEndian<quint32>(plain.data() + 9);
+    if (modelSize == 0 || modelSize > MaxPlainBytes || collectionSize > collection::MaxSnapshotBytes
+        || kTransferHeader + qsizetype(modelSize) + qsizetype(collectionSize) != plain.size()) return {};
+    return TransferPayload{plain.sliced(kTransferHeader, modelSize), plain.last(collectionSize)};
 }
 
 QByteArray reseal(const QByteArray& f, const SecureKey& dataKey, const unsigned char* cbor, qsizetype cborLen) {

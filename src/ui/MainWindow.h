@@ -14,11 +14,12 @@ namespace tb::platform { class QuickPaste; }
 namespace tb::agent { class Access; }
 namespace tb { class IdleTimer; }
 namespace tb::io {struct TextImportPreview;}
-class QTreeWidget; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox; class QTabWidget;
+class QTreeWidget; class QTreeWidgetItem; class QListWidget; class QLineEdit; class QStackedWidget; class QComboBox; class QTabWidget;
 class QScrollArea; class QLabel; class QAction;
 class QPushButton;
 class QSplitter; class QBoxLayout;
 namespace tb::ui {
+class CollectionPane;
 class EntryCard;
 class RegistryView;
 class SettingsDialog;
@@ -82,6 +83,7 @@ public slots:
     void changeMasterPassword();
     void showAbout();
     void showSettings();
+    void showCollection();
     void openDocument(model::Id);
     void importTextFile();
     void structureDocument(model::Id);
@@ -93,18 +95,28 @@ public slots:
 #endif
 protected:
     void resizeEvent(QResizeEvent*) override;
+    bool eventFilter(QObject*,QEvent*) override;
     void closeEvent(QCloseEvent*) override;
 private slots:
     void refreshStatus();
     void restoreBackup();
 private:
-    enum class LibraryView { All, Favorites, Expiring, Group };
+    enum class LibraryView { All, Favorites, Expiring, Group, CollectionProject };
     void setLibraryView(LibraryView view);
+    void selectLibraryTreeItem(QTreeWidgetItem* item, QTreeWidgetItem* previous);
+    void updateCollectionContext();
+    void updateWorkspaceLayout();
+    void setCollectionActive(bool active);
+    void activatePersonal();
     void updateLibraryCounts();
     QString groupPath(model::Id id) const;
     LibraryView libraryView_ = LibraryView::All;
+    QString collectionProject_;
+    QString acceptedSearch_;
+    std::optional<quint64> collectionAccess_;
+    bool collectionActive_ = false;
     QPushButton *libraryAll_{}, *libraryFavorites_{}, *libraryExpiring_{};
-    QLabel *searchScope_{}, *listSummary_{};
+    QLabel *workspaceHeading_{}, *searchScope_{}, *listSummary_{};
     model::Id displayedEntry_;
     void restoreUiState();
     void saveUiState();
@@ -119,15 +131,15 @@ private:
     bool sshOffSavePending() const;
 #endif
     prefs::ApplyResult applyPreferences(const prefs::Values&);
-    QSplitter* splitter_{};
-    QBoxLayout *headerLayout_{}, *filterLayout_{};
+    QSplitter *splitter_{}, *workspaceSplit_{};
+    QBoxLayout *headerLayout_{}, *workspaceLists_{};
     QLabel* emptyHint_{};
     bool geometryErrorReported_ = false;
     QPointer<IdleTimer> idleTimer_;
     QLabel *idleStatus_{}, *clipboardStatus_{}, *hotkeyStatus_{};
     QDate statusDate_ = QDate::currentDate();
     bool ready() const;
-    bool ensureSchemaUpgradeApproved();
+    bool ensureSchemaUpgradeApproved(QWidget* parent = nullptr);
     void previewTextImport(io::TextImportPreview);
     bool commit(const std::function<QString(model::VaultModel&)>& mutation);
     void rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup);
@@ -138,7 +150,6 @@ private:
     void renameTag(const QString& tag);
     void removeTag(const QString& tag);
     void showMetadata();
-    void openCardDialog();
     void selectNode(model::Id id);
     void treeMenu(const QPoint& pos);
     void listMenu(const QPoint& pos);
@@ -157,6 +168,7 @@ private:
     QTreeWidget* tree_{};
     QListWidget* list_{};
     RegistryView* registry_{}; QTabWidget* resultsTabs_{};
+    CollectionPane* collection_{};
     QLineEdit* search_{};
     QComboBox* typeFilter_{};
     QComboBox* sortMode_{};
@@ -175,11 +187,12 @@ private:
     void viewAction(int action); // 0 — сохранить текущее, 1 — переименовать, 2 — обновить, 3 — удалить
     QStackedWidget* right_{};
     EntryCard* card_{};
-    QScrollArea* cardScroll_{};
+    QScrollArea *cardScroll_{}, *collectionScroll_{}, *tagsScroll_{};
     ClipboardGuard clipboard_;
     QLabel* error_{};
     QLabel* vaultInfo_{};
     QList<QAction*> mutations_;
+    QList<QAction*> personalActions_;
     QAction* switchAction_{};
     QAction* changePwAction_{};
     bool helloAvailable_ = false;
@@ -187,7 +200,7 @@ private:
     std::unique_ptr<platform::QuickPaste> hotkey_;
     QAction* envExportAction_{};
 #endif
-    bool editing_ = false, narrow_ = false, cardOpen_ = false,restoring_=false;
+    bool editing_ = false, restoring_ = false;
     bool exiting_ = false;
 };
 }

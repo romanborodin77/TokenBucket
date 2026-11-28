@@ -5,6 +5,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
 #include <QInputDialog>
@@ -13,12 +14,16 @@
 #include <QPushButton>
 #include <QKeySequenceEdit>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QStackedWidget>
 #include <QSignalSpy>
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QTreeWidget>
 #include <QMessageBox>
+#include <algorithm>
+#include <optional>
 #include "../src/app/Application.h"
 #include "../src/ui/MainWindow.h"
 #include "../src/ui/SettingsDialog.h"
@@ -27,8 +32,11 @@
 #include "../src/ui/Theme.h"
 #include "../src/ui/EnvExportDialog.h"
 #include "../src/platform/EnvOps.h"
+#include "../src/platform/ClipboardGuard.h"
 #include "../src/ui/UnlockDialog.h"
+#include "../src/vault/AgentCollection.h"
 #ifdef Q_OS_WIN
+#include <windows.h>
 #include "../src/ui/AgentAccess.h"
 #endif
 #include "FaultFileOps.h"
@@ -37,6 +45,25 @@ class TestSettings : public QObject {
     Q_OBJECT
     static QByteArray readFile(const QString& path) {
         QFile file(path); if(!file.open(QIODevice::ReadOnly)) return {}; return file.readAll();
+    }
+    static std::optional<QString> collectionClipboardText() {
+#ifdef Q_OS_WIN
+        for (int attempt = 0; !OpenClipboard(nullptr); ++attempt) {
+            if (attempt == 19) return std::nullopt;
+            Sleep(10);
+        }
+        const auto close = qScopeGuard([] { CloseClipboard(); });
+        const auto handle = GetClipboardData(CF_UNICODETEXT);
+        const auto* text = handle ? static_cast<const wchar_t*>(GlobalLock(handle)) : nullptr;
+        if (!text) return std::nullopt;
+        const auto unlock = qScopeGuard([handle] { GlobalUnlock(handle); });
+        const auto limit = text + std::min<size_t>(GlobalSize(handle) / sizeof(wchar_t), 256);
+        const auto end = std::find(text, limit, wchar_t{});
+        if (end == limit) return std::nullopt;
+        return QString::fromWCharArray(text, end - text);
+#else
+        return QApplication::clipboard()->text();
+#endif
     }
 #ifdef Q_OS_WIN
     static QKeySequence freeHotkey(const QKeySequence& excluded={}) {
@@ -472,6 +499,276 @@ private slots:
             reopened=true; dialog->reject();
         });
         window.showSettings(); QVERIFY(reopened);
+    }
+    void collectionEditorRequiresOwner_data() {
+        QTest::addColumn<bool>("lockDuringPrompt");
+        QTest::newRow("cancel") << false;
+        QTest::newRow("lock") << true;
+    }
+    void collectionEditorRequiresOwner() {
+        QFETCH(bool, lockDuringPrompt);
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        QCOMPARE(app.copyToCollection("Synthetic", "protected", "synthetic-secret"), QString());
+        QSettings preferences(dir.filePath("ui.ini"), QSettings::IniFormat);
+        QSettings run(dir.filePath("run.ini"), QSettings::IniFormat);
+        ui::MainWindow window(app, nullptr, &preferences, &run);
+        window.show();
+        auto* action = window.findChild<QAction*>("openCollection");
+        auto* access = window.findChild<QPushButton*>("collectionAccess");
+        auto* list = window.findChild<QTreeWidget*>("collectionItems");
+        auto* value = window.findChild<QLineEdit*>("collectionValue");
+        QVERIFY(action && access && list && value);
+        QTRY_VERIFY(access->isVisible());
+        QCOMPARE(list->topLevelItemCount(), 0);
+        bool prompted = false;
+        QTimer driver; driver.setInterval(10);
+        connect(&driver, &QTimer::timeout, &window, [&] {
+            auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            if (auto* auth = qobject_cast<QInputDialog*>(dialog)) {
+                prompted = true;
+                if (lockDuringPrompt) app.lock(); else auth->reject();
+            }
+        });
+        QTimer deadline; deadline.setSingleShot(true);
+        connect(&deadline, &QTimer::timeout, &app, &Application::lock);
+        deadline.start(5000);
+        driver.start();
+        if (lockDuringPrompt) action->trigger();
+        else access->click();
+        QVERIFY(prompted);
+        QVERIFY(!QApplication::activeModalWidget());
+        QCOMPARE(list->topLevelItemCount(), 0);
+        QVERIFY(value->text().isEmpty());
+        QCOMPARE(app.gate(), lockDuringPrompt ? Application::Gate::NeedUnlock : Application::Gate::Ready);
+    }
+    void collectionEditorCrudPreservesDraftAndClearsOnLock() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123", &error));
+        QSettings preferences(dir.filePath("ui.ini"), QSettings::IniFormat);
+        preferences.setValue("secretRevealSeconds", 5);
+        QSettings run(dir.filePath("run.ini"), QSettings::IniFormat);
+        ui::MainWindow window(app, nullptr, &preferences, &run);
+        window.show();
+        auto* access = window.findChild<QPushButton*>("collectionAccess");
+        QVERIFY(access);
+        QTRY_VERIFY(access->isVisible());
+        bool prompted = false;
+        QTimer::singleShot(0, &window, [&] {
+            if (auto* auth = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                prompted = true;
+                auth->setTextValue("test-password-123");
+                auth->accept();
+            }
+        });
+        access->click();
+        QVERIFY(prompted);
+        QVERIFY(!QApplication::activeModalWidget());
+        {
+            auto* dialog = &window;
+            auto* list = dialog->findChild<QTreeWidget*>("collectionItems");
+            auto* project = dialog->findChild<QComboBox*>("collectionProject");
+            auto* name = dialog->findChild<QLineEdit*>("collectionName");
+            auto* value = dialog->findChild<QLineEdit*>("collectionValue");
+            auto* format = dialog->findChild<QComboBox*>("collectionFormat");
+            auto* add = dialog->findChild<QPushButton*>("collectionAdd");
+            auto* save = dialog->findChild<QPushButton*>("collectionSave");
+            auto* remove = dialog->findChild<QPushButton*>("collectionDelete");
+            auto* reload = dialog->findChild<QPushButton*>("collectionReload");
+            auto* copyToVault = dialog->findChild<QPushButton*>("collectionCopyToVault");
+            auto* moveToVault = dialog->findChild<QPushButton*>("collectionMoveToVault");
+            auto* status = dialog->findChild<QLabel*>("collectionStatus");
+            auto* confirm = dialog->findChild<QPushButton*>("collectionConfirm");
+            auto* cancel = dialog->findChild<QPushButton*>("collectionCancel");
+            auto* reveal = dialog->findChild<QPushButton*>("collectionReveal");
+            auto* copyValue = dialog->findChild<QPushButton*>("collectionCopyValue");
+            auto* preview = dialog->findChild<QPlainTextEdit*>("collectionRevealedValue");
+            auto* timer = dialog->findChild<QTimer*>("collectionRevealTimer");
+            QVERIFY(list && project && name && value && format && add && save && remove && reload &&
+                    copyToVault && moveToVault && status && confirm && cancel && reveal && copyValue && preview && timer);
+            const auto find = [&](const QString& scope, const QString& item) -> QTreeWidgetItem* {
+                for (int row = 0; row < list->topLevelItemCount(); ++row) {
+                    auto* candidate = list->topLevelItem(row);
+                    if (candidate->text(0) == item && candidate->data(0, Qt::UserRole).toString() == scope)
+                        return candidate;
+                }
+                return nullptr;
+            };
+            QCOMPARE(list->topLevelItemCount(), 0);
+            add->click();
+            QTest::keyClicks(name, "binary");
+            QCOMPARE(value->echoMode(), QLineEdit::Password);
+            format->setCurrentIndex(1);
+            QTest::keyClicks(value, "%%%%");
+            save->click();
+            QCOMPARE(list->topLevelItemCount(), 0);
+            QCOMPARE(value->text(), QStringLiteral("%%%%"));
+            value->selectAll();
+            const auto binary = QByteArray::fromHex("61e282");
+            QTest::keyClicks(value, QString::fromLatin1(binary.toBase64()));
+            save->click();
+            QCOMPARE(list->topLevelItemCount(), 1);
+            QCOMPARE(list->currentItem()->text(0), QStringLiteral("binary"));
+            QCOMPARE(format->currentIndex(), 1);
+            QCOMPARE(value->text(), QString::fromLatin1(binary.toBase64()));
+            SecureBytes read;
+            QCOMPARE(app.readCollection("binary", read), QString());
+            QCOMPARE(read.bytes(), binary);
+
+            reveal->click();
+            QVERIFY(preview->isVisible());
+            QCOMPARE(preview->toPlainText(), QString::fromLatin1(binary.toBase64()));
+            QCOMPARE(preview->textInteractionFlags(), Qt::TextInteractionFlags(Qt::NoTextInteraction));
+            QVERIFY(timer->isActive());
+            QCOMPARE(timer->interval(), 5000);
+#ifdef Q_OS_WIN
+            const bool clipboardAllowed = qEnvironmentVariableIntValue("TOKENBUCKET_TEST_USER_CLIPBOARD") == 1;
+#else
+            const bool clipboardAllowed = true;
+#endif
+            ClipboardGuard sentinel;
+            if (clipboardAllowed) {
+                const auto marker = QStringLiteral("synthetic-collection-clipboard-sentinel");
+                QString clipboardError;
+                QVERIFY2(sentinel.copySecret(marker, &clipboardError), qPrintable(clipboardError));
+                value->selectAll();
+                QTest::keyClick(value, Qt::Key_C, Qt::ControlModifier);
+                QVERIFY(collectionClipboardText() == marker);
+            }
+            QVERIFY(QMetaObject::invokeMethod(timer, "timeout"));
+            QVERIFY(preview->isHidden());
+            QVERIFY(preview->toPlainText().isEmpty());
+            if (clipboardAllowed) {
+                copyValue->click();
+                QVERIFY(collectionClipboardText() == QString::fromLatin1(binary.toBase64()));
+            }
+            name->setText("renamed");
+            save->click();
+            QCOMPARE(list->currentItem()->text(0), QStringLiteral("renamed"));
+            QCOMPARE(app.readCollection("renamed", read), QString());
+            QCOMPARE(read.bytes(), binary);
+
+            SecureBytes token, result;
+            QCOMPARE(app.issueCollectionToken(token), QString());
+            QCOMPARE(collection::execute(dir.path(), token.bytes(), "create", "other", "second-value", result), QString());
+            reload->click();
+            QCOMPARE(list->topLevelItemCount(), 2);
+            QCOMPARE(list->currentItem()->text(0), QStringLiteral("renamed"));
+            value->selectAll();
+            QTest::keyClicks(value, "ZHJhZnQ=");
+            QVERIFY(find({}, "other"));
+            list->setCurrentItem(find({}, "other"));
+            QVERIFY(cancel->isVisible());
+            cancel->click();
+            QCOMPARE(list->currentItem()->text(0), QStringLiteral("renamed"));
+            QCOMPARE(value->text(), QStringLiteral("ZHJhZnQ="));
+            QCOMPARE(collection::execute(dir.path(), token.bytes(), "replace", "renamed", "remote-value", result), QString());
+            save->click();
+            QVERIFY(!status->text().isEmpty());
+            QCOMPARE(value->text(), QStringLiteral("ZHJhZnQ="));
+            QCOMPARE(app.readCollection("renamed", read), QString());
+            QCOMPARE(read.bytes(), QByteArray("remote-value"));
+            reload->click();
+            QVERIFY(confirm->isVisible());
+            confirm->click();
+            QCOMPARE(value->text(), QStringLiteral("remote-value"));
+            remove->click();
+            QVERIFY(cancel->isVisible());
+            cancel->click();
+            QCOMPARE(list->topLevelItemCount(), 2);
+            remove->click();
+            QVERIFY(confirm->isVisible());
+            confirm->click();
+            QCOMPARE(list->topLevelItemCount(), 1);
+            QVERIFY(!app.readCollection("renamed", read).isEmpty());
+            QVERIFY(find({}, "other"));
+            list->setCurrentItem(find({}, "other"));
+            QCOMPARE(value->text(), QStringLiteral("second-value"));
+            add->click();
+            const auto literal = QStringLiteral("Без проекта");
+            project->setEditText(literal);
+            name->setText("other");
+            QTest::keyClicks(value, "scoped-value");
+            save->click();
+            QCOMPARE(list->topLevelItemCount(), 2);
+            QVERIFY(find({}, "other") && find(literal, "other"));
+            QCOMPARE(project->currentData().toString(), literal);
+            QCOMPARE(app.readCollection(literal, "other", read), QString());
+            QCOMPARE(read.bytes(), QByteArray("scoped-value"));
+            QCOMPARE(app.readCollection("other", read), QString());
+            QCOMPARE(read.bytes(), QByteArray("second-value"));
+            add->click();
+            QCOMPARE(project->currentText(), literal);
+            name->setText("extra");
+            QTest::keyClicks(value, "move-value");
+            save->click();
+            project->setEditText("Destination");
+            save->click();
+            QVERIFY(list->currentItem());
+            QCOMPARE(list->currentItem()->data(0, Qt::UserRole).toString(), QStringLiteral("Destination"));
+            QCOMPARE(app.readCollection("Destination", "extra", read), QString());
+            QCOMPARE(read.bytes(), QByteArray("move-value"));
+            QVERIFY(!app.readCollection(literal, "extra", read).isEmpty());
+
+            QCOMPARE(app.copyToCollection("Destination", "binary-transfer", binary), QString());
+            reload->click();
+            QVERIFY(find("Destination", "binary-transfer"));
+            list->setCurrentItem(find("Destination", "binary-transfer"));
+            auto* choices = dialog->findChild<QComboBox*>("collectionTransferDestination");
+            auto* newProject = dialog->findChild<QLineEdit*>("collectionTransferNewProject");
+            QVERIFY(choices && newProject);
+            copyToVault->click();
+            QVERIFY(!QApplication::activeModalWidget());
+            QVERIFY(choices->isVisible() && !choices->currentData().isValid());
+            QCOMPARE(newProject->text(), QStringLiteral("Destination"));
+            QVERIFY(confirm->isEnabled());
+            confirm->click();
+            QCOMPARE(app.readCollection("Destination", "binary-transfer", read), QString());
+            QCOMPARE(read.bytes(), binary);
+            QCOMPARE(app.model()->nodes().size(), 1);
+            QCOMPARE(app.model()->entries().size(), 1);
+            const auto copied = app.model()->entries().cbegin().value();
+            QCOMPARE(copied.title, QStringLiteral("binary-transfer"));
+            QCOMPARE(copied.token.toLatin1(), binary.toBase64());
+            QCOMPARE(copied.note, Application::collectionBinaryNote());
+            QVERIFY(copied.reverify);
+            const auto duplicate = QUuid::createUuid();
+            QCOMPARE(app.model()->addNode(duplicate, {}, QStringLiteral("Destination")), QString());
+            QVERIFY(find("Destination", "extra"));
+            list->setCurrentItem(find("Destination", "extra"));
+            moveToVault->click();
+            QCOMPARE(choices->currentIndex(), -1);
+            QVERIFY(!confirm->isEnabled());
+            const int index = choices->findData(copied.groupId);
+            QVERIFY(index >= 0);
+            choices->setCurrentIndex(index);
+            QVERIFY(confirm->isEnabled());
+            confirm->click();
+            QVERIFY(!app.readCollection("Destination", "extra", read).isEmpty());
+            QCOMPARE(app.model()->entries().size(), 2);
+            const auto moved = app.model()->entriesInGroup(copied.groupId);
+            QCOMPARE(moved.size(), 2);
+            QVERIFY(app.model()->entriesInGroup(duplicate).isEmpty());
+            QVERIFY(std::any_of(moved.cbegin(), moved.cend(), [&](const auto id) {
+                const auto* entry = app.model()->entry(id);
+                return entry && entry->title == "extra" && entry->token == "move-value";
+            }));
+            QVERIFY(find({}, "other"));
+            list->setCurrentItem(find({}, "other"));
+            QCOMPARE(value->text(), QStringLiteral("second-value"));
+            reveal->click();
+            QVERIFY(preview->isVisible());
+            remove->click();
+            QVERIFY(confirm->isVisible());
+            QVERIFY(preview->isHidden());
+            app.lock();
+            QVERIFY(!QApplication::activeModalWidget());
+            QVERIFY(preview->isHidden());
+            QVERIFY(value->text().isEmpty());
+            QCOMPARE(list->topLevelItemCount(), 0);
+            QCOMPARE(collection::execute(dir.path(), token.bytes(), "read", "other", {}, result), QString());
+            QCOMPARE(result.bytes(), QByteArray("second-value"));
+        }
     }
     void collectionTokenDisplayRequiresOwnerAndClearsOnLock_data() {
         QTest::addColumn<int>("action");

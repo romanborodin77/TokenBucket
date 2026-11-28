@@ -8,6 +8,8 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QScopeGuard>
+#include <QStringConverter>
+#include <algorithm>
 #include <stdexcept>
 namespace tb {
 Application::BackupInfo Application::backupInfo() const {
@@ -40,13 +42,14 @@ QString collectionMessage(const QString& error) {
     if(error=="unauthorized") return QStringLiteral("Доступ к коллекции не подтверждён.");
     if(error=="already-exists") return QStringLiteral("Такое имя уже есть в коллекции.");
     if(error=="invalid-request" || error=="limit-exceeded") return QStringLiteral("Проверьте имя, размер значения и свободное место в коллекции.");
-    if(error=="not-found") return QStringLiteral("Коллекция отсутствует. Сначала выпустите токен в настройках.");
+    if(error=="not-found") return QStringLiteral("Запись коллекции не найдена.");
+    if(error=="conflict") return QStringLiteral("Запись изменилась или была удалена. Откройте её заново.");
     return QStringLiteral("Не удалось прочитать или сохранить коллекцию агента.");
 }
 }
 struct Application::Outcome {
     bool ok = false;
-    bool wroteFile=false,legacyCurrent=false,upgradeApproved=false;
+    bool wroteFile=false,legacyCurrent=false,upgradeApproved=false,replacesSession=false;
     QByteArray previousFile;
     QString safetyPath;
     QString error;
@@ -65,30 +68,139 @@ struct Application::Outcome {
     }
 };
 QString Application::collectionDirectory() const { return QFileInfo(store_.mainPath()).absolutePath(); }
+QString Application::withCollectionOwner(const std::function<QString(const QString&,const SecureKey&)>& operation) const {
+    QString error;
+    if(!canStart(Gate::Ready,&error)) return error;
+    SecureKey owner;
+    if(!collectionOwner(*dataKey_,owner)) return collectionMessage("unauthorized");
+    return operation(collectionDirectory(),owner);
+}
 QString Application::issueCollectionToken(SecureBytes& token) {
     token.clear();
-    QString error;
-    if(!canStart(Gate::Ready,&error)) return error;
-    SecureKey owner;
-    const auto dir=collectionDirectory();
-    if(!collectionOwner(*dataKey_,owner)) return collectionMessage("unauthorized");
-    return collectionMessage(collection::issue(dir,owner,token));
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::issue(dir,owner,token));
+    });
 }
 QString Application::revokeCollectionToken() {
-    QString error;
-    if(!canStart(Gate::Ready,&error)) return error;
-    SecureKey owner;
-    const auto dir=collectionDirectory();
-    if(!collectionOwner(*dataKey_,owner)) return collectionMessage("unauthorized");
-    return collectionMessage(collection::revoke(dir,owner));
+    return withCollectionOwner([](const QString& dir,const SecureKey& owner) {
+        const auto error=collection::revoke(dir,owner);
+        return error=="not-found" ? QStringLiteral("Коллекция ещё не создана.") : collectionMessage(error);
+    });
 }
 QString Application::copyToCollection(const QString& name,QByteArrayView value) {
+    return copyToCollection({},name,value);
+}
+QString Application::copyToCollection(const QString& project,const QString& name,QByteArrayView value) {
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::ownerCreate(dir,owner,project,name,value));
+    });
+}
+QString Application::listCollection(QMap<QString,QStringList>& projects) const {
+    projects.clear();
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::ownerTree(dir,owner,projects));
+    });
+}
+QString Application::listCollection(QStringList& names) const {
+    names.clear();
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::ownerList(dir,owner,names));
+    });
+}
+QString Application::readCollection(const QString& name,SecureBytes& value) const {
+    return readCollection({},name,value);
+}
+QString Application::readCollection(const QString& project,const QString& name,SecureBytes& value) const {
+    value.clear();
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::ownerRead(dir,owner,project,name,value));
+    });
+}
+QString Application::updateCollection(const QString& name,QByteArrayView original,const QString& nextName,QByteArrayView value) {
+    return updateCollection({},name,original,{},nextName,value);
+}
+QString Application::updateCollection(const QString& project,const QString& name,QByteArrayView original,
+                                      const QString& nextProject,const QString& nextName,QByteArrayView value) {
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::ownerUpdate(dir,owner,project,name,original,nextProject,nextName,value));
+    });
+}
+QString Application::deleteCollection(const QString& name,QByteArrayView original) {
+    return deleteCollection({},name,original);
+}
+QString Application::deleteCollection(const QString& project,const QString& name,QByteArrayView original) {
+    return withCollectionOwner([&](const QString& dir,const SecureKey& owner) {
+        return collectionMessage(collection::ownerDelete(dir,owner,project,name,original));
+    });
+}
+QString Application::collectionBinaryNote() {
+    return QStringLiteral("Двоичное значение из коллекции агента. Поле токена содержит Base64.");
+}
+bool Application::collectionText(QByteArrayView bytes,QString& text) {
+    QStringDecoder decoder(QStringDecoder::Utf8,QStringConverter::Flag::ConvertInitialBom |
+                                                QStringConverter::Flag::Stateless);
+    text=decoder(bytes);
+    if (!decoder.hasError() && std::none_of(text.cbegin(),text.cend(),[](QChar ch) {
+        return ch.category()==QChar::Other_Control || ch.category()==QChar::Separator_Line
+            || ch.category()==QChar::Separator_Paragraph;
+    })) return true;
+    if (!text.isEmpty()) sodium_memzero(text.data(),size_t(text.size())*sizeof(QChar));
+    text.clear();
+    return false;
+}
+QString Application::transferFromCollection(QString project,QString name,QByteArrayView original,
+                                           model::Id destination,const QString& newRoot,bool move) {
+    SecureBytes source;
+    if (auto error=readCollection(project,name,source); !error.isEmpty()) return error;
+    if (source.bytes()!=original) return collectionMessage("conflict");
+    const auto session=generation();
+    auto candidate=model_;
+    if (destination.isNull()) {
+        if (newRoot.trimmed().isEmpty()) return QStringLiteral("Укажите проект назначения.");
+        for (const auto& node : candidate.nodes()) {
+            if (node.parent.isNull() && node.name==newRoot.trimmed()) {
+                if (!destination.isNull()) return QStringLiteral("Найдено несколько проектов с таким именем. Выберите конкретный проект назначения.");
+                destination=node.id;
+            }
+        }
+        if (destination.isNull()) {
+            destination=QUuid::createUuid();
+            if (auto error=candidate.addNode(destination,{},newRoot.trimmed()); !error.isEmpty()) return error;
+        }
+    } else if (!newRoot.isEmpty() || !candidate.nodes().contains(destination)) {
+        return QStringLiteral("Выберите существующий проект или группу.");
+    }
+    model::Entry entry;
+    entry.id=QUuid::createUuid();
+    entry.groupId=destination;
+    entry.title=name;
+    entry.type=model::EntryType::ApiToken;
+    entry.reverify=true;
+    entry.created=entry.modified=QDateTime::currentDateTimeUtc();
+    if (!collectionText(source.bytes(),entry.token)) {
+        const SecureBytes base64(source.bytes().toBase64());
+        entry.token=QString::fromLatin1(base64.bytes());
+        entry.note=collectionBinaryNote();
+    }
+    const auto sameCopy=[&](const model::Entry& other) {
+        return other.groupId==destination && other.title==entry.title && other.type==entry.type
+            && other.token==entry.token && other.note==entry.note && other.reverify;
+    };
+    for (const auto& other : candidate.entries()) {
+        if (other.groupId!=destination || other.title!=name) continue;
+        if (!sameCopy(other)) return QStringLiteral("В выбранной группе уже есть другая запись с таким именем.");
+        entry=other;
+    }
+    if (auto error=candidate.setEntry(entry); !error.isEmpty()) return error;
     QString error;
-    if(!canStart(Gate::Ready,&error)) return error;
-    SecureKey owner;
-    const auto dir=collectionDirectory();
-    if(!collectionOwner(*dataKey_,owner)) return collectionMessage("unauthorized");
-    return collectionMessage(collection::ownerCreate(dir,owner,name,value));
+    if (!saveModel(&candidate,&error)) return error;
+    if (!move) return {};
+    // A nested event loop during save can lock or replace the session or change either entry.
+    const auto* saved=model_.entry(entry.id);
+    if (session!=generation() || !saved || !sameCopy(*saved))
+        return QStringLiteral("Копия записана. Исходная запись не удалена: состояние хранилища изменилось.");
+    error=deleteCollection(project,name,source.bytes());
+    return error.isEmpty() ? QString() : QStringLiteral("Копия записана в хранилище. Исходная запись не удалена. %1").arg(error);
 }
 #ifdef Q_OS_WIN
 Application::Application(const QString& dir, QObject* parent, HelloRequest hello,store::FileOps& ops)
@@ -268,34 +380,41 @@ QString Application::preserveBeforeRegistryMigration(QString* error) {
     },mode_,false,error);
     return ok?*path:QString();
 }
-bool Application::storeCandidate(Outcome& result,quint64 expected) {
+bool Application::storeCandidate(Outcome& result,quint64 expected,std::optional<QByteArrayView> replacement) {
     const auto canceled=[&] {return generation()!=expected;};
     if(canceled()) return fail(&result.error,"Запись отменена.");
-    if(result.legacyCurrent) {
-        if(!result.upgradeApproved) {
-            result.error = QStringLiteral("Требуется подтверждение обновления формата до v%1.").arg(model::VaultModel::CurrentVersion);
-            return false;
-        }
+    if(result.legacyCurrent && !result.upgradeApproved) {
+        result.error = QStringLiteral("Требуется подтверждение обновления формата до v%1.").arg(model::VaultModel::CurrentVersion);
+        return false;
+    }
+    const auto preserve=[&] {
+        if(!result.legacyCurrent) return true;
         QByteArray safety;
         if(!result.safetyPath.isEmpty() && (store_.loadBytes(result.safetyPath,&safety)!=store::VaultStore::Load::Ok || safety!=result.previousFile))
             result.safetyPath.clear();
         if(result.safetyPath.isEmpty()) result.safetyPath=store_.preserveBeforeUpgrade(result.previousFile,&result.error);
-        if(result.safetyPath.isEmpty()) return false;
-    }
-    if(canceled()) return fail(&result.error,"Запись отменена; страховочная копия сохранена.");
+        return !result.safetyPath.isEmpty();
+    };
+    if(!replacement && !preserve()) return false;
     const auto save=[&] {
+        if(canceled()) {fail(&result.error,"Запись отменена."); return;}
+        if(replacement && !preserve()) return;
         result.wroteFile=store_.save(result.file,&result.error,canceled);
     };
-    if(!result.collectionOwner || !result.key) {save(); return result.wroteFile;}
+    if(!replacement && (!result.collectionOwner || !result.key)) {save(); return result.wroteFile;}
     SecureKey nextOwner;
     if(!collectionOwner(*result.key,nextOwner))
         return fail(&result.error,"Не удалось подтвердить ключ владельца коллекции агента.");
-    const auto collectionError=collection::rebindOwner(collectionDirectory(),*result.collectionOwner,nextOwner,
-                                                       result.previousFile,result.file,save);
+    const auto collectionError=replacement
+        ? collection::restoreSnapshot(collectionDirectory(),result.collectionOwner.get(),nextOwner,
+                                      result.previousFile,result.file,*replacement,save)
+        : collection::rebindOwner(collectionDirectory(),*result.collectionOwner,nextOwner,
+                                 result.previousFile,result.file,save);
     if(!collectionError.isEmpty() && result.error.isEmpty()) result.error=collectionMessage(collectionError);
     return result.wroteFile && collectionError.isEmpty();
 }
-bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err) {
+bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err,
+                          model::VaultModel* savedModel) {
     const quint64 generation = generation_;
     auto result=std::make_shared<Outcome>();
     if(adopt && gate_==Gate::Ready) {
@@ -322,6 +441,12 @@ bool Application::execute(std::function<void(Outcome&,quint64)> job, Mode mode, 
         if(result->wroteFile) {mode_=Mode::None; lock();}
         gate_ = hasVault_ ? Gate::NeedUnlock : Gate::NeedSetup;
     } else if (ok) {
+        if (savedModel) model_ = std::move(*savedModel);
+        if(result->replacesSession) {
+            cancelBackupRestore();
+            upgradeApproval_.reset();
+            ++generation_;
+        }
         if (!result->file.isEmpty()) {file_ = std::move(result->file); hasVault_=true; hint_=mode;}
         if (adopt) {persistedVersion_=result->wroteFile?model::VaultModel::CurrentVersion:result->model.decodedVersion(); model_ = std::move(result->model); dataKey_ = std::move(result->key); mode_ = mode; gate_ = Gate::Ready;}
     }
@@ -362,8 +487,11 @@ bool Application::unlock(const QByteArray& pw, QString* err) {
     }, Mode::Password, true, err);
 }
 bool Application::save(QString* err) {
+    return saveModel(nullptr,err);
+}
+bool Application::saveModel(model::VaultModel* candidate,QString* err) {
     if (!canStart(Gate::Ready, err)) return false;
-    auto plain = std::make_shared<cbor::SecureBuffer>(model_.toCborSecure());
+    auto plain = std::make_shared<cbor::SecureBuffer>((candidate ? *candidate : model_).toCborSecure());
     if (plain->size() > container::MaxPlainBytes) return fail(err, "Содержимое хранилища превышает 64 МиБ.");
     auto key = std::make_shared<SecureKey>(); memcpy(key->data(), dataKey_->data(), SecureKey::Size);
     const auto file = file_;
@@ -374,7 +502,7 @@ bool Application::save(QString* err) {
         result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
         if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось сохранить хранилище.");
 
-    }, mode_, false, err);
+    }, mode_, false, err,candidate);
 }
 void Application::lock() {
     cancelBackupRestore();
@@ -389,25 +517,33 @@ QByteArray Application::exportContainer(const QByteArray& exportPw, QString* err
     if (!validPassword(exportPw)) { fail(err, "Пароль экспорта: минимум 12 и максимум 1024 байта UTF-8."); return {}; }
     auto plain = std::make_shared<cbor::SecureBuffer>(model_.toCborSecure());
     if (plain->size() > container::MaxPlainBytes) { fail(err, "Содержимое хранилища превышает 64 МиБ."); return {}; }
+    auto owner = std::make_shared<SecureKey>();
+    if(!collectionOwner(*dataKey_,*owner)) {
+        fail(err,"Не удалось подтвердить ключ владельца коллекции агента."); return {};
+    }
     const quint64 expected = generation_;
     auto secret = std::make_shared<SecureBytes>(exportPw);
     busy_ = true; emit busyChanged(true);
     QString error; QByteArray exported;
     try {
-        exported = waitFor(QtConcurrent::run([this, expected, plain, secret]() -> QByteArray {
+        exported = waitFor(QtConcurrent::run([this, expected, plain, secret, owner, &error]() -> QByteArray {
             if (expected != generation_) return {};
-            const QByteArray bytes = container::packPassword(secret->bytes(), plain->data(), plain->size(), nullptr);
-            return expected == generation_ ? bytes : QByteArray();
+            SecureBytes entries;
+            error = collectionMessage(collection::ownerSnapshot(collectionDirectory(),*owner,entries));
+            if (!error.isEmpty() || expected != generation_) return {};
+            const QByteArrayView model(reinterpret_cast<const char*>(plain->data()), qsizetype(plain->size()));
+            return container::packTransfer(secret->bytes(), model, entries.bytes());
         }));
-        if (expected != generation_) { exported.clear(); error = QStringLiteral("Операция отменена блокировкой хранилища."); }
-        else if (exported.isEmpty()) error = QStringLiteral("Не удалось создать файл экспорта.");
+        if (exported.isEmpty() && error.isEmpty()) error = QStringLiteral("Не удалось создать файл экспорта.");
     }
     catch (...) { exported.clear(); error = QStringLiteral("Не удалось создать файл экспорта."); }
-    plain.reset(); secret->clear();
-    if (err) *err = error;
-    const bool canceled = expected != generation_;
+    plain.reset(); secret->clear(); owner.reset();
     busy_ = false; emit busyChanged(false);
-    if (canceled) emit stateChanged();
+    if (expected != generation_) {
+        exported.clear(); error = QStringLiteral("Операция отменена блокировкой хранилища.");
+        emit stateChanged();
+    }
+    if (err) *err = error;
     return exported;
 }
 bool Application::importContainer(const QByteArray& bytes, const QByteArray& importPw, const QByteArray& newLocalPw, QString* err) {
@@ -416,23 +552,29 @@ bool Application::importContainer(const QByteArray& bytes, const QByteArray& imp
     if (gate_ == Gate::NeedUnlock) return fail(err, "Сначала разблокируйте или закройте хранилище.");
     if (!validPassword(importPw)) return fail(err, "Пароль файла импорта: минимум 12 и максимум 1024 байта UTF-8.");
     if (!validPassword(newLocalPw)) return fail(err, "Новый мастер-пароль: минимум 12 и максимум 1024 байта UTF-8.");
-    if (bytes.isEmpty() || bytes.size() > int(container::MaxFileBytes)) return fail(err, "Файл импорта отсутствует, повреждён или слишком велик.");
-    auto source = std::make_shared<SecureBytes>(bytes);
+    if (bytes.isEmpty() || bytes.size() > container::MaxTransferFileBytes) return fail(err, "Файл импорта отсутствует, повреждён или слишком велик.");
     auto fileSecret = std::make_shared<SecureBytes>(importPw);
     auto localSecret = std::make_shared<SecureBytes>(newLocalPw);
-    return execute([this, source, fileSecret, localSecret](Outcome& result,quint64 expected) {
-        auto opened = container::openPassword(source->bytes(), fileSecret->bytes());
+    return execute([this, bytes, fileSecret, localSecret](Outcome& result,quint64 expected) {
+        auto opened = container::openTransfer(bytes, fileSecret->bytes());
+        fileSecret->clear();
         SecureBytes plain(std::move(opened.cbor));
         if (opened.status != container::Status::Ok) { result.error = QStringLiteral("Неверный пароль файла импорта или файл повреждён."); return; }
-        if (result.model.fromCbor(plain.bytes(), &result.error) != model::VaultModel::ParseStatus::Ok) return;
-        plain.clear();
+        const auto payload = container::transferPayload(plain.bytes());
+        if (!payload) { result.error = QStringLiteral("Неподдерживаемый или повреждённый формат файла импорта."); return; }
+        const auto model = QByteArray::fromRawData(payload->model.data(),payload->model.size());
+        if (result.model.fromCbor(model, &result.error) != model::VaultModel::ParseStatus::Ok) return;
         if (generation() != expected) return;
         result.key = std::make_unique<SecureKey>();
         cbor::SecureBuffer cbor(result.model.toCborSecure());
         result.file = cbor.size() > container::MaxPlainBytes
             ? QByteArray() : container::packPassword(localSecret->bytes(), cbor.data(), cbor.size(), result.key.get());
+        localSecret->clear();
         if (generation() != expected) return;
-        result.ok = !result.file.isEmpty() && storeCandidate(result,expected);
+        auto replacement=payload->collection;
+        if(!replacement && !result.collectionOwner) replacement=QByteArrayView();
+        result.replacesSession=bool(result.collectionOwner);
+        result.ok = !result.file.isEmpty() && storeCandidate(result,expected,replacement);
         if (!result.ok && result.error.isEmpty()) result.error = QStringLiteral("Не удалось импортировать хранилище.");
 
     }, Mode::Password, true, err);

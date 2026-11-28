@@ -1,9 +1,12 @@
 #include <QtTest>
 #include <QAction>
 #include <QApplication>
+#include <QBoxLayout>
 #include <QTemporaryDir>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QTreeView>
+#include <QHeaderView>
 #include <QTabWidget>
 #include <QListWidget>
 #include <QLineEdit>
@@ -248,12 +251,16 @@ private slots:
             ui::MainWindow restored(app, nullptr, &prefs,nullptr,[] {return true;}); restored.show();
             QVERIFY(restored.screen()->availableGeometry().contains(restored.frameGeometry().center()));
             restored.resize(650, 550); QCoreApplication::processEvents();
-            QVERIFY(restored.findChild<QStackedWidget*>("entryPanel")->isHidden());
+            auto* workspace = restored.findChild<QSplitter*>("workspaceSplit");
+            auto* panel = restored.findChild<QStackedWidget*>("entryPanel");
+            QVERIFY(workspace && panel);
+            QCOMPARE(workspace->orientation(), Qt::Vertical);
+            QCOMPARE(workspace->indexOf(panel), 1);
             restored.close();
         }
         prefs.sync(); QCOMPARE(prefs.status(), QSettings::NoError);
         QCOMPARE(prefs.value("legacy").toString(), QStringLiteral("unchanged"));
-        QCOMPARE(prefs.allKeys(), QStringList({"legacy", "ui/mainGeometry", "ui/mainSplitter"}));
+        QCOMPARE(prefs.allKeys(), QStringList({"legacy", "ui/mainGeometry", "ui/mainSplitter", "ui/registryHeader", "ui/workspaceDetails", "ui/workspaceSidebar"}));
         QSettings denied(dir.path(), QSettings::IniFormat);
         const auto original = app.model()->toCbor();
         ui::MainWindow w(app, nullptr, &denied,nullptr,[] {return true;}); w.show(); w.close();
@@ -273,6 +280,41 @@ private slots:
         QCoreApplication::processEvents();
         QVERIFY(area.contains(restored.frameGeometry().center()));
     }
+    void registryColumnWidthsFollowHeaderDragAndSurviveReopen() {
+        QTemporaryDir dir;
+        Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("test-password-123",&error));
+        QSettings prefs(dir.filePath("layout.ini"),QSettings::IniFormat);
+        QList<int> widths;
+        {
+            ui::MainWindow window(app,nullptr,&prefs);
+            window.show();
+            auto* tree=window.findChild<QTreeView*>("registryEntries");
+            auto* tabs=window.findChild<QTabWidget*>("resultsTabs");
+            QVERIFY(tree && tabs);
+            tabs->setCurrentIndex(1);
+            auto* header=tree->header();
+            QTRY_VERIFY(header->isVisible());
+            for (int column=0; column<header->count(); ++column) {
+                QCOMPARE(header->sectionResizeMode(column),QHeaderView::Interactive);
+                const int width=header->sectionSize(column);
+                auto* scroll=tree->horizontalScrollBar();
+                scroll->setValue(header->sectionPosition(column)+width-header->viewport()->width()/2);
+                const QPoint edge(header->sectionViewportPosition(column)+width-1,header->height()/2);
+                QVERIFY(header->viewport()->rect().contains(edge));
+                QTest::mousePress(header->viewport(),Qt::LeftButton,Qt::NoModifier,edge);
+                QTest::mouseMove(header->viewport(),edge-QPoint(12,0));
+                QTest::mouseRelease(header->viewport(),Qt::LeftButton,Qt::NoModifier,edge-QPoint(12,0));
+                QVERIFY(header->sectionSize(column)<width);
+                widths.append(header->sectionSize(column));
+            }
+            window.refreshAll();
+            for (int i=0;i<widths.size();++i) QCOMPARE(header->sectionSize(i),widths[i]);
+        }
+        ui::MainWindow reopened(app,nullptr,&prefs);
+        auto* header=reopened.findChild<QTreeView*>("registryEntries")->header();
+        for (int i=0;i<widths.size();++i) QCOMPARE(header->sectionSize(i),widths[i]);
+    }
     void mainStatusAndMenuStayCompact() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123", &error));
@@ -290,19 +332,36 @@ private slots:
         });
         more->click(); QVERIFY(opened);
     }
+    void collectionCopiesOnlyAuthorizedSelectedSecret_data() {
+        QTest::addColumn<bool>("binary");
+        QTest::newRow("credentials") << false;
+        QTest::newRow("protected-base64") << true;
+    }
     void collectionCopiesOnlyAuthorizedSelectedSecret() {
+        QFETCH(bool, binary);
         QTemporaryDir dir; Application app(dir.path()); QString error;
         QVERIFY(app.createPasswordVault("test-password-123",&error));
-        const auto group=QUuid::createUuid();
+        const auto group=QUuid::createUuid(), child=QUuid::createUuid();
         QVERIFY(app.model()->addNode(group,{},"Synthetic").isEmpty());
-        model::Entry entry; entry.id=QUuid::createUuid(); entry.groupId=group;
-        entry.type=model::EntryType::Credentials; entry.title="Synthetic entry"; entry.reverify=true;
-        entry.login="synthetic-login"; entry.password="synthetic-entry-secret";
+        QVERIFY(app.model()->addNode(child,group,"Nested").isEmpty());
+        model::Entry entry; entry.id=QUuid::createUuid(); entry.groupId=child;
+        const auto expected = binary ? QByteArray::fromHex("00610d0aff") : QByteArray("synthetic-entry-secret");
+        entry.title="Synthetic entry"; entry.reverify=true;
+        if (binary) {
+            entry.type = model::EntryType::ApiToken;
+            entry.token = QString::fromLatin1(expected.toBase64());
+            entry.note = Application::collectionBinaryNote();
+        } else {
+            entry.type = model::EntryType::Credentials;
+            entry.login = "synthetic-login";
+            entry.password = QString::fromUtf8(expected);
+        }
         QVERIFY(app.model()->setEntry(entry).isEmpty());
         QVERIFY(app.save(&error));
         SecureBytes token,result;
         QCOMPARE(app.issueCollectionToken(token),QString());
         const QString name=QStringLiteral("named entry copy");
+        const QString copyProject=QStringLiteral("Editable agent project");
 
         QSettings run(dir.filePath("run.ini"),QSettings::IniFormat);
         ui::MainWindow window(app,nullptr,&uiPreferences_,&run);
@@ -313,14 +372,29 @@ private slots:
             bool choseEntry=false,namedCopy=false,ownerPrompt=false;
             QTimer driver;
             connect(&driver,&QTimer::timeout,&window,[&] {
-                if(auto* dialog=qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
-                    if(dialog->objectName()=="collectionItemName") {
-                        namedCopy=true; dialog->setTextValue(name); dialog->accept();
-                    } else if(dialog->textEchoMode()==QLineEdit::Password) {
+                auto* modal = QApplication::activeModalWidget();
+                if(auto* dialog=qobject_cast<QInputDialog*>(modal)) {
+                    if(dialog->textEchoMode()==QLineEdit::Password) {
                         ownerPrompt=true;
                         if(acceptOwner) {dialog->setTextValue("test-password-123"); dialog->accept();}
                         else dialog->reject();
                     }
+                } else if(auto* copyDialog=qobject_cast<QDialog*>(modal); copyDialog && copyDialog->objectName()=="collectionItemName") {
+                    if (namedCopy) {
+                        if (ownerPrompt && !acceptOwner) copyDialog->reject();
+                        return;
+                    }
+                    auto* project = copyDialog->findChild<QLineEdit*>("collectionCopyProject");
+                    auto* item = copyDialog->findChild<QLineEdit*>("collectionCopyName");
+                    auto* submit = copyDialog->findChild<QPushButton*>("collectionCopySave");
+                    auto* decode = copyDialog->findChild<QCheckBox*>("collectionCopyDecodeBase64");
+                    QVERIFY(project && item && submit);
+                    QCOMPARE(decode && decode->isChecked(), binary);
+                    QCOMPARE(project->text(), QStringLiteral("Synthetic"));
+                    project->setText(copyProject);
+                    item->setText(name);
+                    namedCopy = true;
+                    QTimer::singleShot(0, submit, &QPushButton::click);
                 } else if(!choseEntry) {
                     if(auto* menu=qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
                         const auto actions=menu->actions();
@@ -346,17 +420,169 @@ private slots:
             QVERIFY(choseEntry);
             QVERIFY(namedCopy);
             QVERIFY(ownerPrompt);
-            QCOMPARE(collection::execute(dir.path(),token.bytes(),"read",name,{},result),
+            QCOMPARE(collection::execute(dir.path(),token.bytes(),"read",name,{},result,copyProject),
                      acceptOwner?QString():QStringLiteral("not-found"));
         }
-        QCOMPARE(result.bytes(),entry.password.toUtf8());
+        QCOMPARE(result.bytes(), expected);
         app.lock();
-        QCOMPARE(collection::execute(dir.path(),token.bytes(),"replace",name,"synthetic-replacement",result),QString());
-        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read",name,{},result),QString());
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"replace",name,"synthetic-replacement",result,copyProject),QString());
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read",name,{},result,copyProject),QString());
         QCOMPARE(result.bytes(),QByteArray("synthetic-replacement"));
         QVERIFY(app.unlock("test-password-123",&error));
         const auto* original=app.model()->entry(entry.id); QVERIFY(original);
-        QCOMPARE(original->password,entry.password);
+        QCOMPARE(binary ? original->token : original->password, binary ? entry.token : entry.password);
+    }
+    void unifiedWorkspaceSeparatesPersonalAndAgentSelection() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Application app(dir.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault("test-password-123", &error), qPrintable(error));
+        const auto shared = QUuid::createUuid(), nested = QUuid::createUuid(), privateRoot = QUuid::createUuid();
+        QCOMPARE(app.model()->addNode(shared, {}, "Shared"), QString());
+        QCOMPARE(app.model()->addNode(nested, shared, "Nested"), QString());
+        QCOMPARE(app.model()->addNode(privateRoot, {}, "Personal only"), QString());
+        model::Entry original;
+        original.id = QUuid::createUuid();
+        original.groupId = nested;
+        original.title = "Same name";
+        original.token = "synthetic-personal-secret";
+        QCOMPARE(app.model()->setEntry(original), QString());
+        QCOMPARE(app.copyToCollection("Shared", "Same name", "synthetic-shared-agent-secret"), QString());
+        QCOMPARE(app.copyToCollection("Agent only", "Same name", "synthetic-agent-only-secret"), QString());
+        QCOMPARE(app.copyToCollection("Same name", "synthetic-ungrouped-secret"), QString());
+
+        QSettings run(dir.filePath("run.ini"), QSettings::IniFormat);
+        ui::MainWindow window(app, nullptr, &uiPreferences_, &run);
+        window.resize(960, 720);
+        window.show();
+        auto* agent = window.findChild<QTreeWidget*>("collectionItems");
+        auto* access = window.findChild<QPushButton*>("collectionAccess");
+        auto* panel = window.findChild<QStackedWidget*>("entryPanel");
+        auto* lists = window.findChild<QWidget*>("workspaceLists");
+        auto* workspace = window.findChild<QSplitter*>("workspaceSplit");
+        auto* name = window.findChild<QLineEdit*>("collectionName");
+        auto* value = window.findChild<QLineEdit*>("collectionValue");
+        auto* cancel = window.findChild<QPushButton*>("collectionCancel");
+        auto* confirmDiscard = window.findChild<QPushButton*>("collectionConfirm");
+        QVERIFY(agent && access && panel && lists && workspace && name && value && cancel && confirmDiscard);
+        QTRY_VERIFY(access->isVisible());
+        QCOMPARE(agent->topLevelItemCount(), 0);
+        bool authenticated = false;
+        QTimer::singleShot(0, &window, [&] {
+            if (auto* prompt = qobject_cast<QInputDialog*>(QApplication::activeModalWidget())) {
+                authenticated = true;
+                prompt->setTextValue("test-password-123");
+                prompt->accept();
+            }
+        });
+        access->click();
+        QVERIFY(authenticated);
+        QVERIFY(!window.findChild<QDialog*>("collectionDialog"));
+        QVERIFY(!QApplication::activeModalWidget());
+        auto* listLayout = qobject_cast<QBoxLayout*>(lists->layout());
+        QVERIFY(listLayout);
+        QCOMPARE(listLayout->direction(), QBoxLayout::LeftToRight);
+        QCOMPARE(workspace->orientation(), Qt::Vertical);
+        QCOMPARE(workspace->indexOf(lists), 0);
+        QCOMPARE(workspace->indexOf(panel), 1);
+        QTRY_VERIFY(window.list()->isVisible() && agent->isVisible());
+        const QRect personalRect(window.list()->mapToGlobal(QPoint()), window.list()->size());
+        const QRect agentRect(agent->mapToGlobal(QPoint()), agent->size());
+        QVERIFY(personalRect.right() < agentRect.left());
+
+        auto* library = window.tree();
+        const auto personalNode = [&](model::Id id) -> QTreeWidgetItem* {
+            for (QTreeWidgetItemIterator item(library); *item; ++item)
+                if ((*item)->data(0, Qt::UserRole).value<model::Id>() == id) return *item;
+            return nullptr;
+        };
+        const auto agentNode = [&](const QString& project) -> QTreeWidgetItem* {
+            for (QTreeWidgetItemIterator item(library); *item; ++item) {
+                const auto scope = (*item)->data(0, Qt::UserRole + 1);
+                if (scope.isValid() && scope.toString() == project) return *item;
+            }
+            return nullptr;
+        };
+        QVERIFY(personalNode(nested));
+        library->setCurrentItem(personalNode(nested));
+        QTRY_COMPARE(window.list()->count(), 1);
+        QTRY_COMPARE(agent->topLevelItemCount(), 1);
+        QCOMPARE(agent->topLevelItem(0)->text(0), original.title);
+        QCOMPARE(agent->topLevelItem(0)->data(0, Qt::UserRole).toString(), QString("Shared"));
+        const auto selectPersonal = [&] {
+            auto* item = window.list()->item(0);
+            window.list()->scrollToItem(item);
+            QTest::mouseClick(window.list()->viewport(), Qt::LeftButton, {}, window.list()->visualItemRect(item).center());
+        };
+        const auto selectAgent = [&] {
+            auto* item = agent->topLevelItem(0);
+            agent->scrollToItem(item);
+            QTest::mouseClick(agent->viewport(), Qt::LeftButton, {}, agent->visualItemRect(item).center());
+        };
+        selectPersonal();
+        QTRY_VERIFY(window.card()->isVisible() && !value->isVisible());
+        auto* title = window.card()->findChild<QLabel*>("cardTitle");
+        QVERIFY(title);
+        QCOMPARE(title->text(), original.title);
+        const int personalBottom = window.list()->mapToGlobal(window.list()->rect().bottomLeft()).y();
+        const int agentBottom = agent->mapToGlobal(agent->rect().bottomLeft()).y();
+        QVERIFY(panel->mapToGlobal(QPoint()).y() > qMax(personalBottom, agentBottom));
+        selectAgent();
+        QTRY_VERIFY(value->isVisible() && !window.card()->isVisible());
+        QCOMPARE(name->text(), original.title);
+        QCOMPARE(value->text(), QString("synthetic-shared-agent-secret"));
+        QCOMPARE(value->echoMode(), QLineEdit::Password);
+
+        bool personalCommandOpened = false;
+        QTimer unexpectedDialog;
+        connect(&unexpectedDialog, &QTimer::timeout, &window, [&] {
+            if (auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget())) {
+                personalCommandOpened = true;
+                modal->reject();
+            }
+        });
+        unexpectedDialog.start(10);
+        window.deleteSelected();
+        QVERIFY(!window.bulkDelete());
+        window.editSelected();
+        unexpectedDialog.stop();
+        QVERIFY(!personalCommandOpened);
+        const auto* unchanged = app.model()->entry(original.id);
+        QVERIFY(unchanged && *unchanged == original);
+
+        value->selectAll();
+        QTest::keyClicks(value, "draft");
+        selectPersonal();
+        QVERIFY(cancel->isVisible() && confirmDiscard->isVisible());
+        cancel->click();
+        QVERIFY(value->isVisible() && !window.card()->isVisible());
+        QCOMPARE(value->text(), QString("draft"));
+        selectPersonal();
+        QVERIFY(confirmDiscard->isVisible());
+        confirmDiscard->click();
+        QTRY_VERIFY(window.card()->isVisible() && !value->isVisible());
+        QVERIFY(value->text().isEmpty());
+
+        QVERIFY(personalNode(privateRoot));
+        library->setCurrentItem(personalNode(privateRoot));
+        QTRY_COMPARE(agent->topLevelItemCount(), 0);
+        QVERIFY(agentNode("Agent only"));
+        library->setCurrentItem(agentNode("Agent only"));
+        QTRY_COMPARE(agent->topLevelItemCount(), 1);
+        QCOMPARE(agent->topLevelItem(0)->data(0, Qt::UserRole).toString(), QString("Agent only"));
+        selectAgent();
+        QCOMPARE(value->text(), QString("synthetic-agent-only-secret"));
+        QVERIFY(agentNode({}));
+        library->setCurrentItem(agentNode({}));
+        QTRY_COMPARE(agent->topLevelItemCount(), 1);
+        QCOMPARE(agent->topLevelItem(0)->data(0, Qt::UserRole).toString(), QString());
+        selectAgent();
+        QCOMPARE(value->text(), QString("synthetic-ungrouped-secret"));
+        app.lock();
+        QVERIFY(value->text().isEmpty());
+        QCOMPARE(agent->topLevelItemCount(), 0);
+        QVERIFY(!QApplication::activeModalWidget());
     }
     void libraryRequiresDestination() {
         QTemporaryDir dir; Application app(dir.path()); QString error;
@@ -569,7 +795,13 @@ private slots:
         const auto details = w.findChild<QPlainTextEdit*>(QStringLiteral("entryDetails"))->toPlainText();
         QVERIFY(!details.contains(QStringLiteral("TEST_PASSWORD_123456"))); QVERIFY(!details.contains(QStringLiteral("TEST_TOKEN_123456"))); QVERIFY(!details.contains(QStringLiteral("YWJj")));
         QVERIFY(w.grab().save(QCoreApplication::applicationDirPath() + QStringLiteral("/mainwindow-preview.png")));
-        w.resize(650, qMin(600, w.screen()->availableGeometry().height() - 80)); QCoreApplication::processEvents(); QVERIFY(w.findChild<QStackedWidget*>(QStringLiteral("entryPanel"))->isHidden());
+        w.list()->setCurrentRow(0);
+        w.resize(650, qMin(600, w.screen()->availableGeometry().height() - 80));
+        QCoreApplication::processEvents();
+        auto* entryPanel = w.findChild<QStackedWidget*>("entryPanel");
+        QVERIFY(entryPanel && entryPanel->isAncestorOf(w.card()));
+        QVERIFY(w.card()->isVisible());
+        QVERIFY(!QApplication::activeModalWidget());
         answerText(w, QStringLiteral("Другой проект")); w.addProject();
         const auto other = w.tree()->currentItem()->data(0,Qt::UserRole).value<model::Id>();
         w.search()->setText(QStringLiteral("Запись 1")); QCOMPARE(w.list()->count(), 1);

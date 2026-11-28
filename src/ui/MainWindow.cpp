@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include <QApplication>
+#include "CollectionDialog.h"
 #include "SettingsDialog.h"
 #ifdef Q_OS_WIN
 #include "AgentAccess.h"
@@ -16,6 +18,7 @@
 #include "../io/RegistryMigration.h"
 #include "../model/TextFile.h"
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QKeyEvent>
@@ -29,12 +32,14 @@
 #include <QGridLayout>
 #include <QTimer>
 #include <QAction>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCursor>
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -63,6 +68,8 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QStyle>
+#include <QStyleOption>
+#include <QStylePainter>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 #include "../platform/FileOps.h"
@@ -80,6 +87,37 @@
 #include <algorithm>
 namespace tb::ui {
 namespace {
+constexpr int CollectionProjectRole = Qt::UserRole + 1;
+
+bool isCollectionProject(const QTreeWidgetItem* item) {
+    return item && item->data(0, CollectionProjectRole).isValid();
+}
+
+QString collectionProjectLabel(const QString& project) {
+    return project.isEmpty() ? QStringLiteral("Без проекта")
+                            : QStringLiteral("%1 · агент").arg(project);
+}
+
+class WorkspaceFilter final : public QComboBox {
+public:
+    explicit WorkspaceFilter(QWidget* parent) : QComboBox(parent) {
+        setMinimumContentsLength(4);
+        setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        connect(this, &QComboBox::currentTextChanged, this, &QWidget::setToolTip);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        const auto field = style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, this);
+        option.currentText = fontMetrics().elidedText(option.currentText, Qt::ElideRight, field.width());
+        QStylePainter painter(this);
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+    }
+};
+
 class MigrationTable:public QTableWidget {
 public:
     MigrationTable(int rows,int columns,QWidget* parent):QTableWidget(rows,columns,parent) {qApp->installEventFilter(this);}
@@ -103,6 +141,7 @@ public:
 protected:
     void dropEvent(QDropEvent* event) override {
         const auto* item = itemAt(event->position().toPoint());
+        if (isCollectionProject(currentItem()) || isCollectionProject(item)) { event->ignore(); return; }
         const model::Id dragged = currentItem() ? currentItem()->data(0, Qt::UserRole).value<model::Id>() : model::Id{};
         model::Id target;
         switch (dropIndicatorPosition()) {
@@ -134,19 +173,22 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     const auto action = [&](QMenu* menu, const QString& text, auto slot) {
         auto* item = menu->addAction(text, this, slot); mutations_ << item; return item;
     };
+    const auto personal = [&](QMenu* menu, const QString& text, auto slot) {
+        auto* item = action(menu, text, slot); personalActions_ << item; return item;
+    };
     auto* addProjectAction = action(projects, QStringLiteral("Новый проект…"), &MainWindow::addProject);
     action(projects, QStringLiteral("Новая группа…"), &MainWindow::addGroup);
     action(projects, QStringLiteral("Переименовать…"), &MainWindow::renameSelectedNode);
     action(projects, QStringLiteral("Переместить группу…"), &MainWindow::moveSelectedNode);
     action(projects, QStringLiteral("Удалить проект/группу…"), &MainWindow::deleteSelectedNode);
-    auto* addEntryAction = action(entries, QStringLiteral("Новая запись…"), &MainWindow::addEntry);
+    auto* addEntryAction = personal(entries, QStringLiteral("Новая запись…"), &MainWindow::addEntry);
     addEntryAction->setShortcut(QKeySequence::New);
-    auto* edit = action(entries, QStringLiteral("Изменить запись…"), &MainWindow::editSelected); edit->setShortcut(QKeySequence(Qt::Key_F2));
-    action(entries, QStringLiteral("Удалить запись…"), &MainWindow::deleteSelected);
+    auto* edit = personal(entries, QStringLiteral("Изменить запись…"), &MainWindow::editSelected); edit->setShortcut(QKeySequence(Qt::Key_F2));
+    personal(entries, QStringLiteral("Удалить запись…"), &MainWindow::deleteSelected);
     entries->addSeparator();
-    action(entries, QStringLiteral("Переместить выбранные в группу…"), &MainWindow::bulkMoveDialog);
-    action(entries, QStringLiteral("Добавить тег выбранным…"), &MainWindow::bulkAddTagDialog);
-    action(entries, QStringLiteral("Снять тег у выбранных…"), &MainWindow::bulkRemoveTagDialog);
+    personal(entries, QStringLiteral("Переместить выбранные в группу…"), &MainWindow::bulkMoveDialog);
+    personal(entries, QStringLiteral("Добавить тег выбранным…"), &MainWindow::bulkAddTagDialog);
+    personal(entries, QStringLiteral("Снять тег у выбранных…"), &MainWindow::bulkRemoveTagDialog);
     entries->addSeparator();
 #ifdef Q_OS_WIN
     // Не через mutations_: доступность зависит не только от Ready, но и от выбранной записи
@@ -162,6 +204,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     auto* settings = menuBar()->addMenu(QStringLiteral("&Настройки"));
     auto* openSettings=settings->addAction(QStringLiteral("Настройки…"),this,&MainWindow::showSettings);
     openSettings->setObjectName("openSettings"); openSettings->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
+    action(settings,QStringLiteral("Коллекция агента…"),&MainWindow::showCollection)->setObjectName("openCollection");
 #ifdef Q_OS_WIN
     switchAction_ = action(settings, QString(), &MainWindow::switchUnlockMode);
     {
@@ -187,39 +230,35 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     edit->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
     lock->setIcon(style()->standardIcon(QStyle::SP_VistaShield));
     auto* central = new QWidget(this); auto* layout = new QVBoxLayout(central);
-    // The wide splitter's size hint must not prevent entering the narrow dialog mode.
+    // The full workspace can scroll without imposing its minimum height on the window.
     central->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     layout->setSizeConstraint(QLayout::SetNoConstraint); setMinimumSize(480, 400);
-    layout->setContentsMargins(18, 16, 18, 12); layout->setSpacing(14);
+    layout->setContentsMargins(10, 6, 10, 4); layout->setSpacing(6);
     auto* header = new QWidget(central); header->setObjectName(QStringLiteral("mainHeader"));
-    headerLayout_ = new QBoxLayout(QBoxLayout::LeftToRight, header); headerLayout_->setContentsMargins(0, 0, 0, 0); headerLayout_->setSpacing(14);
-    auto* heading = new QLabel(QStringLiteral("Личное хранилище"), header);
-    auto headingFont = heading->font(); headingFont.setPointSize(headingFont.pointSize() + 5); headingFont.setBold(true); heading->setFont(headingFont);
-    headerLayout_->addWidget(heading, 1);
+    headerLayout_ = new QBoxLayout(QBoxLayout::LeftToRight, header); headerLayout_->setContentsMargins(0, 0, 0, 0); headerLayout_->setSpacing(6);
+    auto headingFont = font(); headingFont.setBold(true);
     auto* controls = new QWidget(central); auto* controlsLayout = new QHBoxLayout(controls);
     controlsLayout->setContentsMargins(0, 0, 0, 0);
+    controlsLayout->setSpacing(6);
     search_ = new QLineEdit(controls); search_->setObjectName(QStringLiteral("vaultSearch")); search_->setAccessibleName(QStringLiteral("Поиск по хранилищу"));
     search_->setPlaceholderText(QStringLiteral("Поиск по названиям, логинам, проектам и заметкам — во всём хранилище"));
     search_->setPlaceholderText(QStringLiteral("Поиск по хранилищу…  Ctrl+K")); search_->setClearButtonEnabled(true);
-    search_->setMinimumWidth(180); headerLayout_->addWidget(search_, 2);
-    // «Новая запись» и представления в одной строке: на узком окне заголовок вертикальный,
-    // и отдельная строка представлений отняла бы высоту у дерева проектов.
+    search_->setMinimumWidth(120); headerLayout_->addWidget(search_, 1);
     auto* entryRow = new QWidget(header); auto* entryRowLayout = new QHBoxLayout(entryRow); entryRowLayout->setContentsMargins(0, 0, 0, 0);
     auto* newEntry = new QToolButton(entryRow); newEntry->setDefaultAction(addEntryAction); newEntry->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     newEntry->setAccessibleName(QStringLiteral("Новая запись")); entryRowLayout->addWidget(newEntry); headerLayout_->addWidget(entryRow);
     layout->addWidget(header);
-    filterLayout_ = controlsLayout;
-    typeFilter_ = new QComboBox(controls); typeFilter_->setObjectName(QStringLiteral("typeFilter"));
+    typeFilter_ = new WorkspaceFilter(controls); typeFilter_->setObjectName(QStringLiteral("typeFilter"));
     typeFilter_->setAccessibleName(QStringLiteral("Фильтр по типу записи"));
     typeFilter_->addItem(QStringLiteral("Все типы"),-1);
     for(int i=0;i<=int(model::EntryType::TextFile);++i) typeFilter_->addItem(entryTypeLabel(model::EntryType(i)),i);
-    sortMode_ = new QComboBox(controls); sortMode_->setObjectName(QStringLiteral("sortMode"));
+    sortMode_ = new WorkspaceFilter(controls); sortMode_->setObjectName(QStringLiteral("sortMode"));
     sortMode_->setAccessibleName(QStringLiteral("Сортировка записей"));
     sortMode_->addItems({QStringLiteral("По названию"), QStringLiteral("По дате изменения")});
-    expiryFilter_ = new QComboBox(controls); expiryFilter_->setObjectName(QStringLiteral("expiryFilter"));
+    expiryFilter_ = new WorkspaceFilter(controls); expiryFilter_->setObjectName(QStringLiteral("expiryFilter"));
     expiryFilter_->setAccessibleName(QStringLiteral("Фильтр по сроку действия"));
     expiryFilter_->addItems({QStringLiteral("Любой срок"), QStringLiteral("Истекают (30 дн.)"), QStringLiteral("Просрочены")});
-    controlsLayout->addWidget(typeFilter_); controlsLayout->addWidget(sortMode_); controlsLayout->addWidget(expiryFilter_);
+    controlsLayout->addWidget(typeFilter_, 1); controlsLayout->addWidget(sortMode_, 1); controlsLayout->addWidget(expiryFilter_, 1);
     tagBar_ = new QWidget(central); tagBar_->setObjectName(QStringLiteral("tagBar"));
     auto* tagLayout = new QHBoxLayout(tagBar_); tagLayout->setContentsMargins(0, 0, 0, 0);
     tagLayout->addStretch(1);
@@ -234,7 +273,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     });
     auto* splitter = new QSplitter(central); splitter_ = splitter;
     splitter->setObjectName(QStringLiteral("mainSplitter")); splitter->setChildrenCollapsible(false);
-    splitter->setHandleWidth(10);
+    splitter->setHandleWidth(6);
     auto* library = new QWidget(splitter); auto* libraryLayout = new QVBoxLayout(library);
     libraryLayout->setContentsMargins(0, 0, 0, 0);
     libraryLayout->addWidget(new QLabel(QStringLiteral("Библиотека"), library));
@@ -267,7 +306,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     viewsLayout->addWidget(savedViews_, 1); viewsLayout->addWidget(viewActions_); entryRowLayout->addWidget(viewsRow, 1);
     connect(savedViews_, &QComboBox::activated, this, [this](int index) { if (index >= 0) applyView(savedViews_->itemText(index)); });
     auto* vaultTree = new VaultTree(library); tree_ = vaultTree; libraryLayout->addWidget(tree_, 1);
-    library->setMinimumWidth(170); tree_->setMinimumWidth(150);
+    library->setMinimumWidth(140); tree_->setMinimumWidth(120);
     auto* newProject = new QToolButton(library); newProject->setDefaultAction(addProjectAction); newProject->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     newProject->setAccessibleName(QStringLiteral("Новый проект")); libraryLayout->addWidget(newProject);
     vaultTree->moveRequest = [this](model::Id node, model::Id target) { return moveNodeTo(node, target); };
@@ -275,27 +314,82 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     vaultTree->setDragDropMode(QAbstractItemView::InternalMove); vaultTree->setDefaultDropAction(Qt::MoveAction);
     vaultTree->setSelectionMode(QAbstractItemView::SingleSelection);
     tree_->setHeaderLabel(QStringLiteral("Проекты и группы")); tree_->setAccessibleName(QStringLiteral("Проекты и группы"));
-    auto* results = new QWidget(splitter); results->setMinimumWidth(260);
-    auto* resultsLayout = new QVBoxLayout(results); resultsLayout->setContentsMargins(0, 0, 0, 0); resultsLayout->setSpacing(10);
-    list_ = new QListWidget(results); list_->setObjectName("entriesList"); list_->setAccessibleName(QStringLiteral("Список записей")); list_->setMinimumWidth(160); list_->setSpacing(4);
+    auto* workspaceScroll = new QScrollArea(splitter);
+    workspaceScroll->setObjectName(QStringLiteral("workspaceScroll"));
+    workspaceScroll->setFrameShape(QFrame::NoFrame);
+    workspaceScroll->setWidgetResizable(true);
+    workspaceScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* workspace = new QWidget(workspaceScroll);
+    workspace->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    auto* workspaceLayout = new QVBoxLayout(workspace);
+    workspaceLayout->setContentsMargins(0, 0, 0, 0);
+    workspaceLayout->setSpacing(4);
+    auto* workspaceSplit = new QSplitter(Qt::Vertical, workspace);
+    workspaceSplit_ = workspaceSplit;
+    workspaceSplit->setObjectName(QStringLiteral("workspaceSplit"));
+    workspaceSplit->setChildrenCollapsible(false);
+    workspaceSplit->setHandleWidth(6);
+    auto* columns = new QWidget(workspaceSplit);
+    columns->setObjectName(QStringLiteral("workspaceLists"));
+    workspaceLists_ = new QBoxLayout(QBoxLayout::LeftToRight, columns);
+    workspaceLists_->setContentsMargins(0, 0, 0, 0);
+    workspaceLists_->setSpacing(6);
+    auto* results = new QWidget(columns);
+    results->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    auto* resultsLayout = new QVBoxLayout(results); resultsLayout->setContentsMargins(0, 0, 0, 0); resultsLayout->setSpacing(4);
+    auto* personalHeading = new QLabel(QStringLiteral("Личное хранилище"), results);
+    personalHeading->setObjectName(QStringLiteral("personalHeading"));
+    resultsLayout->addWidget(personalHeading);
+    list_ = new QListWidget(results); list_->setObjectName("entriesList"); list_->setAccessibleName(QStringLiteral("Список записей")); list_->setSpacing(2);
     list_->setWordWrap(true); list_->setUniformItemSizes(true); list_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    right_ = new QStackedWidget(splitter); right_->setObjectName(QStringLiteral("entryPanel"));
+    right_ = new QStackedWidget(workspaceSplit); right_->setObjectName(QStringLiteral("entryPanel"));
     auto* hint = new QLabel(QStringLiteral("Создайте проект и добавьте запись или выберите существующую запись."), right_);
     emptyHint_ = hint;
     hint->setWordWrap(true); hint->setTextFormat(Qt::PlainText); right_->addWidget(hint);
     cardScroll_ = new QScrollArea(right_); cardScroll_->setWidgetResizable(true); cardScroll_->setFrameShape(QFrame::NoFrame);
     card_ = new EntryCard(app_, cardScroll_); cardScroll_->setWidget(card_); right_->addWidget(cardScroll_);
-    right_->setMinimumWidth(260);
-    splitter->addWidget(library); splitter->addWidget(results); splitter->addWidget(right_); splitter->setSizes({250,350,640});
+    collectionScroll_ = new QScrollArea(right_);
+    collectionScroll_->setWidgetResizable(true);
+    collectionScroll_->setFrameShape(QFrame::NoFrame);
+    collection_ = new CollectionPane(app_, [this](QWidget* parent) {
+        return ensureSchemaUpgradeApproved(parent);
+    }, appliedPreferences_.revealSeconds, clipboard_, collectionScroll_);
+    collectionScroll_->setWidget(collection_);
+    right_->addWidget(collectionScroll_);
+    auto* collectionList = collection_->listWidget();
+    collectionList->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    workspaceLists_->addWidget(results, 1);
+    workspaceLists_->addWidget(collectionList, 1);
+    workspaceSplit->addWidget(columns);
+    workspaceSplit->addWidget(right_);
+    workspaceSplit->setSizes({240, 360});
+    splitter->addWidget(library); splitter->addWidget(workspaceScroll); splitter->setSizes({220, 1000});
+    workspaceHeading_ = new QLabel(workspace);
+    workspaceHeading_->setObjectName(QStringLiteral("workspaceHeading"));
+    workspaceHeading_->setFont(headingFont);
+    workspaceHeading_->setTextFormat(Qt::PlainText);
+    workspaceHeading_->setWordWrap(true);
+    workspaceLayout->addWidget(workspaceHeading_);
     searchScope_ = new QLabel(central); searchScope_->setObjectName(QStringLiteral("searchScope")); searchScope_->setTextFormat(Qt::PlainText);
     listSummary_ = new QLabel(central); listSummary_->setObjectName(QStringLiteral("listSummary")); listSummary_->setTextFormat(Qt::PlainText);
     searchScope_->setWordWrap(true); listSummary_->setWordWrap(true);
-    resultsLayout->addWidget(searchScope_); resultsLayout->addWidget(listSummary_); resultsLayout->addWidget(controls);
-    auto* tagsScroll = new QScrollArea(results); tagsScroll->setWidgetResizable(true); tagsScroll->setFrameShape(QFrame::NoFrame);
+    workspaceLayout->addWidget(searchScope_);
+    workspaceLayout->addWidget(controls);
+    auto* tagsScroll = new QScrollArea(workspace); tagsScroll_ = tagsScroll; tagsScroll->setWidgetResizable(true); tagsScroll->setFrameShape(QFrame::NoFrame);
     tagsScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff); tagsScroll->setFixedHeight(44); tagsScroll->setWidget(tagBar_);
     resultsTabs_=new QTabWidget(results); resultsTabs_->setObjectName("resultsTabs");
     registry_=new RegistryView(app_,resultsTabs_); resultsTabs_->addTab(list_,QStringLiteral("Список")); resultsTabs_->addTab(registry_,QStringLiteral("Реестр"));
-    resultsLayout->addWidget(tagsScroll); resultsLayout->addWidget(resultsTabs_, 1);
+    workspaceLayout->addWidget(tagsScroll);
+    workspaceLayout->addWidget(workspaceSplit, 1);
+    resultsLayout->addWidget(resultsTabs_, 1);
+    resultsLayout->addWidget(listSummary_);
+    columns->installEventFilter(this);
+    updateWorkspaceLayout();
+    workspaceScroll->setWidget(workspace);
+    connect(collection_, &CollectionPane::accessRequested, this, &MainWindow::showCollection);
+    connect(collection_, &CollectionPane::selectionActivated, this, [this] { setCollectionActive(true); });
+    connect(collection_, &CollectionPane::projectsChanged, this, &MainWindow::refreshAll);
+    connect(collection_, &CollectionPane::vaultChanged, this, &MainWindow::refreshAll);
     connect(resultsTabs_, &QTabWidget::currentChanged, this, [this] {
         if (resultsTabs_->currentWidget() == registry_) {
             if (const auto* item = list_->currentItem())
@@ -308,18 +402,22 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
                     break;
                 }
         }
-        showMetadata();
+        updateWorkspaceLayout();
+        activatePersonal();
     });
     connect(registry_, &RegistryView::currentEntryChanged, this, [this] {
-        if (resultsTabs_->currentWidget() == registry_) showMetadata();
+        if (resultsTabs_->currentWidget() != registry_) return;
+        if (auto* focus = QApplication::focusWidget(); focus && registry_->isAncestorOf(focus)) activatePersonal();
+        else showMetadata();
     });
-    connect(registry_, &RegistryView::entryActivated, this, &MainWindow::openCardDialog);
+    connect(registry_, &RegistryView::entryActivated, this, [this] { activatePersonal(); });
     connect(registry_, &RegistryView::copyRequested, this, [this](model::Id id) {
         if (ready() && selectedEntry() == id) { showMetadata(); card_->copySecret(); }
     });
-    connect(registry_,&RegistryView::sourceRequested,this,&MainWindow::openDocument);
+    connect(registry_, &RegistryView::sourceRequested, this, [this](model::Id id) {
+        if (!collectionActive_) openDocument(id);
+    });
     layout->addWidget(splitter, 1);
-    for (auto* combo : {typeFilter_, sortMode_, expiryFilter_}) { combo->setMinimumContentsLength(7); combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); }
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, &MainWindow::treeMenu);
     list_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -332,10 +430,11 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(deleteEntry, &QShortcut::activated, this, &MainWindow::deleteSelected);
     auto* deleteNode = new QShortcut(QKeySequence::Delete, tree_); deleteNode->setContext(Qt::WidgetWithChildrenShortcut);
     connect(deleteNode, &QShortcut::activated, this, &MainWindow::deleteSelectedNode);
-    error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_);
+    error_ = new QLabel(central); error_->setObjectName(QStringLiteral("operationError")); error_->setTextFormat(Qt::PlainText); error_->setWordWrap(true); layout->addWidget(error_); error_->hide();
     setCentralWidget(central);
     auto* statuses = new QWidget(central); auto* statusLayout = new QGridLayout(statuses);
     statusLayout->setContentsMargins(6, 2, 6, 2);
+    statusLayout->setVerticalSpacing(0);
     vaultInfo_ = new QLabel(statuses); vaultInfo_->setObjectName(QStringLiteral("vaultState"));
     idleStatus_ = new QLabel(statuses); idleStatus_->setObjectName(QStringLiteral("idleStatus"));
     clipboardStatus_ = new QLabel(statuses); clipboardStatus_->setObjectName(QStringLiteral("clipboardStatus"));
@@ -349,13 +448,26 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     layout->addWidget(statuses);
     auto* statusTimer = new QTimer(this); statusTimer->setObjectName(QStringLiteral("statusRefreshTimer")); statusTimer->setInterval(1000);
     connect(statusTimer, &QTimer::timeout, this, &MainWindow::refreshStatus); statusTimer->start();
-    connect(tree_, &QTreeWidget::currentItemChanged, this, [this] { if (tree_->currentItem()) setLibraryView(LibraryView::Group); });
-    connect(search_, &QLineEdit::textChanged, this, [this] { refillList(); });
-    connect(list_, &QListWidget::currentItemChanged, this, &MainWindow::showMetadata);
+    connect(tree_, &QTreeWidget::currentItemChanged, this, &MainWindow::selectLibraryTreeItem);
+    connect(search_, &QLineEdit::textChanged, this, [this](const QString& text) {
+        const QString requested = text;
+        const auto apply = [this, requested] {
+            const QSignalBlocker block(search_);
+            acceptedSearch_ = requested;
+            if (search_->text() != requested) search_->setText(requested);
+            refillList();
+            updateCollectionContext();
+        };
+        if (collectionActive_ && ready()) {
+            { const QSignalBlocker block(search_); search_->setText(acceptedSearch_); }
+            collection_->confirmNavigation(apply);
+        } else apply();
+    });
+    connect(list_, &QListWidget::currentItemChanged, this, [this] { activatePersonal(); });
     connect(list_, &QListWidget::itemSelectionChanged, this, &MainWindow::showMetadata);
-    connect(list_, &QListWidget::itemDoubleClicked, this, [this] { if (!narrow_) editSelected(); });
-    connect(list_, &QListWidget::itemClicked, this, &MainWindow::openCardDialog);
-    connect(list_, &QListWidget::itemActivated, this, &MainWindow::openCardDialog);
+    connect(list_, &QListWidget::itemDoubleClicked, this, [this] { if (!collectionActive_) editSelected(); });
+    connect(list_, &QListWidget::itemClicked, this, [this] { activatePersonal(); });
+    connect(list_, &QListWidget::itemActivated, this, [this] { activatePersonal(); });
     connect(card_, &EntryCard::editRequested, this, &MainWindow::editSelected);
     connect(card_,&EntryCard::documentRequested,this,&MainWindow::openDocument);
     connect(card_,&EntryCard::sourceRequested,this,&MainWindow::openDocument);
@@ -365,7 +477,7 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
         showEntryMenu(more->mapToGlobal(QPoint(0, more->height())));
     });
     connect(card_, &EntryCard::copyRequested, this, [this](const QString& text) {
-        if (!ready()) return; QString error;
+        if (!ready() || collectionActive_) return; QString error;
         if (!clipboard_.copySecret(text, &error)) { if (app_.gate() == Application::Gate::Ready) report(error); }
         else {
             statusBar()->showMessage(QStringLiteral("Скопировано. Очистка буфера через %1 секунд.").arg(clipboard_.clearSeconds()), 5000);
@@ -375,13 +487,18 @@ MainWindow::MainWindow(Application& app, QWidget* parent, QSettings* uiPreferenc
     connect(&clipboard_, &ClipboardGuard::cleared, this, [this] { emit notifyRequested(QStringLiteral("Буфер обмена очищен")); });
     connect(&app_, &Application::busyChanged, this, [this](bool busy) { updateEnabled(); refreshStatus(); statusBar()->showMessage(busy ? QStringLiteral("Выполняется операция…") : QString()); });
     connect(&app_, &Application::stateChanged, this, [this] {
+        if (collectionAccess_ && (app_.gate() != Application::Gate::Ready || *collectionAccess_ != app_.generation())) {
+            collectionAccess_.reset();
+            collection_->clearSession();
+            setCollectionActive(false);
+        }
         if (app_.gate() != Application::Gate::Ready) {
             clipboard_.clearIfOurs(); card_->clear();
             for (auto* dialog : findChildren<QDialog*>()) {
                 if (auto* editDialog = qobject_cast<EntryEditDialog*>(dialog)) editDialog->clearSecrets();
                 dialog->reject();
             }
-            search_->setText({}); error_->clear(); saveUiState(); hide();
+            search_->setText({}); report({}); saveUiState(); hide();
         }
         refreshAll();
     });
@@ -444,6 +561,12 @@ void MainWindow::showSettings() {
         switchUnlockMode(); if(ready()) dialog.setUnlockMode(app_.mode(),helloAvailable_);
     });
     connect(&dialog,&SettingsDialog::restoreBackupRequested,this,&MainWindow::restoreBackup);
+    bool openCollection = false;
+    connect(&dialog,&SettingsDialog::manageCollectionRequested,this,[&] {
+        if (!dialog.isVisible() || dialog.draft() != appliedPreferences_) return;
+        openCollection = true;
+        dialog.reject();
+    });
     connect(&dialog,&SettingsDialog::issueCollectionTokenRequested,this,[&] {changeCollectionToken(dialog,false);});
     connect(&dialog,&SettingsDialog::revokeCollectionTokenRequested,this,[&] {changeCollectionToken(dialog,true);});
 #ifdef Q_OS_WIN
@@ -452,6 +575,33 @@ void MainWindow::showSettings() {
     connect(&dialog,&SettingsDialog::clearEnvironmentRequested,this,&MainWindow::removeExportedVariables);
 #endif
     dialog.exec();
+    if (openCollection) QTimer::singleShot(0, this, &MainWindow::showCollection);
+}
+void MainWindow::showCollection() {
+    if(!ready() || restoring_) return;
+    const auto generation = app_.generation();
+    if (collectionAccess_ == generation) {
+        setCollectionActive(true);
+        collection_->focusList();
+        return;
+    }
+    const QPointer<MainWindow> self(this);
+    card_->hideNowForTest();
+    bool verified = false;
+    {
+#ifdef Q_OS_WIN
+        const bool suspended = hotkey_->suspended();
+        hotkey_->setSuspended(true);
+        const auto resume = qScopeGuard([&] { if(self) self->hotkey_->setSuspended(suspended); });
+#endif
+        verified = VerifyDialog::verify(app_, this, QStringLiteral("Коллекция агента"));
+    }
+    if (!verified || !self || !ready() || restoring_ || app_.generation() != generation) return;
+    collectionAccess_ = generation;
+    updateCollectionContext();
+    setCollectionActive(true);
+    collection_->authorize(generation);
+    collection_->focusList();
 }
 void MainWindow::changeCollectionToken(SettingsDialog& settings,bool revoke) {
     const QPointer<MainWindow> self(this);
@@ -600,7 +750,10 @@ prefs::ApplyResult MainWindow::applyPreferences(const prefs::Values& requested) 
     })) return result;
     if(!persist("trayNotifications",requested.notifications,appliedPreferences_.notifications,requested.notifications,[] {})) return result;
     if(!persist("idleTimeoutMinutes",requested.idleMinutes,appliedPreferences_.idleMinutes,requested.idleMinutes,[&] {emit idleTimeoutChanged(requested.idleMinutes);})) return result;
-    if(!persist("secretRevealSeconds",requested.revealSeconds,appliedPreferences_.revealSeconds,requested.revealSeconds,[&] {card_->setRevealSeconds(requested.revealSeconds);})) return result;
+    if(!persist("secretRevealSeconds",requested.revealSeconds,appliedPreferences_.revealSeconds,requested.revealSeconds,[&] {
+        card_->setRevealSeconds(requested.revealSeconds);
+        collection_->setRevealSeconds(requested.revealSeconds);
+    })) return result;
     if(!persist("clipboardClearSeconds",requested.clipboardSeconds,appliedPreferences_.clipboardSeconds,requested.clipboardSeconds,[&] {clipboard_.setClearSeconds(requested.clipboardSeconds);})) return result;
 #ifdef Q_OS_WIN
     if(!persist("quickPasteDefaultField",requested.defaultField,appliedPreferences_.defaultField,
@@ -676,14 +829,20 @@ void MainWindow::restoreUiState() {
     const auto geometry = preferences_->value(QStringLiteral("ui/mainGeometry")).toByteArray();
     if (!geometry.isEmpty()) restoreGeometry(geometry);
     const auto area = screen()->availableGeometry().adjusted(8, 32, -8, -8);
-    const auto state = preferences_->value(QStringLiteral("ui/mainSplitter")).toByteArray();
-    if (state.isEmpty() || !splitter_->restoreState(state)) splitter_->setSizes({250,350,640});
+    const auto state = preferences_->value(QStringLiteral("ui/workspaceSidebar")).toByteArray();
+    if (state.isEmpty() || !splitter_->restoreState(state)) splitter_->setSizes({220,1000});
+    const auto workspaceState = preferences_->value(QStringLiteral("ui/workspaceDetails")).toByteArray();
+    if (!workspaceState.isEmpty()) workspaceSplit_->restoreState(workspaceState);
+    const auto registryState=preferences_->value(QStringLiteral("ui/registryHeader")).toByteArray();
+    if (!registryState.isEmpty()) registry_->header()->restoreState(registryState);
     resize(size().boundedTo(area.size()));
     move(qBound(area.left(), x(), area.right() - width() + 1), qBound(area.top(), y(), area.bottom() - height() + 1));
 }
 void MainWindow::saveUiState() {
     preferences_->setValue(QStringLiteral("ui/mainGeometry"), saveGeometry());
-    preferences_->setValue(QStringLiteral("ui/mainSplitter"), splitter_->saveState());
+    preferences_->setValue(QStringLiteral("ui/workspaceSidebar"), splitter_->saveState());
+    preferences_->setValue(QStringLiteral("ui/workspaceDetails"), workspaceSplit_->saveState());
+    preferences_->setValue(QStringLiteral("ui/registryHeader"), registry_->header()->saveState());
     preferences_->sync();
     if (preferences_->status() != QSettings::NoError && !geometryErrorReported_) {
         geometryErrorReported_ = true;
@@ -694,12 +853,14 @@ void MainWindow::saveUiState() {
 bool MainWindow::ready() const { return app_.gate() == Application::Gate::Ready && !app_.busy(); }
 void MainWindow::updateEnabled() {
     centralWidget()->setEnabled(ready()); for (auto* action : mutations_) action->setEnabled(ready());
+    for (auto* action : personalActions_) action->setEnabled(ready() && !collectionActive_ && libraryView_ != LibraryView::CollectionProject);
 #ifdef Q_OS_WIN
     if (envExportAction_) envExportAction_->setEnabled(canExportEnv());
 #endif
 }
 model::Id MainWindow::selectedNode() const { const auto* item = tree_->currentItem(); return item ? item->data(0, Qt::UserRole).value<model::Id>() : model::Id{}; }
 model::Id MainWindow::selectedEntry() const {
+    if (collectionActive_ || libraryView_ == LibraryView::CollectionProject) return {};
     if (resultsTabs_->currentWidget() == registry_) return registry_->currentEntry();
     const auto* item = list_->currentItem();
     return item ? item->data(Qt::UserRole).value<model::Id>() : model::Id{};
@@ -719,13 +880,107 @@ QString MainWindow::groupPath(model::Id id) const {
     return parts.join(QStringLiteral(" / "));
 }
 void MainWindow::setLibraryView(LibraryView view) {
-    libraryView_ = view;
-    if (view != LibraryView::Group) { QSignalBlocker block(tree_); tree_->setCurrentItem(nullptr); tree_->clearSelection(); }
-    libraryAll_->setChecked(view == LibraryView::All);
-    libraryFavorites_->setChecked(view == LibraryView::Favorites);
-    libraryExpiring_->setChecked(view == LibraryView::Expiring);
-    { QSignalBlocker block(expiryFilter_); expiryFilter_->setCurrentIndex(view == LibraryView::Expiring ? 1 : 0); }
-    refillList();
+    updateLibraryCounts();
+    collection_->confirmNavigation([this, view] {
+        libraryView_ = view;
+        collectionProject_.clear();
+        { const QSignalBlocker block(tree_); tree_->setCurrentItem(nullptr); tree_->clearSelection(); }
+        { const QSignalBlocker block(expiryFilter_); expiryFilter_->setCurrentIndex(view == LibraryView::Expiring ? 1 : 0); }
+        setCollectionActive(false);
+        updateLibraryCounts();
+        updateCollectionContext();
+        refillList();
+    });
+}
+void MainWindow::selectLibraryTreeItem(QTreeWidgetItem* item, QTreeWidgetItem* previous) {
+    if (!item || !ready()) return;
+    const bool agentProject = isCollectionProject(item);
+    const auto project = item->data(0, CollectionProjectRole).toString();
+    const auto id = item->data(0, Qt::UserRole).value<model::Id>();
+    {
+        const QSignalBlocker block(tree_);
+        tree_->setCurrentItem(previous);
+        if (!previous) tree_->clearSelection();
+    }
+    collection_->confirmNavigation([this, agentProject, project, id] {
+        for (QTreeWidgetItemIterator it(tree_); *it; ++it) {
+            const auto* candidate = *it;
+            const bool match = agentProject
+                ? isCollectionProject(candidate) && candidate->data(0, CollectionProjectRole).toString() == project
+                : !isCollectionProject(candidate) && candidate->data(0, Qt::UserRole).value<model::Id>() == id;
+            if (!match) continue;
+            {
+                const QSignalBlocker block(tree_);
+                tree_->setCurrentItem(*it);
+                tree_->scrollToItem(*it);
+            }
+            libraryView_ = agentProject ? LibraryView::CollectionProject : LibraryView::Group;
+            collectionProject_ = project;
+            { const QSignalBlocker block(expiryFilter_); expiryFilter_->setCurrentIndex(0); }
+            collection_->deactivate();
+            setCollectionActive(agentProject);
+            updateLibraryCounts();
+            updateCollectionContext();
+            refillList();
+            return;
+        }
+    });
+}
+void MainWindow::updateCollectionContext() {
+    std::optional<QString> project;
+    bool showEntries = true;
+    QString heading = QStringLiteral("Библиотека");
+    const auto node = selectedNode();
+    if (libraryView_ == LibraryView::CollectionProject) {
+        project = collectionProject_;
+        heading = collectionProjectLabel(collectionProject_);
+    } else if (libraryView_ == LibraryView::Group) {
+        const auto& nodes = app_.model()->nodes();
+        auto id = node;
+        for (int depth = 0; !id.isNull() && depth < model::VaultModel::MaxDepth; ++depth) {
+            const auto found = nodes.constFind(id);
+            if (found == nodes.cend()) break;
+            if (found->parent.isNull()) project = found->name;
+            id = found->parent;
+        }
+        if (project) {
+            const auto roots = std::count_if(nodes.cbegin(), nodes.cend(), [&project](const auto& candidate) {
+                return candidate.parent.isNull() && candidate.name == *project;
+            });
+            showEntries = roots == 1;
+        }
+        heading = groupPath(node);
+    } else if (libraryView_ == LibraryView::Favorites) heading = QStringLiteral("Избранное");
+    else if (libraryView_ == LibraryView::Expiring) heading = QStringLiteral("Истекают");
+    workspaceHeading_->setText(heading);
+    collection_->setContext(project, node, search_->text(), showEntries);
+}
+void MainWindow::setCollectionActive(bool active) {
+    if (collectionActive_ != active) {
+        collectionActive_ = active;
+        tree_->setDragEnabled(!active);
+        tree_->setAcceptDrops(!active);
+        for (const auto* name : {"registryCopy", "registrySource"})
+            if (auto* button = registry_->findChild<QPushButton*>(QString::fromLatin1(name)))
+                button->setVisible(!active);
+        if (active) {
+            const QSignalBlocker block(list_);
+            list_->clearSelection();
+            displayedEntry_ = {};
+            card_->clear();
+        }
+        else collection_->deactivate();
+#ifdef Q_OS_WIN
+        if (hotkey_) hotkey_->setSuspended(active);
+#endif
+        updateEnabled();
+    }
+    showMetadata();
+}
+void MainWindow::activatePersonal() {
+    if (!collectionActive_) { showMetadata(); return; }
+    if (libraryView_ == LibraryView::CollectionProject) return;
+    collection_->confirmNavigation([this] { setCollectionActive(false); });
 }
 void MainWindow::updateLibraryCounts() {
     int all = 0, favorites = 0, expiring = 0;
@@ -746,6 +1001,7 @@ void MainWindow::updateLibraryCounts() {
     libraryExpiring_->setChecked(libraryView_ == LibraryView::Expiring);
 }
 QList<model::Id> MainWindow::selectedEntries() const {
+    if (collectionActive_ || libraryView_ == LibraryView::CollectionProject) return {};
     if (resultsTabs_->currentWidget() == registry_) {
         const auto id = registry_->currentEntry();
         return id.isNull() ? QList<model::Id>{} : QList<model::Id>{id};
@@ -800,7 +1056,7 @@ bool MainWindow::bulkDelete() {
     return bulkApply(ids, generation, [](model::VaultModel& m, model::Id id) { return m.removeEntry(id); });
 }
 bool MainWindow::selectionStill(const QList<model::Id>& ids, quint64 generation) {
-    if (!ready() || app_.generation() != generation) return false;
+    if (!ready() || collectionActive_ || app_.generation() != generation) return false;
     for (auto id : ids) if (!app_.model()->entry(id)) { report(QStringLiteral("Выбранные записи изменились. Повторите действие.")); return false; }
     return true;
 }
@@ -884,12 +1140,16 @@ bool MainWindow::changeViews(const std::function<QString(QList<model::SavedView>
     return commit([&](model::VaultModel& m) { auto views = m.views(); const auto error = change(views); return error.isEmpty() ? m.setViews(views) : error; });
 }
 bool MainWindow::saveCurrentView(const QString& name) {
-    if (!ready()) return false;
+    if (!ready() || libraryView_ == LibraryView::CollectionProject) return false;
     const auto view = captureView(name);
     return changeViews([&](QList<model::SavedView>& views) { views << view; return QString(); });
 }
 bool MainWindow::applyView(const QString& name) {
     if (!ready()) return false;
+    if (collectionActive_) {
+        collection_->confirmNavigation([this, name] { setCollectionActive(false); applyView(name); });
+        return true;
+    }
     const auto& views = app_.model()->views();
     const auto it = std::find_if(views.cbegin(), views.cend(), [&](const auto& v) { return v.name.compare(name, Qt::CaseInsensitive) == 0; });
     if (it == views.cend()) return false;
@@ -899,7 +1159,7 @@ bool MainWindow::applyView(const QString& name) {
     {
         QSignalBlocker b1(typeFilter_), b2(expiryFilter_), b3(sortMode_), b4(search_), b5(tree_);
         typeFilter_->setCurrentIndex(qMax(0, typeFilter_->findData(v.type)));
-        sortMode_->setCurrentIndex(v.sort); search_->setText(v.search);
+        sortMode_->setCurrentIndex(v.sort); search_->setText(v.search); acceptedSearch_ = v.search;
         if (groupItem) { libraryView_ = LibraryView::Group; tree_->setCurrentItem(groupItem); }
         else {
             libraryView_ = v.library == 1 ? LibraryView::Favorites : v.library == 2 ? LibraryView::Expiring : LibraryView::All;
@@ -911,7 +1171,7 @@ bool MainWindow::applyView(const QString& name) {
         for (const auto& tag : v.tags)
             if (std::any_of(tags.cbegin(), tags.cend(), [&](const QString& t) { return t.compare(tag, Qt::CaseInsensitive) == 0; })) selectedTags_ << tag;
     }
-    refillTagBar(); updateLibraryCounts(); refillList();
+    refillTagBar(); updateLibraryCounts(); updateCollectionContext(); refillList();
     if (!v.group.isNull() && !groupItem) statusBar()->showMessage(QStringLiteral("Группа представления удалена — фильтр группы снят."), 5000);
     return true;
 }
@@ -949,22 +1209,47 @@ void MainWindow::refreshAll() {
     QSignalBlocker block(tree_); tree_->clear();
     if (app_.gate() == Application::Gate::Ready) {
         QTreeWidgetItem* selection = nullptr;
+        QHash<QString, QList<QTreeWidgetItem*>> rootsByName;
         const std::function<void(model::Id,QTreeWidgetItem*)> add = [&](model::Id parent, QTreeWidgetItem* item) {
             for (auto id : app_.model()->childNodes(parent)) {
-                auto* child = new QTreeWidgetItem(QStringList{app_.model()->nodes().value(id).name});
+                const auto name = app_.model()->nodes().value(id).name;
+                auto* child = new QTreeWidgetItem(QStringList{name});
                 child->setData(0, Qt::UserRole, id); (item ? item : tree_->invisibleRootItem())->addChild(child);
+                if (!item) rootsByName[name].append(child);
                 if (id == node) selection = child; add(id, child);
             }
         };
-        add({}, nullptr); tree_->expandToDepth(0);
-        if (selection && libraryView_ == LibraryView::Group) tree_->setCurrentItem(selection);
-        else if (libraryView_ == LibraryView::Group) libraryView_ = LibraryView::All;
+        add({}, nullptr);
+        if (collectionAccess_ == app_.generation()) {
+            for (const auto& project : collection_->projects()) {
+                const auto matching = rootsByName.value(project);
+                QTreeWidgetItem* item = nullptr;
+                if (!project.isEmpty() && matching.size() == 1) item = matching.first();
+                else {
+                    item = new QTreeWidgetItem(tree_, {collectionProjectLabel(project)});
+                    item->setData(0, CollectionProjectRole, project);
+                    item->setData(0, Qt::AccessibleDescriptionRole, QStringLiteral("Проект коллекции агента"));
+                    item->setToolTip(0, QStringLiteral("Проект коллекции агента"));
+                    item->setIcon(0, style()->standardIcon(QStyle::SP_DriveNetIcon));
+                    item->setFlags(item->flags() & ~(Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled));
+                }
+                if (libraryView_ == LibraryView::CollectionProject && collectionProject_ == project) {
+                    selection = item;
+                    if (!isCollectionProject(item)) libraryView_ = LibraryView::Group;
+                }
+            }
+        }
+        tree_->expandToDepth(0);
+        if (selection && (libraryView_ == LibraryView::Group || libraryView_ == LibraryView::CollectionProject))
+            tree_->setCurrentItem(selection);
+        else if (libraryView_ == LibraryView::Group || libraryView_ == LibraryView::CollectionProject)
+            libraryView_ = LibraryView::All;
     }
     // Порядок важен: refillTagBar сначала обрезает «мёртвые» выбранные теги (после
     // переименования/удаления выбранного чипа) и лишь затем refillList рисует список —
     // иначе список фильтруется по устаревшему набору уже несуществующим тегом.
     displayedEntry_ = {}; // Explicit model refresh may change metadata of the same UUID.
-    refillTagBar(); updateLibraryCounts(); refillViews();
+    refillTagBar(); updateLibraryCounts(); refillViews(); updateCollectionContext();
     refillList(entry); updateEnabled(); updateSwitchActionText();
     if (app_.gate() == Application::Gate::Ready) {
         const auto mode = app_.mode() == Application::Mode::Hello ? QStringLiteral("Windows Hello") : QStringLiteral("мастер-пароль");
@@ -979,7 +1264,8 @@ void MainWindow::refillList(model::Id selected) {
     int baseCount = 0;
     if (app_.gate() == Application::Gate::Ready) {
         const auto today = QDate::currentDate();
-        auto ids = !search_->text().isEmpty() ? app_.model()->search(search_->text())
+        auto ids = libraryView_ == LibraryView::CollectionProject ? QList<model::Id>{}
+            : !search_->text().isEmpty() ? app_.model()->search(search_->text())
             : libraryView_ == LibraryView::Group ? app_.model()->entriesInGroup(selectedNode()) : app_.model()->entries().keys();
         if (libraryView_ == LibraryView::Favorites)
             ids.erase(std::remove_if(ids.begin(), ids.end(), [this](model::Id id) { return !app_.model()->entry(id)->favorite; }), ids.end());
@@ -1040,9 +1326,12 @@ void MainWindow::refillList(model::Id selected) {
         }
         if (!list_->currentItem() && list_->count()) list_->setCurrentRow(0);
         if (list_->currentItem()) registry_->selectEntry(list_->currentItem()->data(Qt::UserRole).value<model::Id>());
+        if (collectionActive_) list_->clearSelection();
     }
-    searchScope_->setText(!search_->text().isEmpty() ? QStringLiteral("Поиск по всему хранилищу")
+    searchScope_->setText(libraryView_ == LibraryView::CollectionProject ? QStringLiteral("Проект коллекции агента")
+        : !search_->text().isEmpty() ? QStringLiteral("Поиск по всему хранилищу")
         : libraryView_ == LibraryView::Group ? groupPath(selectedNode()) : QStringLiteral("Библиотека"));
+    searchScope_->setVisible(!search_->text().isEmpty());
     listSummary_->setText(QStringLiteral("Показано %1 из %2").arg(list_->count()).arg(baseCount));
     if (!list_->count()) {
         const auto message = app_.model()->nodes().isEmpty() ? QStringLiteral("Создайте проект кнопкой «Новый проект», затем добавьте запись.")
@@ -1058,6 +1347,7 @@ void MainWindow::refillList(model::Id selected) {
 void MainWindow::refillTagBar() {
     QHash<QString, int> uses;
     const auto tags = app_.gate() == Application::Gate::Ready ? app_.model()->allTags(&uses) : QStringList();
+    tagsScroll_->setVisible(!tags.isEmpty());
     // Обрезка «мёртвых» выбранных тегов: после переименования/удаления или блокировки
     // тега может уже не быть — выбор не должен фильтровать список несуществующим тегом.
     QStringList alive;
@@ -1112,6 +1402,13 @@ void MainWindow::removeTag(const QString& tag) {
     commit([&](auto& model) { return model.removeTag(tag); });
 }
 void MainWindow::showMetadata() {
+    if (collectionActive_ && app_.gate() == Application::Gate::Ready) {
+        right_->setCurrentWidget(collectionScroll_);
+#ifdef Q_OS_WIN
+        if (envExportAction_) envExportAction_->setEnabled(false);
+#endif
+        return;
+    }
     if (const int selected = int(selectedEntries().size()); selected > 1 && app_.gate() == Application::Gate::Ready) {
         right_->setCurrentIndex(1); displayedEntry_ = {}; card_->showSelection(selected);
 #ifdef Q_OS_WIN
@@ -1126,25 +1423,21 @@ void MainWindow::showMetadata() {
     if (envExportAction_) envExportAction_->setEnabled(canExportEnv()); // доступность зависит от выбора
 #endif
 }
-void MainWindow::openCardDialog() {
-    if (!narrow_ || !ready() || cardOpen_ || selectedEntry().isNull()) return;
-    QScopedValueRollback guard(cardOpen_, true); QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("TokenBucket — запись"));
-    auto* layout = new QVBoxLayout(&dialog); auto* scroll = new QScrollArea(&dialog); scroll->setWidgetResizable(true);
-    cardScroll_->takeWidget(); scroll->setWidget(card_); layout->addWidget(scroll);
-    auto restore = qScopeGuard([&] { card_->hideNowForTest(); scroll->takeWidget(); cardScroll_->setWidget(card_); });
-    const auto available = screen()->availableGeometry(); dialog.resize(qMin(520, available.width() - 40), qMin(560, available.height() - 80)); dialog.exec();
+void MainWindow::report(const QString& error) {
+    error_->setText(error);
+    error_->setVisible(!error.isEmpty());
+    if (!error.isEmpty()) statusBar()->showMessage(QStringLiteral("Операция не выполнена."));
 }
-void MainWindow::report(const QString& error) { error_->setText(error); statusBar()->showMessage(QStringLiteral("Операция не выполнена.")); }
-bool MainWindow::ensureSchemaUpgradeApproved() {
+bool MainWindow::ensureSchemaUpgradeApproved(QWidget* parent) {
     if(!ready()) return false;
     if(!app_.schemaUpgradeRequired() || app_.schemaUpgradeApproved()) return true;
     const auto generation=app_.generation(); const auto before=*app_.model();
 #ifdef Q_OS_WIN
     const auto suspended=hotkey_->suspended(); hotkey_->setSuspended(true); const auto resume=qScopeGuard([&] {hotkey_->setSuspended(suspended);});
 #endif
-    QMessageBox box(QMessageBox::Warning,QStringLiteral("Обновление формата"),QStringLiteral("Данные будут сохранены в формате v%1. Прежняя версия программы не откроет новый формат. Перед записью будет создана уникальная проверенная зашифрованная копия прежнего файла в каталоге хранилища. Продолжить?").arg(model::VaultModel::CurrentVersion),QMessageBox::Yes|QMessageBox::No,this);
+    QMessageBox box(QMessageBox::Warning,QStringLiteral("Обновление формата"),QStringLiteral("Данные будут сохранены в формате v%1. Прежняя версия программы не откроет новый формат. Перед записью будет создана уникальная проверенная зашифрованная копия прежнего файла в каталоге хранилища. Продолжить?").arg(model::VaultModel::CurrentVersion),QMessageBox::Yes|QMessageBox::No,parent?parent:this);
     box.setObjectName("schemaUpgradeConfirmation"); box.setTextFormat(Qt::PlainText); box.setDefaultButton(QMessageBox::No); box.setEscapeButton(QMessageBox::No);
-    if(box.exec()!=QMessageBox::Yes) {error_->clear(); return false;}
+    if(box.exec()!=QMessageBox::Yes) {report({}); return false;}
     if(!ready() || generation!=app_.generation() || before!=*app_.model()) {if(ready()) report(QStringLiteral("Данные изменились. Повторите действие.")); return false;}
     QString error; if(!app_.approveSchemaUpgrade(&error)) {report(error); return false;} return true;
 }
@@ -1167,7 +1460,7 @@ bool MainWindow::commit(const std::function<QString(model::VaultModel&)>& mutati
         if (app_.gate() == Application::Gate::Ready) report(saveError); else if(!saveError.isEmpty()) emit notifyRequested(saveError);
         return false;
     }
-    error_->clear(); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
+    report({}); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
 }
 bool MainWindow::commitEntry(const std::function<QString(model::VaultModel&)>& mutation, model::Id entryId) {
 #ifdef Q_OS_WIN
@@ -1196,7 +1489,7 @@ bool MainWindow::commitEntry(const std::function<QString(model::VaultModel&)>& m
         if (app_.gate() == Application::Gate::Ready) report(saveError); else if(!saveError.isEmpty()) emit notifyRequested(saveError);
         return false;
     }
-    error_->clear(); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
+    report({}); refreshAll(); statusBar()->showMessage(QStringLiteral("Сохранено"), 3000); return true;
 }
 void MainWindow::rollbackEntry(model::Id entryId, const std::optional<model::Entry>& backup) {
     // Была запись — вернуть как была; новой записи не было — удалить черновик мутации.
@@ -1210,14 +1503,16 @@ void MainWindow::addProject() {
     if (ok && ready() && app_.generation() == generation && commit([&](auto& model) { return model.addNode(id, {}, name); })) selectNode(id);
 }
 void MainWindow::addGroup() {
-    if (!ready() || editing_) return; const auto parent = selectedNode(); if (parent.isNull()) { report(QStringLiteral("Сначала выберите проект или группу.")); return; }
+    if (!ready() || editing_ || collectionActive_) return; const auto parent = selectedNode(); if (parent.isNull()) { report(QStringLiteral("Сначала выберите проект или группу.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation(); bool ok = false;
     const auto name = QInputDialog::getText(this, QStringLiteral("Новая группа"), QStringLiteral("Имя группы:"), QLineEdit::Normal, {}, &ok);
     const auto id = QUuid::createUuid();
-    if (ok && ready() && app_.generation() == generation && commit([&](auto& model) { return model.addNode(id, parent, name); })) selectNode(id);
+    if (ok && ready() && !collectionActive_ && app_.generation() == generation && selectedNode() == parent
+        && commit([&](auto& model) { return model.addNode(id, parent, name); })) selectNode(id);
 }
 void MainWindow::addEntry() {
-    if (!ready() || editing_) return; const auto parent = selectedNode();
+    if (!ready() || editing_ || collectionActive_ || libraryView_ == LibraryView::CollectionProject) return;
+    const auto parent = selectedNode();
     if (app_.model()->nodes().isEmpty()) { report(QStringLiteral("Создайте проект кнопкой «Новый проект».")); return; }
     QScopedValueRollback guard(editing_, true);
 #ifdef Q_OS_WIN
@@ -1249,22 +1544,26 @@ void MainWindow::editSelected() {
     }
 }
 void MainWindow::renameSelectedNode() {
-    if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) { report(QStringLiteral("Выберите проект или группу.")); return; }
+    if (!ready() || editing_ || collectionActive_) return; const auto id = selectedNode(); if (id.isNull()) { report(QStringLiteral("Выберите проект или группу.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation(); bool ok = false;
     const auto name = QInputDialog::getText(this, QStringLiteral("Переименование"), QStringLiteral("Новое имя:"), QLineEdit::Normal, app_.model()->nodes().value(id).name, &ok);
-    if (ok && ready() && app_.generation() == generation) commit([&](auto& model) { return model.renameNode(id, name); });
+    if (ok && ready() && !collectionActive_ && app_.generation() == generation && selectedNode() == id)
+        commit([&](auto& model) { return model.renameNode(id, name); });
 }
 void MainWindow::moveSelectedNode() {
-    if (!ready() || editing_) return; const auto id = selectedNode();
+    if (!ready() || editing_ || collectionActive_) return; const auto id = selectedNode();
     if (id.isNull() || app_.model()->nodes().value(id).parent.isNull()) { report(QStringLiteral("Выберите группу для переноса.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     QDialog dialog(this); dialog.setWindowTitle(QStringLiteral("Перемещение группы")); auto* layout = new QVBoxLayout(&dialog);
     auto* combo = new QComboBox(&dialog); combo->setObjectName(QStringLiteral("moveTarget")); combo->setAccessibleName(QStringLiteral("Новый родитель группы")); populateGroups(*combo, *app_.model()); layout->addWidget(combo);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog); buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("Переместить")); buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена")); layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    if (dialog.exec() == QDialog::Accepted && ready() && app_.generation() == generation) commit([&](auto& model) { return model.moveNode(id, combo->currentData().value<model::Id>()); });
+    if (dialog.exec() == QDialog::Accepted && ready() && !collectionActive_
+        && app_.generation() == generation && selectedNode() == id)
+        commit([&](auto& model) { return model.moveNode(id, combo->currentData().value<model::Id>()); });
 }
 void MainWindow::deleteSelected() {
+    if (collectionActive_) return;
     if (selectedEntries().size() > 1) { bulkDelete(); return; }
     if (!ready() || editing_) return; const auto id = selectedEntry(); if (id.isNull()) { report(QStringLiteral("Выберите запись для удаления.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
@@ -1272,10 +1571,11 @@ void MainWindow::deleteSelected() {
         && ready() && app_.generation() == generation) commitEntry([&](auto& model) { return model.removeEntry(id); }, id);
 }
 void MainWindow::deleteSelectedNode() {
-    if (!ready() || editing_) return; const auto id = selectedNode(); if (id.isNull()) { report(QStringLiteral("Выберите проект или группу.")); return; }
+    if (!ready() || editing_ || collectionActive_) return; const auto id = selectedNode(); if (id.isNull()) { report(QStringLiteral("Выберите проект или группу.")); return; }
     QScopedValueRollback guard(editing_, true); const auto generation = app_.generation();
     if (QMessageBox::question(this, QStringLiteral("Удаление проекта/группы"), QStringLiteral("Удалить выбранный проект или группу?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes
-        && ready() && app_.generation() == generation) commit([&](auto& model) { return model.removeNode(id); });
+        && ready() && !collectionActive_ && app_.generation() == generation && selectedNode() == id)
+        commit([&](auto& model) { return model.removeNode(id); });
 }
 void MainWindow::exportVault() {
     if (!ready() || editing_) return;
@@ -1286,8 +1586,9 @@ void MainWindow::exportVault() {
     const auto generation = app_.generation();
     if (!VerifyDialog::verify(app_, this, QStringLiteral("защищённый экспорт")) || !ready() || app_.generation() != generation) return;
     ExportDialog dialog(this, QStringLiteral("Защищённый экспорт хранилища"),
-        QStringLiteral("Экспорт шифруется отдельным паролем, который не связан с мастер-паролем. "
-                       "Полученный файл можно переносить на другие компьютеры; для восстановления понадобятся только файл и этот пароль. Формат данных экспорта — v%1: прежняя версия программы его не откроет. Локальный файл при экспорте не обновляется.").arg(model::VaultModel::CurrentVersion),
+        QStringLiteral("Файл содержит основное хранилище и записи коллекции агента. "
+                       "Для переноса на другой компьютер понадобятся этот файл и отдельный пароль экспорта. "
+                       "Для импорта нужна версия TokenBucket с поддержкой переноса коллекции. После импорта выпустите новый токен для доступа агента."),
         QStringLiteral("&Пароль защищённого экспорта (12–1024 байта UTF-8):"));
     if (dialog.exec() != QDialog::Accepted || !ready() || app_.generation() != generation) return;
     SecureBytes password(dialog.password()); dialog.clearSecrets();
@@ -1296,6 +1597,7 @@ void MainWindow::exportVault() {
     QString error;
     const QByteArray bytes = app_.exportContainer(password.bytes(), &error);
     password.clear();
+    if (!ready() || app_.generation() != generation) return;
     if (bytes.isEmpty()) { QMessageBox::critical(this, QStringLiteral("TokenBucket"), error); return; }
     if (!store::realFileOps().writeAll(path, bytes)) {
         QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось записать файл экспорта. Если файл существует, выберите другое имя."));
@@ -1313,15 +1615,19 @@ void MainWindow::importVault() {
 #endif
     const auto generation = app_.generation();
     if (QMessageBox::question(this, QStringLiteral("Импорт хранилища"),
-            QStringLiteral("Импорт заменит текущее хранилище новым без слияния. Продолжить?"),
+            QStringLiteral("Импорт заменит основное хранилище. Полный экспорт также заменит все записи коллекции агента, даже если экспортированная коллекция пуста. "
+                           "При импорте старого файла без коллекции её текущие записи сохранятся. Действующий токен агента будет отозван. Продолжить?"),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
     const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Импорт из файла"), {}, QStringLiteral("TokenBucket (*.tb);;Все файлы (*)"));
     if (path.isEmpty() || !ready() || app_.generation() != generation) return;
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly) || file.size() > container::MaxFileBytes) {
-        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось открыть файл импорта или он больше 80 МиБ.")); return;
+    if (!file.open(QIODevice::ReadOnly) || file.size() > container::MaxTransferFileBytes) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось открыть файл импорта или файл слишком велик.")); return;
     }
-    const QByteArray bytes = file.read(container::MaxFileBytes + 1);
+    const QByteArray bytes = file.read(container::MaxTransferFileBytes + 1);
+    if (file.error() != QFileDevice::NoError || !file.atEnd() || bytes.size() != file.size()) {
+        QMessageBox::critical(this, QStringLiteral("TokenBucket"), QStringLiteral("Не удалось полностью прочитать файл импорта.")); return;
+    }
     file.close();
     QInputDialog fileDialog(this);
     fileDialog.setWindowTitle(QStringLiteral("Импорт хранилища"));
@@ -1419,7 +1725,7 @@ void MainWindow::changeMasterPassword() {
     else statusBar()->showMessage(QStringLiteral("Мастер-пароль изменён."), 5000);
 }
 bool MainWindow::moveNodeTo(model::Id node, model::Id newParent) {
-    if (!ready() || node == newParent || newParent.isNull()) { refreshAll(); return false; }
+    if (!ready() || collectionActive_ || node == newParent || newParent.isNull()) { refreshAll(); return false; }
     return commit([&](auto& model) { return model.moveNode(node, newParent); });
 }
 void MainWindow::importFromCsvKeePass() {
@@ -1496,23 +1802,39 @@ int MainWindow::applyImport(const QByteArray& bytes, bool keepassXml, QString* e
     return added;
 }
 void MainWindow::treeMenu(const QPoint& pos) {
-    const auto item = tree_->itemAt(pos);
-    if (item) tree_->setCurrentItem(item);
+    auto* item = tree_->itemAt(pos);
+    if (isCollectionProject(item)) return;
+    const auto id = item ? item->data(0, Qt::UserRole).value<model::Id>() : model::Id{};
+    if (item) {
+        tree_->setCurrentItem(item);
+        if (collectionActive_ || id.isNull() || selectedNode() != id) return;
+    }
     QMenu menu(this);
     menu.addAction(QStringLiteral("Новый проект…"), this, &MainWindow::addProject);
     if (item) {
-        menu.addAction(QStringLiteral("Новая группа…"), this, &MainWindow::addGroup);
-        menu.addAction(QStringLiteral("Переименовать…"), this, &MainWindow::renameSelectedNode);
-        if (!app_.model()->nodes().value(selectedNode()).parent.isNull())
-            menu.addAction(QStringLiteral("Переместить группу…"), this, &MainWindow::moveSelectedNode);
+        const auto generation = app_.generation();
+        const auto bound = [this, id, generation](auto action) {
+            return [this, id, generation, action] {
+                if (ready() && !collectionActive_ && app_.generation() == generation &&
+                    selectedNode() == id && app_.model()->nodes().contains(id)) (this->*action)();
+            };
+        };
+        menu.addAction(QStringLiteral("Новая группа…"), this, bound(&MainWindow::addGroup));
+        menu.addAction(QStringLiteral("Переименовать…"), this, bound(&MainWindow::renameSelectedNode));
+        if (!app_.model()->nodes().value(id).parent.isNull())
+            menu.addAction(QStringLiteral("Переместить группу…"), this, bound(&MainWindow::moveSelectedNode));
         menu.addSeparator();
-        menu.addAction(QStringLiteral("Удалить"), this, &MainWindow::deleteSelectedNode);
+        menu.addAction(QStringLiteral("Удалить"), this, bound(&MainWindow::deleteSelectedNode));
     }
     menu.exec(tree_->viewport()->mapToGlobal(pos));
 }
 void MainWindow::listMenu(const QPoint& pos) {
     const auto item = list_->itemAt(pos);
     if (!item || !ready()) return;
+    if (collectionActive_) {
+        activatePersonal();
+        if (collectionActive_) return;
+    }
     if (item->isSelected() && list_->selectedItems().size() > 1) {
         QMenu menu(this);
         menu.addAction(QStringLiteral("Переместить в группу…"), this, &MainWindow::bulkMoveDialog);
@@ -1573,26 +1895,77 @@ void MainWindow::copyEntryToCollection(model::Id id,quint64 generation) {
     const auto* entry=core->model()->entry(id);
     if(!entry) return;
     const auto type=entry->type;
-    QInputDialog dialog(this);
+    QString sourceProject;
+    auto group = entry->groupId;
+    for (int depth = 0; !group.isNull() && depth < model::VaultModel::MaxDepth; ++depth) {
+        const auto node = core->model()->nodes().constFind(group);
+        if (node == core->model()->nodes().cend()) break;
+        if (node->parent.isNull()) sourceProject = node->name;
+        group = node->parent;
+    }
+    QDialog dialog(this);
     dialog.setObjectName("collectionItemName");
     dialog.setWindowTitle(QStringLiteral("Отдельная копия для агента"));
-    dialog.setLabelText(QStringLiteral("Агент сможет читать эту копию по токену даже после блокировки. "
-                                      "Изменение или удаление исходной записи не изменит копию.\n\nУникальное имя в коллекции:"));
-    dialog.setTextValue(type==model::EntryType::PlainValue && !entry->parameterName.isEmpty()?entry->parameterName:entry->title);
-    dialog.setOkButtonText(QStringLiteral("Добавить копию"));
-    dialog.setCancelButtonText(QStringLiteral("Отмена"));
-    if(dialog.exec()!=QDialog::Accepted || !allowed()
-        || !authorizeEntry(*core,id,this,true) || !allowed()) return;
-    entry=core->model()->entry(id);
-    if(!entry || entry->type!=type) return;
-    const auto* secret=paste::fieldValue(*entry,paste::Field::Secret);
-    SecureBytes value(secret?secret->toUtf8():type==model::EntryType::SshKey
-        ?QByteArray(entry->sshPrivate.constData(),entry->sshPrivate.size()):QByteArray());
-    const auto error=core->copyToCollection(dialog.textValue(),value.bytes());
-    value.clear();
-    if(!allowed()) return;
-    if(!error.isEmpty()) self->report(error);
-    else self->statusBar()->showMessage(QStringLiteral("Отдельная копия добавлена в коллекцию агента."),5000);
+    dialog.resize(460, 200);
+    auto* form = new QFormLayout(&dialog);
+    auto* hint = new QLabel(QStringLiteral("Агент сможет читать эту копию по токену даже после блокировки. "
+                                           "Изменения исходной записи не затронут копию."), &dialog);
+    hint->setWordWrap(true);
+    form->addRow(hint);
+    auto* project = new QLineEdit(sourceProject, &dialog);
+    project->setObjectName("collectionCopyProject");
+    project->setPlaceholderText(QStringLiteral("Без проекта"));
+    form->addRow(QStringLiteral("&Проект коллекции"), project);
+    auto* name = new QLineEdit(type==model::EntryType::PlainValue && !entry->parameterName.isEmpty()
+        ? entry->parameterName : entry->title, &dialog);
+    name->setObjectName("collectionCopyName");
+    form->addRow(QStringLiteral("&Имя записи"), name);
+    QCheckBox* decode = nullptr;
+    if (type == model::EntryType::ApiToken && entry->reverify && entry->note == Application::collectionBinaryNote()) {
+        decode = new QCheckBox(QStringLiteral("Декодировать Base64 в исходные байты"), &dialog);
+        decode->setObjectName("collectionCopyDecodeBase64");
+        decode->setChecked(true);
+        form->addRow(decode);
+    }
+    auto* status = new QLabel(&dialog);
+    status->setTextFormat(Qt::PlainText);
+    status->setWordWrap(true);
+    form->addRow(status);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Save)->setText(QStringLiteral("Добавить копию"));
+    buttons->button(QDialogButtonBox::Save)->setObjectName("collectionCopySave");
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("Отмена"));
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        if (!allowed() || !authorizeEntry(*core,id,&dialog,true) || !allowed() || !dialog.isVisible()) return;
+        const auto* current = core->model()->entry(id);
+        if (!current || current->type != type) return;
+        const auto* secret = paste::fieldValue(*current,paste::Field::Secret);
+        SecureBytes value(secret ? secret->toUtf8() : type==model::EntryType::SshKey
+            ? QByteArray(current->sshPrivate.constData(),current->sshPrivate.size()) : QByteArray());
+        if (decode && decode->isChecked()) {
+            auto result = QByteArray::fromBase64Encoding(value.bytes(), QByteArray::AbortOnBase64DecodingErrors);
+            SecureBytes decoded(std::move(result.decoded));
+            const SecureBytes canonical(decoded.bytes().toBase64());
+            if (!current->reverify || current->note != Application::collectionBinaryNote() ||
+                !result || canonical.bytes() != value.bytes()) {
+                status->setText(QStringLiteral("Значение не является корректным Base64. Проверьте исходную запись."));
+                return;
+            }
+            value = std::move(decoded);
+        }
+        const auto error = core->copyToCollection(project->text(), name->text(), value.bytes());
+        if (!allowed()) return;
+        if (!error.isEmpty()) status->setText(error);
+        else dialog.accept();
+    });
+    name->selectAll();
+    name->setFocus();
+    if (dialog.exec() == QDialog::Accepted && allowed()) {
+        self->statusBar()->showMessage(QStringLiteral("Отдельная копия добавлена в коллекцию агента."),5000);
+        if (self->collectionAccess_ == generation) self->collection_->refresh();
+    }
 }
 void MainWindow::toggleFavorite() {
     const auto id = selectedEntry();
@@ -1865,12 +2238,41 @@ void MainWindow::removeExportedVariables() {
     else QMessageBox::information(this,QStringLiteral("TokenBucket"),message);
 }
 #endif
+bool MainWindow::eventFilter(QObject* watched,QEvent* event) {
+    if ((event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest || event->type() == QEvent::FontChange)
+        && workspaceLists_ && watched == workspaceLists_->parentWidget())
+        updateWorkspaceLayout();
+    return QMainWindow::eventFilter(watched,event);
+}
+void MainWindow::updateWorkspaceLayout() {
+    auto* agent = collection_->listWidget();
+    auto* entries = agent->findChild<QTreeWidget*>("collectionItems");
+    const auto* add = agent->findChild<QPushButton*>("collectionAdd");
+    const auto* reload = agent->findChild<QPushButton*>("collectionReload");
+    if (entries)
+        entries->setMinimumHeight(2 * entries->fontMetrics().lineSpacing() + 2 * entries->frameWidth() + 8);
+    list_->setMinimumHeight(2 * list_->fontMetrics().lineSpacing() + 2 * list_->frameWidth() + 8);
+    right_->setMinimumHeight(7 * right_->fontMetrics().lineSpacing() + 12);
+
+    const int personalWidth = resultsTabs_->currentWidget() == registry_
+        ? resultsTabs_->minimumSizeHint().width() : resultsTabs_->tabBar()->minimumSizeHint().width();
+    // The collection action row already wraps, so each button must fit in the column on its own.
+    const int agentWidth = add && reload ? qMax(add->sizeHint().width(), reload->sizeHint().width()) : 0;
+    const bool stacked = workspaceLists_->parentWidget()->width() < personalWidth + agentWidth + workspaceLists_->spacing();
+    const auto direction = stacked ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight;
+    if (workspaceLists_->direction() != direction) workspaceLists_->setDirection(direction);
+    const int personalStretch = stacked ? 1 : qMax(1, personalWidth);
+    const int agentStretch = stacked ? 1 : qMax(1, agentWidth);
+    if (workspaceLists_->stretch(0) != personalStretch) workspaceLists_->setStretch(0, personalStretch);
+    if (workspaceLists_->stretch(1) != agentStretch) workspaceLists_->setStretch(1, agentStretch);
+}
 void MainWindow::resizeEvent(QResizeEvent* event) {
-    QMainWindow::resizeEvent(event); narrow_ = width() < 720;
-    if (auto* central = centralWidget()) central->layout()->setSpacing(narrow_ ? 7 : 14);
-    if (right_) right_->setVisible(!narrow_);
-    if (headerLayout_) headerLayout_->setDirection(width() < 960 ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
-    if (filterLayout_) filterLayout_->setDirection(width() < 1240 ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+    QMainWindow::resizeEvent(event);
+    if (headerLayout_) {
+        const int toolbarWidth=search_->minimumWidth()+headerLayout_->itemAt(1)->minimumSize().width()+headerLayout_->spacing();
+        headerLayout_->setDirection(centralWidget()->contentsRect().width()-20 < toolbarWidth
+            ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+    }
 }
 void MainWindow::requestExit() { exiting_ = true; close(); }
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -1885,7 +2287,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 void MainWindow::popupQuickPanel() {
 #ifdef Q_OS_WIN
-    if (hotkey_) hotkey_->popupPanel();
+    if (hotkey_ && !collectionActive_) hotkey_->popupPanel();
 #endif
 }
 void MainWindow::applyIdleTimeout(int minutes) {

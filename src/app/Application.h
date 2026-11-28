@@ -1,6 +1,8 @@
 #pragma once
 #include <QObject>
 #include <QLockFile>
+#include <QStringList>
+#include <QMap>
 #include <functional>
 #include <memory>
 #include <atomic>
@@ -59,6 +61,20 @@ public:
     QString issueCollectionToken(SecureBytes& token);
     QString revokeCollectionToken();
     QString copyToCollection(const QString& name,QByteArrayView value);
+    QString listCollection(QStringList& names) const;
+    QString readCollection(const QString& name,SecureBytes& value) const;
+    QString updateCollection(const QString& name,QByteArrayView original,const QString& nextName,QByteArrayView value);
+    QString deleteCollection(const QString& name,QByteArrayView original);
+    QString listCollection(QMap<QString,QStringList>& projects) const;
+    QString copyToCollection(const QString& project,const QString& name,QByteArrayView value);
+    QString readCollection(const QString& project,const QString& name,SecureBytes& value) const;
+    QString updateCollection(const QString& project,const QString& name,QByteArrayView original,
+                             const QString& nextProject,const QString& nextName,QByteArrayView value);
+    QString deleteCollection(const QString& project,const QString& name,QByteArrayView original);
+    QString transferFromCollection(QString project,QString name,QByteArrayView original,
+                                   model::Id destination,const QString& newRoot,bool move);
+    static QString collectionBinaryNote();
+    static bool collectionText(QByteArrayView bytes,QString& text);
     bool schemaUpgradeRequired() const;
     bool schemaUpgradeApproved() const {return gate_==Gate::Ready && upgradeApproval_ && *upgradeApproval_==generation();}
     bool approveSchemaUpgrade(QString* error);
@@ -73,7 +89,7 @@ public:
     bool switchToHello(QString* err);
 #endif
     model::VaultModel* model() { return &model_; }
-    quint64 generation() const { return generation_.load(); } // растёт на каждой lock(): сверка для асинхронных проверок
+    quint64 generation() const { return generation_.load(); } // меняется при блокировке и замене открытого хранилища
     QString storePathForTest() const { return store_.mainPath(); }
 #ifdef Q_OS_WIN
     bool createHelloVault(QString* err, void* hwnd = nullptr);
@@ -98,9 +114,12 @@ private:
     // GUI-потоке: adopt=true — операция переводит хранилище в Ready (создание/
     // разблокировка/импорт/смена режима), false — только сохранение поверх текущего.
     // Поколение сверяется до применения: результат отменённой операции выбрасывается.
-    bool execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err);
-    bool storeCandidate(Outcome& result,quint64 expected);
+    bool execute(std::function<void(Outcome&,quint64)> job, Mode mode, bool adopt, QString* err,
+                 model::VaultModel* savedModel=nullptr);
+    bool saveModel(model::VaultModel* candidate,QString* err);
+    bool storeCandidate(Outcome& result,quint64 expected,std::optional<QByteArrayView> replacement={});
     QString collectionDirectory() const;
+    QString withCollectionOwner(const std::function<QString(const QString&,const SecureKey&)>& operation) const;
     bool canStart(Gate expected, QString* err) const;
     store::VaultStore store_;
     model::VaultModel model_;

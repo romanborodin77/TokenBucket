@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(TokenBucket VERSION 1.0.0 LANGUAGES CXX)
+project(TokenBucket VERSION 1.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Исходники хранятся в UTF-8 без BOM: без этого флага MSVC читает их в системной
@@ -33,6 +33,7 @@ add_library(tokenbucket_core STATIC
   src/ui/SetupDialog.cpp
   src/ui/UnlockDialog.cpp
   src/ui/EntryEditDialog.cpp
+  src/ui/CollectionDialog.cpp
   src/ui/MainWindow.cpp
   src/ui/SettingsDialog.cpp
   src/ui/SessionFlow.cpp

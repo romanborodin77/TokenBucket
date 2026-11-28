@@ -1,7 +1,7 @@
 #pragma once
 #include <QWidget>
 #include "../model/Types.h"
-class QTreeView; class QPushButton;
+class QTreeView; class QPushButton; class QHeaderView;
 namespace tb {class Application;}
 namespace tb::ui {
 class RegistryRowsModel;
@@ -14,6 +14,7 @@ public:
     model::Id currentEntry() const;
     void selectEntry(model::Id);
     void refresh();
+    QHeaderView* header() const;
 signals:
     void currentEntryChanged();
     void entryActivated(model::Id);

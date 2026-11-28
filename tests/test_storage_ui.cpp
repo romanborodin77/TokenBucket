@@ -216,19 +216,21 @@ private slots:
             app.lock(); QVERIFY(app.unlock(writer==3?QByteArray("valid-password"):QByteArray("changed-password"),&error)); QCOMPARE(app.model()->decodedVersion(),model::VaultModel::CurrentVersion);
         }
     }
-    void legacyExportIsV4WithoutChangingLocalFile() {
+    void legacyExportIncludesCollectionWithoutChangingLocalFile() {
         QTemporaryDir dir; const auto bytes=legacyFile(); const auto path=dir.filePath("vault.tb"); QVERIFY(store::realFileOps().writeAll(path,bytes)); Application app(dir.path()); QString error; QVERIFY(app.unlock("valid-password",&error));
         QSettings prefs(dir.filePath("ui.ini"),QSettings::IniFormat),run(dir.filePath("run.ini"),QSettings::IniFormat); ui::MainWindow window(app,nullptr,&prefs,&run,[] {return true;}); const auto output=dir.filePath("export.tb");
         const bool nativeDisabled=QApplication::testAttribute(Qt::AA_DontUseNativeDialogs); QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,true); const auto restore=qScopeGuard([&] {QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,nativeDisabled);});
         bool warned=false,fileSeen=false,timedOut=false; QTimer driver; driver.setInterval(10); connect(&driver,&QTimer::timeout,&window,[&] {
             auto* modal=QApplication::activeModalWidget();
             if(auto* auth=qobject_cast<QInputDialog*>(modal)) {auth->setTextValue("valid-password"); auth->accept();}
-            else if(auto* password=qobject_cast<ui::ExportDialog*>(modal)) {for(auto* label:password->findChildren<QLabel*>()) warned|=label->text().contains(QString("v%1").arg(model::VaultModel::CurrentVersion)); password->findChild<QLineEdit*>("exportPassword")->setText("export-password"); password->findChild<QLineEdit*>("confirmExportPassword")->setText("export-password"); password->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();}
+            else if(auto* password=qobject_cast<ui::ExportDialog*>(modal)) {for(auto* label:password->findChildren<QLabel*>()) warned|=label->text().contains(QStringLiteral("записи коллекции агента")); password->findChild<QLineEdit*>("exportPassword")->setText("export-password"); password->findChild<QLineEdit*>("confirmExportPassword")->setText("export-password"); password->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();}
             else if(auto* file=qobject_cast<QFileDialog*>(modal);file && !fileSeen) {fileSeen=true; file->selectFile(output); QMetaObject::invokeMethod(file,"accept",Qt::QueuedConnection);}
         });
         QTimer watchdog; watchdog.setSingleShot(true); connect(&watchdog,&QTimer::timeout,&window,[&] {timedOut=true; app.lock();}); driver.start(); watchdog.start(8000); window.exportVault(); driver.stop(); watchdog.stop();
         QVERIFY(!timedOut); QVERIFY(warned); QVERIFY(fileSeen); QFile main(path),file(output); QVERIFY(main.open(QIODevice::ReadOnly)); QCOMPARE(main.readAll(),bytes); QVERIFY(app.schemaUpgradeRequired());
-        QVERIFY(file.open(QIODevice::ReadOnly)); const auto opened=container::openPassword(file.readAll(),"export-password"); QCOMPARE(opened.status,container::Status::Ok); QCOMPARE(QCborValue::fromCbor(opened.cbor).toMap().value(QStringLiteral("v")).toInteger(),model::VaultModel::CurrentVersion);
+        QVERIFY(file.open(QIODevice::ReadOnly)); const auto opened=container::openTransfer(file.readAll(),"export-password"); QCOMPARE(opened.status,container::Status::Ok);
+        const auto payload=container::transferPayload(opened.cbor); QVERIFY(payload && payload->collection.has_value());
+        QCOMPARE(QCborValue::fromCbor(payload->model.toByteArray()).toMap().value(QStringLiteral("v")).toInteger(),model::VaultModel::CurrentVersion);
     }
     void savedViewsCaptureApplyAndSurviveLock() {
         QTemporaryDir dir; Application app(dir.path()); QString error; QVERIFY(app.createPasswordVault("valid-password",&error));

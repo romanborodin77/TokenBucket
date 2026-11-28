@@ -12,6 +12,7 @@
 #include <QScopeGuard>
 #include <QCborMap>
 #include <QCborArray>
+#include <algorithm>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
@@ -40,6 +41,167 @@ class TestApp : public QObject {
         return container::packPassword("valid-password",QCborValue(root).toCbor(),nullptr);
     }
 private slots:
+    void reverseCollectionTransferCopiesMovesAndRejectsCollisions() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Application app(dir.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault("reverse-test-password",&error),qPrintable(error));
+        const auto binary=QByteArray::fromHex("efbbbf00ff0d0a");
+        SecureBytes value;
+        QCOMPARE(app.copyToCollection("source","shared",binary),QString());
+        QCOMPARE(app.copyToCollection("other-source","shared","different"),QString());
+        QCOMPARE(app.copyToCollection("source","empty",{}),QString());
+        QCOMPARE(app.transferFromCollection("source","shared",binary,{},"Imported",false),QString());
+        QCOMPARE(app.model()->entries().size(),1);
+        const auto copied=app.model()->entries().cbegin().value();
+        const auto destination=copied.groupId;
+        QCOMPARE(app.model()->nodes().value(destination).name,QString("Imported"));
+        QCOMPARE(copied.type,model::EntryType::ApiToken);
+        QVERIFY(copied.reverify && copied.note.contains("Base64"));
+        QCOMPARE(QByteArray::fromBase64(copied.token.toLatin1()),binary);
+        QCOMPARE(app.readCollection("source","shared",value),QString());
+        QCOMPARE(value.bytes(),binary);
+
+        QCOMPARE(app.transferFromCollection("source","shared",binary,{},"Imported",false),QString());
+        QCOMPARE(app.model()->nodes().size(),1);
+        QCOMPARE(app.model()->entries().size(),1);
+        QVERIFY(app.model()->entry(copied.id) && *app.model()->entry(copied.id)==copied);
+        const auto beforeCollision=readFile(app.storePathForTest());
+        QVERIFY(!app.transferFromCollection("other-source","shared","different",destination,{},true).isEmpty());
+        QCOMPARE(readFile(app.storePathForTest()),beforeCollision);
+        QCOMPARE(app.readCollection("other-source","shared",value),QString());
+        QCOMPARE(value.bytes(),QByteArray("different"));
+        QVERIFY(app.model()->entry(copied.id) && *app.model()->entry(copied.id)==copied);
+
+        QCOMPARE(app.transferFromCollection("source","shared",binary,destination,{},true),QString());
+        QVERIFY(!app.readCollection("source","shared",value).isEmpty());
+        QVERIFY(value.isEmpty());
+        QCOMPARE(app.transferFromCollection("source","empty",{},destination,{},true),QString());
+        QVERIFY(!app.readCollection("source","empty",value).isEmpty());
+        QCOMPARE(app.model()->entries().size(),2);
+        app.lock();
+        QVERIFY2(app.unlock("reverse-test-password",&error),qPrintable(error));
+        QVERIFY(app.model()->entry(copied.id) && *app.model()->entry(copied.id)==copied);
+        const auto records=app.model()->entries();
+        const auto empty=std::find_if(records.cbegin(),records.cend(),[](const auto& entry) {return entry.title=="empty";});
+        QVERIFY(empty!=records.cend());
+        QCOMPARE(empty->type,model::EntryType::ApiToken);
+        QVERIFY(empty->reverify && empty->token.isEmpty() && empty->note.isEmpty());
+    }
+
+    void reverseCollectionTransferRetainsSourcesOnInterruptedMoves() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        FaultOps ops;
+#ifdef Q_OS_WIN
+        Application app(dir.path(),nullptr,platform::hello::request,ops);
+#else
+        Application app(dir.path(),nullptr,ops);
+#endif
+        QString error;
+        QVERIFY2(app.createPasswordVault("reverse-test-password",&error),qPrintable(error));
+        SecureBytes value,token;
+        QCOMPARE(app.issueCollectionToken(token),QString());
+        QCOMPARE(app.copyToCollection("source","retry","saved"),QString());
+        QCOMPARE(app.copyToCollection("source","agent-race","original"),QString());
+        QCOMPARE(app.copyToCollection("source","locked","still here"),QString());
+
+        const auto before=readFile(app.storePathForTest());
+        ops.failWrite=true;
+        QVERIFY(!app.transferFromCollection("source","retry","saved",{},"Imported",true).isEmpty());
+        ops.failWrite=false;
+        QCOMPARE(readFile(app.storePathForTest()),before);
+        QVERIFY(app.model()->entries().isEmpty() && app.model()->nodes().isEmpty());
+        QCOMPARE(app.readCollection("source","retry",value),QString());
+        QCOMPARE(value.bytes(),QByteArray("saved"));
+
+        QLockFile lock(dir.filePath(QString::fromLatin1(collection::FileName)+".lock"));
+        bool held=false;
+        const auto blockDelete=connect(&app,&Application::busyChanged,&app,[&](bool busy) {
+            if (!busy) held=lock.tryLock();
+        });
+        const auto partial=app.transferFromCollection("source","retry","saved",{},"Imported",true);
+        disconnect(blockDelete);
+        QVERIFY(held && !partial.isEmpty());
+        lock.unlock();
+        QCOMPARE(app.model()->entries().size(),1);
+        const auto copyId=app.model()->entries().cbegin().key();
+        const auto destination=app.model()->entry(copyId)->groupId;
+        QCOMPARE(app.readCollection("source","retry",value),QString());
+        QCOMPARE(value.bytes(),QByteArray("saved"));
+        QCOMPARE(app.transferFromCollection("source","retry","saved",destination,{},true),QString());
+        QCOMPARE(app.model()->entries().size(),1);
+        QVERIFY(app.model()->entry(copyId));
+        QVERIFY(!app.readCollection("source","retry",value).isEmpty());
+
+        QString changed=QStringLiteral("Agent update was not attempted");
+        const auto agentRace=connect(&app,&Application::busyChanged,&app,[&](bool busy) {
+            if (!busy) changed=collection::execute(dir.path(),token.bytes(),"replace","agent-race","updated",value,"source");
+        });
+        const auto race=app.transferFromCollection("source","agent-race","original",destination,{},true);
+        disconnect(agentRace);
+        QCOMPARE(changed,QString());
+        QVERIFY(!race.isEmpty());
+        QCOMPARE(app.readCollection("source","agent-race",value),QString());
+        QCOMPARE(value.bytes(),QByteArray("updated"));
+        QCOMPARE(app.model()->entries().size(),2);
+        const auto saved=app.model()->entries();
+        const auto raced=std::find_if(saved.cbegin(),saved.cend(),[](const auto& entry) {return entry.title=="agent-race";});
+        QVERIFY(raced!=saved.cend());
+        QCOMPARE(raced->token,QString("original"));
+
+        const auto session=app.generation();
+        const auto lockAfterSave=connect(&app,&Application::busyChanged,&app,[&](bool busy) {
+            if (!busy) app.lock();
+        });
+        const auto locked=app.transferFromCollection("source","locked","still here",destination,{},true);
+        disconnect(lockAfterSave);
+        QVERIFY(!locked.isEmpty());
+        QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+        QVERIFY(app.generation()>session && app.model()->entries().isEmpty());
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read","locked",{},value,"source"),QString());
+        QCOMPARE(value.bytes(),QByteArray("still here"));
+        QVERIFY2(app.unlock("reverse-test-password",&error),qPrintable(error));
+        QCOMPARE(app.model()->entries().size(),3);
+        QCOMPARE(app.transferFromCollection("source","locked","still here",destination,{},true),QString());
+        QCOMPARE(app.model()->entries().size(),3);
+        QVERIFY(!app.readCollection("source","locked",value).isEmpty());
+    }
+
+    void ownerCollectionBeforeFirstToken() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Application app(dir.path());
+        QString error;
+        QVERIFY2(app.createPasswordVault("first-test-password",&error),qPrintable(error));
+        QStringList names{"stale"};
+        SecureBytes value,token;
+        const auto binary=QByteArray::fromHex("ff000d0a");
+        QCOMPARE(app.listCollection(names),QString());
+        QVERIFY(names.isEmpty());
+        QCOMPARE(app.copyToCollection("first",binary),QString());
+        QVERIFY2(app.switchToPassword("second-test-password",&error),qPrintable(error));
+        QCOMPARE(app.listCollection(names),QString());
+        QCOMPARE(names,QStringList{"first"});
+        QCOMPARE(app.readCollection("first",value),QString());
+        QCOMPARE(value.bytes(),binary);
+        QCOMPARE(app.updateCollection("first",value.bytes(),"renamed",binary),QString());
+        app.lock();
+        QVERIFY(!app.listCollection(names).isEmpty());
+        QVERIFY(!app.readCollection("renamed",value).isEmpty());
+        QVERIFY(!app.updateCollection("renamed",binary,"denied",{}).isEmpty());
+        QVERIFY(!app.deleteCollection("renamed",binary).isEmpty());
+        QVERIFY(names.isEmpty() && value.isEmpty());
+        QVERIFY2(app.unlock("second-test-password",&error),qPrintable(error));
+        QCOMPARE(app.issueCollectionToken(token),QString());
+        QCOMPARE(collection::execute(dir.path(),token.bytes(),"read","renamed",{},value),QString());
+        QCOMPARE(value.bytes(),binary);
+        QCOMPARE(app.deleteCollection("renamed",value.bytes()),QString());
+        QCOMPARE(app.listCollection(names),QString());
+        QVERIFY(names.isEmpty());
+    }
+
     void collectionSurvivesLockRestartAndPasswordChange() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -285,7 +447,12 @@ private slots:
         QVERIFY(store::realFileOps().writeAll(path,bytes)); Application app(dir.path()); QString error;
         QVERIFY(app.unlock("valid-password",&error)); const auto exported=app.exportContainer("export-password",&error); QVERIFY(!exported.isEmpty());
         QCOMPARE(readFile(path),bytes); QVERIFY(app.schemaUpgradeRequired()); QVERIFY(app.upgradeSafetyPath().isEmpty());
-        model::VaultModel decoded; QCOMPARE(decoded.fromCbor(container::openPassword(exported,"export-password").cbor,&error),model::VaultModel::ParseStatus::Ok);
+        auto opened=container::openTransfer(exported,"export-password");
+        QCOMPARE(opened.status,container::Status::Ok);
+        SecureBytes plain(std::move(opened.cbor));
+        const auto payload=container::transferPayload(plain.bytes()); QVERIFY(payload && payload->collection);
+        model::VaultModel decoded;
+        QCOMPARE(decoded.fromCbor(QByteArray::fromRawData(payload->model.data(),payload->model.size()),&error),model::VaultModel::ParseStatus::Ok);
         QCOMPARE(decoded.decodedVersion(),model::VaultModel::CurrentVersion); QVERIFY(!app.save(&error));
     }
     void lateModeSwitchKeepsActualHint_data() {
@@ -672,6 +839,13 @@ private slots:
         Application src(dir_.path() + "/export-src"); QString err;
         QVERIFY(src.createPasswordVault("пароль-источника", &err));
         QVERIFY(src.model()->addNode(QUuid::createUuid(), {}, "Проект A").isEmpty());
+        const auto binary=QByteArray::fromHex("ff000d0a");
+        QCOMPARE(src.copyToCollection("before",binary),QString());
+        QCOMPARE(src.updateCollection("before",binary,"binary",binary),QString());
+        QCOMPARE(src.copyToCollection("Project A","binary","grouped"),QString());
+        QCOMPARE(src.copyToCollection("empty",{}),QString());
+        SecureBytes sourceToken, value;
+        QCOMPARE(src.issueCollectionToken(sourceToken),QString());
         const QByteArray exported = src.exportContainer("пароль-экспорта-1", &err);
         QVERIFY(!exported.isEmpty()); QVERIFY(err.isEmpty());
         QCOMPARE(container::readMode(exported), container::ModePassword);
@@ -682,6 +856,190 @@ private slots:
         QCOMPARE(dst.model()->nodes().size(), 1);
         dst.lock(); QVERIFY(dst.unlock("новый-пароль-123", &err));
         QCOMPARE(dst.model()->nodes().size(), 1);
+        QStringList names;
+        QCOMPARE(dst.listCollection(names),QString());
+        QCOMPARE(names,(QStringList{"binary","empty"}));
+        QCOMPARE(dst.readCollection("binary",value),QString());
+        QCOMPARE(value.bytes(),binary);
+        QMap<QString,QStringList> groups;
+        QCOMPARE(dst.listCollection(groups),QString());
+        QCOMPARE(groups.value("Project A"),QStringList{"binary"});
+        QCOMPARE(dst.readCollection("Project A","binary",value),QString());
+        QCOMPARE(value.bytes(),QByteArray("grouped"));
+        QCOMPARE(dst.readCollection("empty",value),QString());
+        QVERIFY(value.isEmpty());
+        QCOMPARE(collection::execute(dir_.filePath("dst"),sourceToken.bytes(),"read","binary",{},value),QString("unauthorized"));
+        QCOMPARE(collection::execute(dir_.filePath("export-src"),sourceToken.bytes(),"read","binary",{},value),QString());
+        QCOMPARE(value.bytes(),binary);
+    }
+    void importCollectionPolicy_data() {
+        QTest::addColumn<int>("format");
+        QTest::newRow("full")<<0;
+        QTest::newRow("full-empty")<<1;
+        QTest::newRow("legacy-model-only")<<2;
+    }
+    void importCollectionPolicy() {
+        QFETCH(int,format);
+        QTemporaryDir source,destination;
+        Application src(source.path()), dst(destination.path()); QString error;
+        QVERIFY(src.createPasswordVault("source-password",&error));
+        QVERIFY(dst.createPasswordVault("destination-password",&error));
+        const auto newNode=QUuid::createUuid(), oldNode=QUuid::createUuid();
+        QCOMPARE(src.model()->addNode(newNode,{},"Imported"),QString());
+        QCOMPARE(dst.model()->addNode(oldNode,{},"Replaced"),QString());
+        if(format==0) QCOMPARE(src.copyToCollection("incoming","new"),QString());
+        QCOMPARE(dst.copyToCollection("old","existing"),QString());
+        SecureBytes oldToken, value, newToken;
+        QCOMPARE(dst.issueCollectionToken(oldToken),QString());
+        const auto bytes=format==2 ? container::packPassword("export-password",src.model()->toCbor(),nullptr)
+                                   : src.exportContainer("export-password",&error);
+        QVERIFY2(!bytes.isEmpty(),qPrintable(error));
+        const auto oldSession=dst.generation();
+        quint64 refreshedSession=oldSession;
+        connect(&dst,&Application::stateChanged,&dst,[&] {refreshedSession=dst.generation();});
+        QVERIFY2(dst.importContainer(bytes,"export-password","new-local-password",&error),qPrintable(error));
+        QCOMPARE(dst.generation(),oldSession+1);
+        QCOMPARE(refreshedSession,dst.generation());
+        QVERIFY(dst.model()->nodes().contains(newNode)); QVERIFY(!dst.model()->nodes().contains(oldNode));
+        QCOMPARE(collection::execute(destination.path(),oldToken.bytes(),"read","old",{},value),QString("unauthorized"));
+        dst.lock(); QVERIFY2(dst.unlock("new-local-password",&error),qPrintable(error));
+        QStringList names;
+        QCOMPARE(dst.listCollection(names),QString());
+        if(format==1) QVERIFY(names.isEmpty());
+        else {
+            const QString name=format==0 ? "incoming" : "old";
+            QCOMPARE(names,QStringList{name});
+            QCOMPARE(dst.issueCollectionToken(newToken),QString());
+            QCOMPARE(collection::execute(destination.path(),newToken.bytes(),"read",name,{},value),QString());
+            QCOMPARE(value.bytes(),format==0 ? QByteArray("new") : QByteArray("existing"));
+        }
+    }
+    void invalidTransferKeepsDestination() {
+        QTemporaryDir destination;
+        const auto path=destination.filePath("vault.tb");
+        const auto original=legacyV3();
+        QVERIFY(!original.isEmpty());
+        QVERIFY(store::ensurePrivateDir(destination.path()));
+        QVERIFY(store::realFileOps().writeAll(path,original));
+        Application dst(destination.path()); QString error;
+        QVERIFY(dst.unlock("valid-password",&error));
+        QVERIFY(dst.approveSchemaUpgrade(&error));
+        QCOMPARE(dst.copyToCollection("keep","existing"),QString());
+        SecureBytes token, value;
+        QCOMPARE(dst.issueCollectionToken(token),QString());
+        const auto collectionPath=destination.filePath(collection::FileName);
+        const auto originalCollection=readFile(collectionPath);
+        model::VaultModel model;
+        const auto valid=container::packTransfer("export-password",model.toCbor(),{});
+        auto opened=container::openTransfer(valid,"export-password");
+        QCOMPARE(opened.status,container::Status::Ok);
+        opened.cbor.chop(1); // authenticated envelope with a missing block byte
+        SecureBytes truncated(std::move(opened.cbor));
+        const auto malformed=container::packPassword("export-password",truncated.bytes(),nullptr);
+        const auto invalidEntries=container::packTransfer("export-password",model.toCbor(),"x");
+        const auto invalidModel=container::packTransfer("export-password","x",{});
+        QVERIFY(!malformed.isEmpty() && !invalidEntries.isEmpty() && !invalidModel.isEmpty());
+        QVERIFY(!dst.importContainer(valid,"wrong-password","new-local-password",&error));
+        for(const auto& rejected:{malformed,invalidEntries,invalidModel}) {
+            QVERIFY(!dst.importContainer(rejected,"export-password","new-local-password",&error));
+            QVERIFY(!error.isEmpty());
+        }
+        QCOMPARE(readFile(path),original);
+        QCOMPARE(readFile(collectionPath),originalCollection);
+        QCOMPARE(dst.gate(),Application::Gate::Ready);
+        QVERIFY(dst.upgradeSafetyPath().isEmpty()); QVERIFY(!QFile::exists(path+".bak"));
+        QCOMPARE(collection::execute(destination.path(),token.bytes(),"read","keep",{},value),QString());
+        QCOMPARE(value.bytes(),QByteArray("existing"));
+    }
+    void legacyImportRejectsUnownedCollection() {
+        QTemporaryDir destination; QString error;
+        auto path=destination.filePath("vault.tb");
+        {
+            Application app(destination.path());
+            QVERIFY(app.createPasswordVault("destination-password",&error));
+            QCOMPARE(app.copyToCollection("old","existing"),QString());
+        }
+        QVERIFY(QFile::remove(path));
+        const auto collectionPath=destination.filePath(collection::FileName);
+        const auto original=readFile(collectionPath);
+        QVERIFY(!original.isEmpty());
+        Application dst(destination.path());
+        QVERIFY(!dst.importContainer(legacyV3(),"valid-password","new-local-password",&error));
+        QVERIFY(!error.isEmpty());
+        QCOMPARE(dst.gate(),Application::Gate::NeedSetup);
+        QVERIFY(!QFile::exists(path));
+        QCOMPARE(readFile(collectionPath),original);
+    }
+    void transferCapacityExceedsLocalLimit() {
+        const QByteArray model(container::MaxPlainBytes+1,'m');
+        const QByteArray entries(collection::MaxSnapshotBytes+1,'e');
+        QVERIFY(container::packTransfer("export-password",model,{}).isEmpty());
+        QVERIFY(container::packTransfer("export-password","m",entries).isEmpty());
+        const auto modelBytes=QByteArrayView(model).first(container::MaxPlainBytes);
+        const auto collectionBytes=QByteArrayView(entries).first(collection::MaxSnapshotBytes);
+        const auto bytes=container::packTransfer("export-password",modelBytes,collectionBytes);
+        QCOMPARE(bytes.size(),container::MaxTransferFileBytes);
+        QCOMPARE(container::openPassword(bytes,"export-password").status,container::Status::TooLarge);
+        auto opened=container::openTransfer(bytes,"export-password");
+        QCOMPARE(opened.status,container::Status::Ok);
+        SecureBytes plain(std::move(opened.cbor));
+        const auto payload=container::transferPayload(plain.bytes()); QVERIFY(payload && payload->collection);
+        QVERIFY(payload->model==modelBytes); QVERIFY(*payload->collection==collectionBytes);
+    }
+    void lockOnExportCompletionCancelsBytes() {
+        QTemporaryDir dir; Application app(dir.path()); QString error;
+        QVERIFY(app.createPasswordVault("valid-password",&error));
+        connect(&app,&Application::busyChanged,&app,[&](bool busy) {if(!busy) app.lock();});
+        QVERIFY(app.exportContainer("export-password",&error).isEmpty());
+        QVERIFY(!error.isEmpty()); QCOMPARE(app.gate(),Application::Gate::NeedUnlock);
+    }
+    void interruptedTransfer_data() {
+        QTest::addColumn<int>("interruption");
+        QTest::newRow("rename-failed")<<0;
+        QTest::newRow("locked-before-commit")<<1;
+        QTest::newRow("locked-after-commit")<<2;
+    }
+    void interruptedTransfer() {
+        QFETCH(int,interruption);
+        QTemporaryDir source,destination;
+        Application src(source.path()); FaultOps ops;
+#ifdef Q_OS_WIN
+        Application dst(destination.path(),nullptr,platform::hello::request,ops);
+#else
+        Application dst(destination.path(),nullptr,ops);
+#endif
+        QString error;
+        QVERIFY(src.createPasswordVault("source-password",&error));
+        QVERIFY(dst.createPasswordVault("destination-password",&error));
+        QCOMPARE(src.copyToCollection("incoming","new"),QString());
+        QCOMPARE(dst.copyToCollection("old","existing"),QString());
+        SecureBytes token,value;
+        QCOMPARE(dst.issueCollectionToken(token),QString());
+        const auto transfer=src.exportContainer("export-password",&error);
+        QVERIFY2(!transfer.isEmpty(),qPrintable(error));
+        const auto path=dst.storePathForTest(), collectionPath=destination.filePath(collection::FileName);
+        const auto oldVault=readFile(path), oldCollection=readFile(collectionPath);
+        if(interruption==0) ops.failRenameCall=ops.renameCalls+2;
+        if(interruption==1) ops.beforeWrite=[&](const QString& to) {
+            if(to==path+".tmp") QMetaObject::invokeMethod(&dst,&Application::lock,Qt::BlockingQueuedConnection);
+        };
+        if(interruption==2) ops.afterRename=[&](const QString&,const QString& to) {
+            if(to==path) QMetaObject::invokeMethod(&dst,&Application::lock,Qt::BlockingQueuedConnection);
+        };
+        QVERIFY(!dst.importContainer(transfer,"export-password","new-local-password",&error));
+        QVERIFY(!error.isEmpty());
+        if(interruption==2) {
+            QCOMPARE(dst.gate(),Application::Gate::NeedUnlock);
+            QVERIFY(dst.unlock("new-local-password",&error));
+            QCOMPARE(dst.readCollection("incoming",value),QString());
+            QCOMPARE(value.bytes(),QByteArray("new"));
+            QCOMPARE(collection::execute(destination.path(),token.bytes(),"read","old",{},value),QString("unauthorized"));
+        } else {
+            QCOMPARE(readFile(path),oldVault);
+            QCOMPARE(readFile(collectionPath),oldCollection);
+            QCOMPARE(collection::execute(destination.path(),token.bytes(),"read","old",{},value),QString());
+            QCOMPARE(value.bytes(),QByteArray("existing"));
+        }
     }
     void wrongExportPasswordFails() {
         Application src(dir_.path() + "/export-src-2"); QString err;

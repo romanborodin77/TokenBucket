@@ -1,5 +1,6 @@
 #pragma once
 #include <QByteArray>
+#include <optional>
 #include "SecureBytes.h"
 namespace tb::container {
 // Упаковка/распаковка контейнера TBVK (формат — в начале Container.cpp).
@@ -11,6 +12,7 @@ enum class Status { Ok, BadFormat, Unsupported, WrongKey, TooLarge };
 constexpr uint8_t ModePassword = 1, ModeHello = 2;
 constexpr qsizetype MaxFileBytes  = 80LL * 1024 * 1024;
 constexpr qsizetype MaxPlainBytes = 64LL * 1024 * 1024;
+extern const qsizetype MaxTransferFileBytes;
 struct Opened {
     Opened() = default;
     Opened(Opened&&) = default;
@@ -31,6 +33,13 @@ QByteArray reseal(const QByteArray& fileBytes, const SecureKey& dataKey,
                   const unsigned char* cbor, qsizetype cborLen);
 QByteArray reseal(const QByteArray& fileBytes, const SecureKey& dataKey, const QByteArray& cbor);
 Opened openPassword(const QByteArray& fileBytes, const QByteArray& passwordUtf8);
+struct TransferPayload {
+    QByteArrayView model;
+    std::optional<QByteArrayView> collection; // отсутствует только в старом экспорте
+};
+QByteArray packTransfer(const QByteArray& passwordUtf8, QByteArrayView model, QByteArrayView collection);
+Opened openTransfer(const QByteArray& fileBytes, const QByteArray& passwordUtf8);
+std::optional<TransferPayload> transferPayload(QByteArrayView plain);
 #ifdef Q_OS_WIN
 QByteArray packHello(const unsigned char* cbor, qsizetype cborLen, SecureKey* outKey);
 QByteArray packHello(const QByteArray& cbor, SecureKey* outKey);

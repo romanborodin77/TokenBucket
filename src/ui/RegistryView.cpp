@@ -51,7 +51,14 @@ RegistryView::RegistryView(Application& app,QWidget* parent):QWidget(parent),app
     rows_=new RegistryRowsModel(app,this); tree_=new QTreeView(this); tree_->setObjectName("registryEntries"); tree_->setAccessibleName(QStringLiteral("Реестр ресурсов")); tree_->setModel(rows_);
     tree_->setRootIsDecorated(false); tree_->setSelectionMode(QAbstractItemView::SingleSelection); tree_->setSelectionBehavior(QAbstractItemView::SelectRows);
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers); tree_->setDragEnabled(false); tree_->setContextMenuPolicy(Qt::NoContextMenu); tree_->setUniformRowHeights(true);
-    tree_->header()->setSectionResizeMode(0,QHeaderView::Stretch); tree_->setColumnWidth(1,180); tree_->setColumnWidth(2,120); layout->addWidget(tree_,1);
+    header()->setStretchLastSection(false);
+    header()->setSectionResizeMode(QHeaderView::Interactive);
+    tree_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
+    const int em=fontMetrics().horizontalAdvance(QLatin1Char('M'));
+    constexpr int initialWidths[]={16,14,9,12,12};
+    for (int column=0; column<rows_->columnCount(); ++column)
+        tree_->setColumnWidth(column,qMax(header()->sectionSizeHint(column),em*initialWidths[column]));
+    layout->addWidget(tree_,1);
     auto* actions=new QHBoxLayout; copy_=new QPushButton(QStringLiteral("Копировать значение"),this); copy_->setObjectName("registryCopy"); source_=new QPushButton(QStringLiteral("Источник…"),this); source_->setObjectName("registrySource");
     actions->addWidget(copy_); actions->addWidget(source_); layout->addLayout(actions);
     connect(tree_,&QTreeView::clicked,this,[this] {if(!currentEntry().isNull()) emit entryActivated(currentEntry());});
@@ -65,6 +72,7 @@ RegistryView::RegistryView(Application& app,QWidget* parent):QWidget(parent),app
     connect(&app_,&Application::stateChanged,this,&RegistryView::refresh); connect(&app_,&Application::busyChanged,this,&RegistryView::updateActions);
     tree_->installEventFilter(this); tree_->viewport()->installEventFilter(this); refresh();
 }
+QHeaderView* RegistryView::header() const { return tree_->header(); }
 model::Id RegistryView::currentEntry() const {
     const auto rows = tree_->selectionModel()->selectedRows();
     return rows.isEmpty() ? model::Id{} : rows.first().data(Qt::UserRole).value<model::Id>();

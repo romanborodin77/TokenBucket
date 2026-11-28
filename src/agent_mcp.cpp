@@ -37,10 +37,14 @@ constexpr auto SshExecTool = "tokenbucket_ssh_exec";
 constexpr auto CollectionReadTool = "tokenbucket_collection_read";
 constexpr auto CollectionCreateTool = "tokenbucket_collection_create";
 constexpr auto CollectionReplaceTool = "tokenbucket_collection_replace";
+constexpr auto CollectionListTool = "tokenbucket_collection_list";
+constexpr auto CollectionMoveTool = "tokenbucket_collection_move";
 constexpr qsizetype CollectionNameBytes = 256;
 constexpr qsizetype CollectionValueBytes = 32 * 1024;
 constexpr qsizetype CollectionBase64Chars = 4 * ((CollectionValueBytes + 2) / 3);
-constexpr auto CollectionInstructions = "Read, create or replace one entry by exact name in the owner's separate agent collection.";
+constexpr qsizetype CollectionPageSize = 32;
+constexpr auto CollectionInstructions = "List projects and entry names, or read, create, replace and move entries in the owner's separate agent collection. "
+    "Names and projects are exact and case-sensitive. Reads and writes use the ungrouped collection when project is omitted.";
 constexpr auto Instructions = "For SSH use TokenBucket Settings > Security in the same Windows session. "
     "For general secret reads start TokenBucket with --agent-access. "
     "Wait for owner consent and verification. Do not retry automatically after a denial.";
@@ -61,13 +65,24 @@ QJsonArray toolList(bool collectionMode) {
     if (collectionMode) {
         const QJsonObject name{{"type", "string"}, {"minLength", 1}, {"maxLength", CollectionNameBytes},
             {"description", "Exact case-sensitive name, at most 256 UTF-8 bytes."}};
+        const QJsonObject project{{"type", "string"}, {"maxLength", CollectionNameBytes},
+            {"description", "Exact case-sensitive project, at most 256 UTF-8 bytes. Empty string selects ungrouped entries."}};
         const QJsonObject value{{"type", "string"}, {"maxLength", CollectionBase64Chars},
             {"description", "Canonical standard base64 for a value of at most 32 KiB."}};
-        const QJsonObject write{{"name", name}, {"value", value}};
+        const QJsonObject write{{"name", name}, {"project", project}, {"value", value}};
         return {
-            tool(CollectionReadTool, "Read one value as standard base64 from the agent collection.", {{"name", name}}, {"name"}),
+            tool(CollectionReadTool, "Read one value as standard base64 from the agent collection.",
+                {{"name", name}, {"project", project}}, {"name"}),
             tool(CollectionCreateTool, "Create one new entry in the agent collection.", write, {"name", "value"}, false, false),
-            tool(CollectionReplaceTool, "Replace the value of one existing entry in the agent collection.", write, {"name", "value"}, false, false)
+            tool(CollectionReplaceTool, "Replace the value of one existing entry in the agent collection.", write, {"name", "value"}, false, false),
+            tool(CollectionListTool, "List up to 32 projects when project is omitted, or up to 32 entry names in the specified project. "
+                "The empty project name denotes ungrouped entries. Continue with nextCursor when present.",
+                {{"project", project}, {"cursor", QJsonObject{{"type", "integer"}, {"minimum", 0},
+                    {"description", "Offset returned as nextCursor by a previous list of the same scope."}}}}, {}),
+            tool(CollectionMoveTool, "Move an entry to targetProject without changing its value or overwriting another entry. "
+                "Optional targetName renames it. An omitted source project means ungrouped.",
+                {{"name", name}, {"project", project}, {"targetProject", project}, {"targetName", name}},
+                {"name", "targetProject"}, false, false)
         };
     }
     QJsonArray fields;
@@ -183,19 +198,69 @@ QByteArray brokerRequest(const QJsonObject& params) {
     return encoded.size() <= MaxRequest ? encoded : QByteArray{};
 }
 
+bool validCollectionLabel(const QJsonValue& field, const QString& label, bool allowEmpty = false) {
+    return field.isString() && (allowEmpty || !label.isEmpty()) && label.size() <= CollectionNameBytes
+        && label.isValidUtf16() && label.toUtf8().size() <= CollectionNameBytes;
+}
+
+SecureBytes collectionStatusReply(const QString& error) {
+    if (!error.isEmpty()) return SecureBytes(errorReply(error.toLatin1().constData()));
+    return SecureBytes(QByteArrayLiteral("{\"ok\":true}\n"));
+}
+
+SecureBytes collectionListReply(const QString& dir, QByteArrayView token, const QJsonObject& args,
+                                const QJsonValue& projectArg, const QString& project) {
+    const auto cursor = args.value("cursor");
+    const auto first = cursor.isUndefined() ? 0 : cursor.toInteger(-1);
+    const bool scoped = !projectArg.isUndefined();
+    if (first < 0 || args.size() != int(scoped) + int(!cursor.isUndefined())) return {};
+
+    QStringList items;
+    const auto error = scoped ? collection::agentList(dir, token, project, items)
+                              : collection::agentListProjects(dir, token, items);
+    if (!error.isEmpty()) return collectionStatusReply(error);
+    QJsonArray page;
+    const auto start = std::min<qint64>(first, items.size());
+    const auto end = std::min<qint64>(start + CollectionPageSize, items.size());
+    for (auto i = start; i < end; ++i) page.append(items.at(i));
+    QJsonObject reply{{"ok", true}, {scoped ? "names" : "projects", page}};
+    if (end < items.size()) reply.insert("nextCursor", end);
+    return SecureBytes(QJsonDocument(reply).toJson(QJsonDocument::Compact) + '\n');
+}
+
 SecureBytes collectionReply(const QString& dir, QByteArrayView token, const QJsonObject& params) {
     const auto tool = params.value("name");
+    const auto arguments = params.value("arguments");
+    if (!arguments.isUndefined() && !arguments.isObject()) return {};
+    const auto args = arguments.toObject();
+    const auto projectArg = args.value("project");
+    const auto project = projectArg.toString();
+    const bool hasProject = !projectArg.isUndefined();
+    if (hasProject && !validCollectionLabel(projectArg, project, true)) return {};
+    if (tool == CollectionListTool) return collectionListReply(dir, token, args, projectArg, project);
+
+    const auto nameArg = args.value("name");
+    const auto name = nameArg.toString();
+    if (!validCollectionLabel(nameArg, name)) return {};
+    if (tool == CollectionMoveTool) {
+        const auto targetProjectArg = args.value("targetProject");
+        const auto targetProject = targetProjectArg.toString();
+        const auto targetNameArg = args.value("targetName");
+        const bool rename = !targetNameArg.isUndefined();
+        const auto targetName = rename ? targetNameArg.toString() : name;
+        if (args.size() != 2 + int(hasProject) + int(rename) || !validCollectionLabel(targetProjectArg, targetProject, true)
+            || (rename && !validCollectionLabel(targetNameArg, targetName))) return {};
+        return collectionStatusReply(collection::agentMove(dir, token, project, name, targetProject, targetName));
+    }
+
     QString op;
     if (tool == CollectionReadTool) op = QStringLiteral("read");
     else if (tool == CollectionCreateTool) op = QStringLiteral("create");
     else if (tool == CollectionReplaceTool) op = QStringLiteral("replace");
     else return {};
 
-    const auto args = params.value("arguments").toObject();
-    const auto name = args.value("name").toString();
     const bool read = tool == CollectionReadTool;
-    if (args.size() != (read ? 1 : 2) || name.isEmpty() || !name.isValidUtf16() ||
-        name.toUtf8().size() > CollectionNameBytes) return {};
+    if (args.size() != (read ? 1 : 2) + int(hasProject)) return {};
     SecureBytes value;
     if (!read) {
         const auto field = args.value("value");
@@ -230,9 +295,8 @@ SecureBytes collectionReply(const QString& dir, QByteArrayView token, const QJso
         if (!valid) return {};
     }
     SecureBytes result;
-    const auto error = tb::collection::execute(dir, token, op, name, value.bytes(), result);
-    if (!error.isEmpty()) return SecureBytes(errorReply(error.toLatin1().constData()));
-    if (!read) return SecureBytes(QByteArrayLiteral("{\"ok\":true}\n"));
+    const auto error = collection::execute(dir, token, op, name, value.bytes(), result, project);
+    if (!error.isEmpty() || !read) return collectionStatusReply(error);
 
     const SecureBytes encoded(result.bytes().toBase64());
     QByteArray reply;
